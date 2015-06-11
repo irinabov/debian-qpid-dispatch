@@ -1,0 +1,134 @@
+Source: qpid-dispatch
+Maintainer: Debian Middleware Maintainers <pkg-middleware-maintainers@lists.alioth.debian.org>
+Uploaders: Darryl L. Pierce <dpierce@redhat.com>
+Section: misc
+Priority: optional
+Build-Depends: debhelper (>= 9),
+               cmake,
+               python-dev,
+               libqpid-proton2-dev (>= 0.6)
+Standards-Version: 3.9.5
+Homepage: http://qpid.apache.org/components/dispatch-router
+
+Package: libqpid-dispatch0
+Architecture: any
+Depends: libqpid-proton2, ${shlibs:Depends}, ${misc:Depends}
+Pre-Depends: multiarch-support
+Multi-Arch: same
+Description: Qpid Dispatch Router library
+ The Dispatch router is an AMQP router that provides advanced interconnect
+ for AMQP. It is not a broker. It will never assume ownership of a message.
+ It will, however, propagate settlement and disposition across a network
+ such that delivery guarantees are met.
+ .
+ The router is meant to be deployed in topologies of multiple routers,
+ preferably with redundant paths. It uses link-state routing protocols and
+ algorithms (similar to OSPF or IS-IS from the networking world) to
+ calculate the best path from every point to every other point and to
+ recover quickly from failures. It does not need to use clustering for
+ high availability; rather, it relies on redundant paths to provide
+ continued connectivity in the face of system or network failure.
+ .
+ A messaging client can make a single AMQP connection into a messaging
+ bus built of Dispatch routers and, over that connection, exchange
+ messages with one or more message brokers, and at the same time exchange
+ messages directly with other endpoints without involving a broker at all.
+
+Package: libqpid-dispatch0-dev
+Provides: libqpid-dispatch-dev
+Replaces: libqpid-dispatch-dev (<< 0.2-4)
+Architecture: any
+Section: libdevel
+Depends: libqpid-dispatch0 (= ${binary:Version}), ${misc:Depends}
+Description: Development files for Qpid Dispatch
+ The Dispatch router is an AMQP router that provides advanced interconnect
+ for AMQP. It is not a broker. It will never assume ownership of a message.
+ It will, however, propagate settlement and disposition across a network
+ such that delivery guarantees are met.
+ .
+ The router is meant to be deployed in topologies of multiple routers,
+ preferably with redundant paths. It uses link-state routing protocols and
+ algorithms (similar to OSPF or IS-IS from the networking world) to
+ calculate the best path from every point to every other point and to
+ recover quickly from failures. It does not need to use clustering for
+ high availability; rather, it relies on redundant paths to provide
+ continued connectivity in the face of system or network failure.
+ .
+ A messaging client can make a single AMQP connection into a messaging
+ bus built of Dispatch routers and, over that connection, exchange
+ messages with one or more message brokers, and at the same time exchange
+ messages directly with other endpoints without involving a broker at all.
+
+Package: libqpid-dispatch-dev
+Architecture: any
+Section: libdevel
+Depends: libqpid-dispatch0-dev (= ${binary:Version}), ${misc:Depends}
+Description: Transitional development package for Qpid Dispatch
+ The Dispatch router is an AMQP router that provides advanced interconnect
+ for AMQP. It is not a broker. It will never assume ownership of a message.
+ It will, however, propagate settlement and disposition across a network
+ such that delivery guarantees are met.
+ .
+ The router is meant to be deployed in topologies of multiple routers,
+ preferably with redundant paths. It uses link-state routing protocols and
+ algorithms (similar to OSPF or IS-IS from the networking world) to
+ calculate the best path from every point to every other point and to
+ recover quickly from failures. It does not need to use clustering for
+ high availability; rather, it relies on redundant paths to provide
+ continued connectivity in the face of system or network failure.
+ .
+ A messaging client can make a single AMQP connection into a messaging
+ bus built of Dispatch routers and, over that connection, exchange
+ messages with one or more message brokers, and at the same time exchange
+ messages directly with other endpoints without involving a broker at all.
+
+
+Package: qdrouterd
+Architecture: any
+Depends: libqpid-dispatch0 (>= ${binary:Version}),
+         adduser,
+         ${shlibs:Depends}, ${misc:Depends}
+Description: Qpid Dispatch Router executable
+ The Dispatch router is an AMQP router that provides advanced interconnect
+ for AMQP. It is not a broker. It will never assume ownership of a message.
+ It will, however, propagate settlement and disposition across a network
+ such that delivery guarantees are met.
+ .
+ The router is meant to be deployed in topologies of multiple routers,
+ preferably with redundant paths. It uses link-state routing protocols and
+ algorithms (similar to OSPF or IS-IS from the networking world) to
+ calculate the best path from every point to every other point and to
+ recover quickly from failures. It does not need to use clustering for
+ high availability; rather, it relies on redundant paths to provide
+ continued connectivity in the face of system or network failure.
+ .
+ A messaging client can make a single AMQP connection into a messaging
+ bus built of Dispatch routers and, over that connection, exchange
+ messages with one or more message brokers, and at the same time exchange
+ messages directly with other endpoints without involving a broker at all.
+
+Package: qdstat
+Architecture: all
+Depends: python-qpid-proton (>= 0.6),
+         python,
+         libqpid-dispatch0 (>= ${binary:Version}),
+         ${misc:Depends}
+Description: Qpid Dispatch stat tool
+ The Dispatch router is an AMQP router that provides advanced interconnect
+ for AMQP. It is not a broker. It will never assume ownership of a message.
+ It will, however, propagate settlement and disposition across a network
+ such that delivery guarantees are met.
+ .
+ The router is meant to be deployed in topologies of multiple routers,
+ preferably with redundant paths. It uses link-state routing protocols and
+ algorithms (similar to OSPF or IS-IS from the networking world) to
+ calculate the best path from every point to every other point and to
+ recover quickly from failures. It does not need to use clustering for
+ high availability; rather, it relies on redundant paths to provide
+ continued connectivity in the face of system or network failure.
+ .
+ A messaging client can make a single AMQP connection into a messaging
+ bus built of Dispatch routers and, over that connection, exchange
+ messages with one or more message brokers, and at the same time exchange
+ messages directly with other endpoints without involving a broker at all.
+

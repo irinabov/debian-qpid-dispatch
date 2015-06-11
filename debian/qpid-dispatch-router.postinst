@@ -1,0 +1,23 @@
+#!/bin/sh
+ 
+set -e
+
+case "$1" in
+    "configure")
+
+        if ! getent passwd qpidd >/dev/null; then
+            adduser --system --quiet --home / --no-create-home \
+                --shell /bin/false --group --gecos "qpid daemon user" qpidd
+        fi
+
+        # Ensure configuration files are readable by the dedicated kanla user.
+        chgrp -R qpidd /etc/qpid-dispatch
+
+        # For upgrades: Ensure configuration files are not world-readable.
+        find /etc/qpid-dispatch -perm -o+r -type f -exec chmod 640 '{}' \;
+
+	exit 0
+	;;
+esac
+
+#DEBHELPER#

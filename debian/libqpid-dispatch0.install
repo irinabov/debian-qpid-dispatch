@@ -1,0 +1,5 @@
+usr/lib/*/libqpid-dispatch.so.0
+usr/lib/*/libqpid-dispatch.so.0.1
+usr/lib/qpid-dispatch
+usr/lib/python2.7/site-packages/qpid_dispatch
+usr/lib/python2.7/site-packages/qpid_dispatch_site.py

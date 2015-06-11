@@ -1,0 +1,23 @@
+#!/usr/bin/make -f
+
+DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+
+%:
+	dh $@ --with python2
+
+override_dh_auto_configure:
+	dh_auto_configure -- -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                             -DLIB_INSTALL_DIR:PATH=/usr/lib/${DEB_HOST_MULTIARCH} \
+			     -DUSE_SETUP_PY=0
+
+override_dh_auto_install:
+	dh_auto_install
+	mkdir -p debian/tmp/usr/share/man/man5
+	mkdir -p debian/tmp/usr/share/man/man8
+	cp doc/pre_built/man/man5/* debian/tmp/usr/share/man/man5
+	cp doc/pre_built/man/man8/* debian/tmp/usr/share/man/man8
+	chmod +x debian/tmp/usr/lib/qpid-dispatch/tests/ssl_certs/gencerts.sh
+
+override_dh_auto_test:
+	# TODO enable them
+

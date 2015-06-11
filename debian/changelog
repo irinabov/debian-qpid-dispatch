@@ -1,0 +1,59 @@
+qpid-dispatch (0.4-2qpid+trusty1) trusty; urgency=medium
+
+  * Bumped the release for the new Qpid testing PPA.
+
+ -- Darryl Pierce <dpierce@redhat.com>  Thu, 11 Jun 2015 17:04:49 -0400
+
+qpid-dispatch (0.4-1trusty+mcpierce1) trusty; urgency=medium
+
+  * Rebased on Dispatch 0.4.
+
+ -- Darryl L. Pierce <dpierce@redhat.com>  Tue, 21 Apr 2015 10:19:51 -0400
+
+qpid-dispatch (0.4-1precise+mcpierce1) precise; urgency=low
+
+  * Rebased on Dispatch 0.4.
+
+ -- Darryl L. Pierce <dpierce@redhat.com>  Tue, 21 Apr 2015 09:10:01 -0400
+
+qpid-dispatch (0.2-5trusty+mcpierce1) trusty; urgency=medium
+
+  * Removed the Conflicts line for libqpid-dispatch0-dev. 
+  * Added a transitional version of libqpid-dispatch-dev.
+  * Added version details to Provides/Replaces for libqpid-dispatch0-dev. 
+  * Updated libqpid-dispatch0-dev to replace libqpid-dispatch-dev.
+
+ -- Darryl L. Pierce <mcpierce@gmail.com>  Wed, 10 Sep 2014 10:33:54 -0400
+
+qpid-dispatch (0.2-4) unstable; urgency=low
+
+  * Updated dependencies to be on libqpid-proton2-dev.
+  * Renamed libqpid-dispatch-dev to libqpid-dispatch0-dev.
+  * Removed qdtest package.
+
+ -- Darryl L. Pierce <mcpierce@gmail.com>  Mon, 08 Sep 2014 09:40:10 -0400
+
+qpid-dispatch (0.2-3) unstable; urgency=medium
+
+  * Renamed qpid-dispatch-router package to qdrouterd.
+  * Renamed libqpid-dispatch0-dev package to libqpid-dispatch-dev.
+  * Changed dependency from libqpid-proton2-dev to libqpid-proton-dev.
+  * Added support for System V init scripts.
+  * DISPATCH-51: address semantics don't propagate from one router to another
+  * DISPATCH-63: Daemon operation is needed for SysV-style service execution
+
+ -- Darryl L. Pierce <mcpierce@gmail.com>  Mon, 28 Jul 2014 11:56:27 -0400
+
+qpid-dispatch (0.2-2) unstable; urgency=medium
+
+  * Overrode lintian errors:
+    * libqpid-dispatch0: script-not-executable
+    * qdtest: binary-without-manpage
+
+ -- Darryl L. Pierce <mcpierce@gmail.com>  Wed, 16 Jul 2014 09:56:33 -0400
+
+qpid-dispatch (0.2-1) unstable; urgency=medium
+
+  * Initial release (Closes: #737776)
+
+ -- Darryl L. Pierce <mcpierce@gmail.com>  Wed, 09 Jul 2014 14:18:17 -0400

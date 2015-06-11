@@ -1,0 +1,3 @@
+usr/lib/*/libqpid-dispatch.so
+usr/include/qpid/dispatch
+usr/include/qpid/dispatch.h
