@@ -6,13 +6,17 @@ Priority: optional
 Build-Depends: debhelper (>= 9),
                cmake,
                python-dev,
-               libqpid-proton2-dev (>= 0.6)
+               dh-python,
+               graphviz,
+               python-sphinx, 
+               doxygen,
+               libqpid-proton4-dev (>= 0.11.1)
 Standards-Version: 3.9.5
 Homepage: http://qpid.apache.org/components/dispatch-router
 
-Package: libqpid-dispatch0
+Package: libqpid-dispatch1
 Architecture: any
-Depends: libqpid-proton2, ${shlibs:Depends}, ${misc:Depends}
+Depends: libqpid-proton4, ${shlibs:Depends}, ${misc:Depends}
 Pre-Depends: multiarch-support
 Multi-Arch: same
 Description: Qpid Dispatch Router library
@@ -34,12 +38,12 @@ Description: Qpid Dispatch Router library
  messages with one or more message brokers, and at the same time exchange
  messages directly with other endpoints without involving a broker at all.
 
-Package: libqpid-dispatch0-dev
+Package: libqpid-dispatch1-dev
 Provides: libqpid-dispatch-dev
 Replaces: libqpid-dispatch-dev (<< 0.2-4)
 Architecture: any
 Section: libdevel
-Depends: libqpid-dispatch0 (= ${binary:Version}), ${misc:Depends}
+Depends: libqpid-dispatch1 (= ${binary:Version}), ${misc:Depends}
 Description: Development files for Qpid Dispatch
  The Dispatch router is an AMQP router that provides advanced interconnect
  for AMQP. It is not a broker. It will never assume ownership of a message.
@@ -62,7 +66,7 @@ Description: Development files for Qpid Dispatch
 Package: libqpid-dispatch-dev
 Architecture: any
 Section: libdevel
-Depends: libqpid-dispatch0-dev (= ${binary:Version}), ${misc:Depends}
+Depends: libqpid-dispatch1-dev (= ${binary:Version}), ${misc:Depends}
 Description: Transitional development package for Qpid Dispatch
  The Dispatch router is an AMQP router that provides advanced interconnect
  for AMQP. It is not a broker. It will never assume ownership of a message.
@@ -85,7 +89,7 @@ Description: Transitional development package for Qpid Dispatch
 
 Package: qdrouterd
 Architecture: any
-Depends: libqpid-dispatch0 (>= ${binary:Version}),
+Depends: libqpid-dispatch1 (>= ${binary:Version}),
          adduser,
          ${shlibs:Depends}, ${misc:Depends}
 Description: Qpid Dispatch Router executable
@@ -109,9 +113,9 @@ Description: Qpid Dispatch Router executable
 
 Package: qdstat
 Architecture: all
-Depends: python-qpid-proton (>= 0.6),
+Depends: python-qpid-proton (>= 0.11.1),
          python,
-         libqpid-dispatch0 (>= ${binary:Version}),
+         libqpid-dispatch1 (>= ${binary:Version}),
          ${misc:Depends}
 Description: Qpid Dispatch stat tool
  The Dispatch router is an AMQP router that provides advanced interconnect

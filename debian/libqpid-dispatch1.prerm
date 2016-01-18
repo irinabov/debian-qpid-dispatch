@@ -1,5 +1,5 @@
 #! /bin/sh
-# postrm script for libqpid-dispatch0
+# postrm script for libqpid-dispatch1
 #
 # see: dh_installdeb(1)
 
@@ -19,7 +19,7 @@ set -e
 
 case "$1" in
        purge|disappear|remove|upgrade|failed-upgrade|abort-install|abort-upgrade)
-		pyclean -p libqpid-dispatch0
+		pyclean -p libqpid-dispatch1
         	;;
 esac
 
