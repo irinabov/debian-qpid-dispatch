@@ -1,0 +1,307 @@
+#!/usr/bin/env python
+
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+import os
+from optparse import OptionGroup
+import sys
+import locale
+import socket
+import re
+from proton import Messenger, Message, Timeout
+import  qpid_dispatch_site
+from qpid_dispatch.management.client import Url, Node, Entity
+from qpid_dispatch_internal.management.qdrouter import QdSchema
+from qpid_dispatch_internal.tools import Display, Header, Sorter, YN, Commas, TimeLong
+from qpid_dispatch_internal.tools.command import connection_options, main, OptionParser, opts_ssl_domain, opts_url
+
+def parse_args(argv):
+    """ Set global variables for options, return arguments """
+
+    usage = "%prog [options]"
+
+    parser = OptionParser(usage=usage)
+
+    parser.add_option_group(connection_options(parser))
+
+    parser.add_option("-g", "--general", help="Show General Router Stats",  action="store_const", const="g",   dest="show")
+    parser.add_option("-c", "--connections", help="Show Connections",       action="store_const", const="c",   dest="show")
+    parser.add_option("-l", "--links", help="Show Router Links",            action="store_const", const="l",   dest="show")
+    parser.add_option("-n", "--nodes", help="Show Router Nodes",            action="store_const", const="n",   dest="show")
+    parser.add_option("-a", "--address", help="Show Router Addresses",      action="store_const", const="a",   dest="show")
+    parser.add_option("-m", "--memory", help="Show Broker Memory Stats",    action="store_const", const="m",   dest="show")
+
+    opts, args = parser.parse_args(args=argv)
+
+    if not opts.show:
+        parser.error("You must specify one of these options: -g, -c, -l, -n, -a, -m or -h.")
+
+    return opts, args
+
+
+class BusManager(Node):
+
+    schema = QdSchema()
+
+    def __init__(self, opts):
+        self.opts = opts
+        super(BusManager, self).__init__(
+            Node.connection(opts_url(opts), opts.router, timeout=opts.timeout,
+                            ssl_domain=opts_ssl_domain(opts)))
+
+    def query(self, entity_type):
+        return super(BusManager, self).query(entity_type).get_entities()
+
+    def displayConnections(self):
+        disp = Display(prefix="  ")
+        heads = []
+        heads.append(Header("state"))
+        heads.append(Header("host"))
+        heads.append(Header("container"))
+        heads.append(Header("sasl-mechanisms"))
+        heads.append(Header("role"))
+        heads.append(Header("dir"))
+
+        rows = []
+
+        objects = self.query('org.apache.qpid.dispatch.connection')
+
+        for conn in objects:
+            row = []
+            row.append(conn.state)
+            row.append(conn.host)
+            row.append(conn.container)
+            row.append(conn.sasl)
+            row.append(conn.role)
+            row.append(conn.dir)
+            rows.append(row)
+        title = "Connections"
+        dispRows = rows
+        disp.formattedTable(title, heads, dispRows)
+
+    def _addr_class(self, addr):
+        if not addr:
+            return "-"
+        if addr[0] == 'M' : return "mobile"
+        if addr[0] == 'R' : return "router"
+        if addr[0] == 'A' : return "area"
+        if addr[0] == 'L' : return "local"
+        if addr[0] == 'C' : return "link-route"
+        return "unknown: %s" % addr[0]
+
+    def _addr_text(self, addr):
+        if not addr:
+            return "-"
+        if addr[0] == 'M':
+            return addr[2:]
+        else:
+            return addr[1:]
+
+    def _addr_phase(self, addr):
+        if not addr:
+            return "-"
+        if addr[0] == 'M':
+            return addr[1]
+        return ''
+
+    def _identity_clean(self, identity):
+        if not identity:
+            return "-"
+        pos = identity.find('/')
+        if pos >= 0:
+            return identity[pos + 1:]
+        return identity
+
+    def displayGeneral(self):
+        disp = Display(prefix="  ")
+        heads = []
+        heads.append(Header("attr"))
+        heads.append(Header("value"))
+        rows = []
+
+        objects = self.query('org.apache.qpid.dispatch.router')
+
+        router = objects[0]
+        rows.append(('Mode',          router.mode))
+        rows.append(('Area',          router.area))
+        rows.append(('Router Id',     self._identity_clean(router.identity)))
+        rows.append(('Address Count', router.addrCount))
+        rows.append(('Link Count',    router.linkCount))
+        rows.append(('Node Count',    router.nodeCount))
+
+        title = "Router Statistics"
+        dispRows = rows
+        disp.formattedTable(title, heads, dispRows)
+
+    def displayRouterLinks(self):
+        disp = Display(prefix="  ")
+        heads = []
+        heads.append(Header("type"))
+        heads.append(Header("dir"))
+        heads.append(Header("rindex"))
+        heads.append(Header("class"))
+        heads.append(Header("address"))
+        heads.append(Header("phase"))
+        heads.append(Header("event-fifo"))
+        heads.append(Header("msg-fifo"))
+        rows = []
+
+        objects = self.query('org.apache.qpid.dispatch.router.link')
+
+        for link in objects:
+            row = []
+            row.append(link.linkType)
+            row.append(link.linkDir)
+            if link.linkType == "inter-router":
+                row.append(self._identity_clean(link.identity))
+            else:
+                row.append('-')
+            row.append(self._addr_class(link.owningAddr))
+            row.append(self._addr_text(link.owningAddr))
+            row.append(self._addr_phase(link.owningAddr))
+            row.append(link.eventFifoDepth)
+            if link.linkDir == 'out':
+                row.append(link.msgFifoDepth)
+            else:
+                row.append('-')
+            rows.append(row)
+        title = "Router Links"
+        dispRows = rows
+        disp.formattedTable(title, heads, dispRows)
+
+    def displayRouterNodes(self):
+        disp = Display(prefix="  ")
+        heads = []
+        heads.append(Header("router-id"))
+        heads.append(Header("next-hop"))
+        heads.append(Header("link"))
+        #heads.append(Header("neighbors"))
+        #heads.append(Header("valid-origins"))
+        rows = []
+
+        objects  = self.query('org.apache.qpid.dispatch.router.node')
+
+        for node in objects:
+            row = []
+            row.append(node.routerId)
+            if node.nextHop != None:
+                row.append(node.nextHop)
+                row.append('-')
+            else:
+                row.append('-')
+                row.append(node.routerLink)
+
+            #row.append('%r' % node.linkState)
+            #row.append('%r' % node.validOrigins)
+            rows.append(row)
+        title = "Router Nodes"
+        sort = Sorter(heads, rows, 'router-id')
+        dispRows = sort.getSorted()
+        disp.formattedTable(title, heads, dispRows)
+
+    def displayAddresses(self):
+        disp = Display(prefix="  ")
+        heads = []
+        heads.append(Header("class"))
+        heads.append(Header("address"))
+        heads.append(Header("phase"))
+        heads.append(Header("in-proc", Header.Y))
+        heads.append(Header("local", Header.COMMAS))
+        heads.append(Header("remote", Header.COMMAS))
+        heads.append(Header("in", Header.COMMAS))
+        heads.append(Header("out", Header.COMMAS))
+        heads.append(Header("thru", Header.COMMAS))
+        heads.append(Header("to-proc", Header.COMMAS))
+        heads.append(Header("from-proc", Header.COMMAS))
+        rows = []
+
+        objects = self.query('org.apache.qpid.dispatch.router.address')
+
+        for addr in objects:
+            row = []
+            row.append(self._addr_class(self._identity_clean(addr.identity)))
+            row.append(self._addr_text(self._identity_clean(addr.identity)))
+            row.append(self._addr_phase(self._identity_clean(addr.identity)))
+            row.append(addr.inProcess)
+            row.append(addr.subscriberCount)
+            row.append(addr.remoteCount)
+            row.append(addr.deliveriesIngress)
+            row.append(addr.deliveriesEgress)
+            row.append(addr.deliveriesTransit)
+            row.append(addr.deliveriesToContainer)
+            row.append(addr.deliveriesFromContainer)
+            rows.append(row)
+        title = "Router Addresses"
+        sorter = Sorter(heads, rows, 'address', 0, True)
+        dispRows = sorter.getSorted()
+        disp.formattedTable(title, heads, dispRows)
+
+    def displayMemory(self):
+        disp = Display(prefix="  ")
+        heads = []
+        heads.append(Header("type"))
+        heads.append(Header("size", Header.COMMAS))
+        heads.append(Header("batch"))
+        heads.append(Header("thread-max", Header.COMMAS))
+        heads.append(Header("total", Header.COMMAS))
+        heads.append(Header("in-threads", Header.COMMAS))
+        heads.append(Header("rebal-in", Header.COMMAS))
+        heads.append(Header("rebal-out", Header.COMMAS))
+        rows = []
+
+        objects = self.query('org.apache.qpid.dispatch.allocator')
+
+        for t in objects:
+            row = []
+            row.append(self._identity_clean(t.identity))
+            row.append(t.typeSize)
+            row.append(t.transferBatchSize)
+            row.append(t.localFreeListMax)
+            row.append(t.totalAllocFromHeap)
+            row.append(t.heldByThreads)
+            row.append(t.batchesRebalancedToThreads)
+            row.append(t.batchesRebalancedToGlobal)
+            rows.append(row)
+        title = "Types"
+        sorter = Sorter(heads, rows, 'type', 0, True)
+        dispRows = sorter.getSorted()
+        disp.formattedTable(title, heads, dispRows)
+
+    def displayMain(self, identitys, main):
+        if   main == 'l': self.displayRouterLinks()
+        elif main == 'n': self.displayRouterNodes()
+        elif main == 'a': self.displayAddresses()
+        elif main == 'm': self.displayMemory()
+        elif main == 'g': self.displayGeneral()
+        elif main == 'c': self.displayConnections()
+
+    def display(self, identitys):
+        self.displayMain(identitys, self.opts.show)
+
+def run(argv):
+    opts, args = parse_args(argv)
+    bm = BusManager(opts)
+    try:
+        bm.display(args)
+    finally:
+        bm.close()
+
+if __name__ == "__main__":
+        sys.exit(main(run, sys.argv))
