@@ -21,6 +21,7 @@
 
 #include <qpid/dispatch/dispatch.h>
 #include <proton/engine.h>
+#include <proton/event.h>
 
 /**@file
  * Control server threads, signals and connections.
@@ -224,8 +225,8 @@ typedef enum {
     /// The connection was closed at the transport level (not cleanly).
     QD_CONN_EVENT_CLOSE,
 
-    /// The connection requires processing.
-    QD_CONN_EVENT_PROCESS
+    /// The connection is writable
+    QD_CONN_EVENT_WRITABLE
 } qd_conn_event_t;
 
 
@@ -271,27 +272,29 @@ typedef struct qd_server_config_t {
     int sasl_maxssf;
 
     /**
-     * SSL is enabled for this connection iff non-zero.
+     * SSL is enabled for this connection iff true.
      */
-    int ssl_enabled;
+    bool ssl_enabled;
 
     /**
-     * Connection will take on the role of SSL server iff non-zero.
+     * Iff true, SSL/TLS must be used on the connection.
      */
-    int ssl_server;
+    bool ssl_required;
 
     /**
-     * Iff non-zero AND ssl_enabled is non-zero, this listener will detect the client's use
-     * of SSL or non-SSL and conform to the client's protocol.
-     * (listener only)
+     * Iff true, the client of the connection must authenticate with the server.
      */
-    int ssl_allow_unsecured_client;
+    bool requireAuthentication;
 
     /**
-     * Iff non-zero, this listener will allow clients to connect even if they skip the
-     * SASL authentication protocol.
+     * Iff true, client authentication _may_ be insecure (i.e. PLAIN over plaintext).
      */
-    int allow_no_sasl;
+    bool allowInsecureAuthentication;
+
+    /**
+     * Iff true, the payload of the connection must be encrypted.
+     */
+    bool requireEncryption;
 
     /**
      * Path to the file containing the PEM-formatted public certificate for the local end
@@ -324,16 +327,16 @@ typedef struct qd_server_config_t {
     char *ssl_trusted_certificates;
 
     /**
-     * Iff non-zero, require that the peer's certificate be supplied and that it be authentic
+     * Iff true, require that the peer's certificate be supplied and that it be authentic
      * according to the set of trusted CAs.
      */
-    int ssl_require_peer_authentication;
+    bool ssl_require_peer_authentication;
 
     /**
      * Allow the connection to be redirected by the peer (via CLOSE->Redirect).  This is
      * meaningful for outgoing (connector) connections only.
      */
-    int allow_redirect;
+    bool allow_redirect;
 
     /**
      * The specified role of the connection.  This can be used to control the behavior and
@@ -367,6 +370,19 @@ typedef struct qd_server_config_t {
  */
 typedef int (*qd_conn_handler_cb_t)(void *handler_context, void* conn_context, qd_conn_event_t event, qd_connection_t *conn);
 
+/**
+ * Proton Event Handler
+ *
+ * This callback is invoked when proton events for a connection require
+ * processing.
+ *
+ * @param handler_context The handler context supplied in qd_server_set_conn_handler.
+ * @param conn_context The handler context supplied in qd_server_{connect,listen}.
+ * @param event The proton event being raised.
+ * @param conn The connection associated with this proton event.
+ */
+typedef int (*qd_pn_event_handler_cb_t)(void *handler_context, void* conn_context, pn_event_t *event, qd_connection_t *conn);
+
 
 /**
  * Set the connection event handler callback.
@@ -376,9 +392,10 @@ typedef int (*qd_conn_handler_cb_t)(void *handler_context, void* conn_context, q
  *
  * @param qd The dispatch handle returned by qd_dispatch.
  * @param conn_handler The handler for processing connection-related events.
+ * @param pn_event_handler The handler for proton events.
  * @param handler_context Context data to associate with the handler.
  */
-void qd_server_set_conn_handler(qd_dispatch_t *qd, qd_conn_handler_cb_t conn_handler, void *handler_context);
+void qd_server_set_conn_handler(qd_dispatch_t *qd, qd_conn_handler_cb_t conn_handler, qd_pn_event_handler_cb_t pn_event_handler, void *handler_context);
 
 
 /**

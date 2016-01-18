@@ -37,9 +37,9 @@
 #include <assert.h>
 
 #include <qpid/dispatch/driver.h>
-#include <qpid/dispatch/alloc.h>
+#include <qpid/dispatch/threading.h>
+#include "alloc.h"
 #include <proton/error.h>
-#include <proton/sasl.h>
 #include <proton/ssl.h>
 #include <proton/object.h>
 #include <qpid/dispatch/ctools.h>
@@ -58,18 +58,27 @@ DEQ_DECLARE(qdpn_listener_t, qdpn_listener_list_t);
 DEQ_DECLARE(qdpn_connector_t, qdpn_connector_list_t);
 
 struct qdpn_driver_t {
-    qd_log_source_t       *log;
+    qd_log_source_t *log;
+    pn_trace_t       trace;
+    sys_mutex_t     *lock;
+
+    //
+    // The following values need to be protected by lock from multi-threaded access.
+    //
     qdpn_listener_list_t   listeners;
     qdpn_connector_list_t  connectors;
     qdpn_listener_t       *listener_next;
     qdpn_connector_t      *connector_next;
     size_t                 closed_count;
-    size_t                 capacity;
-    struct pollfd         *fds;
-    size_t                 nfds;
-    int                    ctrl[2]; //pipe for updating selectable status
-    pn_timestamp_t         wakeup;
-    pn_trace_t             trace;
+
+    //
+    // The following values will only be accessed by one thread at a time.
+    //
+    size_t          capacity;
+    struct pollfd  *fds;
+    size_t          nfds;
+    int             ctrl[2]; //pipe for updating selectable status
+    pn_timestamp_t  wakeup;
 };
 
 struct qdpn_listener_t {
@@ -91,7 +100,6 @@ struct qdpn_connector_t {
     pn_timestamp_t wakeup;
     pn_connection_t *connection;
     pn_transport_t *transport;
-    pn_sasl_t *sasl;
     qdpn_listener_t *listener;
     void *context;
     int idx;
@@ -190,7 +198,9 @@ static void qdpn_log_errno(qdpn_driver_t *d, const char *msg)
 static void qdpn_driver_add_listener(qdpn_driver_t *d, qdpn_listener_t *l)
 {
     if (!l->driver) return;
+    sys_mutex_lock(d->lock);
     DEQ_INSERT_TAIL(d->listeners, l);
+    sys_mutex_unlock(d->lock);
     l->driver = d;
 }
 
@@ -198,11 +208,12 @@ static void qdpn_driver_remove_listener(qdpn_driver_t *d, qdpn_listener_t *l)
 {
     if (!l->driver) return;
 
-    if (l == d->listener_next) {
+    sys_mutex_lock(d->lock);
+    if (l == d->listener_next)
         d->listener_next = DEQ_NEXT(l);
-    }
-
     DEQ_REMOVE(d->listeners, l);
+    sys_mutex_unlock(d->lock);
+
     l->driver = NULL;
 }
 
@@ -314,12 +325,26 @@ int qdpn_listener_get_fd(qdpn_listener_t *listener)
 
 qdpn_listener_t *qdpn_listener_head(qdpn_driver_t *driver)
 {
-    return driver ? DEQ_HEAD(driver->listeners) : NULL;
+    if (!driver)
+        return 0;
+
+    qdpn_listener_t *head;
+    sys_mutex_lock(driver->lock);
+    head = DEQ_HEAD(driver->listeners);
+    sys_mutex_unlock(driver->lock);
+    return head;
 }
 
 qdpn_listener_t *qdpn_listener_next(qdpn_listener_t *listener)
 {
-    return listener ? DEQ_NEXT(listener) : NULL;
+    if (!listener || !listener->driver)
+        return 0;
+
+    qdpn_listener_t *next;
+    sys_mutex_lock(listener->driver->lock);
+    next = DEQ_NEXT(listener);
+    sys_mutex_unlock(listener->driver->lock);
+    return next;
 }
 
 void qdpn_listener_trace(qdpn_listener_t *l, pn_trace_t trace)
@@ -397,7 +422,9 @@ void qdpn_listener_free(qdpn_listener_t *l)
 static void qdpn_driver_add_connector(qdpn_driver_t *d, qdpn_connector_t *c)
 {
     if (!c->driver) return;
+    sys_mutex_lock(d->lock);
     DEQ_INSERT_TAIL(d->connectors, c);
+    sys_mutex_unlock(d->lock);
     c->driver = d;
 }
 
@@ -405,6 +432,7 @@ static void qdpn_driver_remove_connector(qdpn_driver_t *d, qdpn_connector_t *c)
 {
     if (!c->driver) return;
 
+    sys_mutex_lock(d->lock);
     if (c == d->connector_next) {
         d->connector_next = DEQ_NEXT(c);
     }
@@ -414,6 +442,7 @@ static void qdpn_driver_remove_connector(qdpn_driver_t *d, qdpn_connector_t *c)
     if (c->closed) {
         d->closed_count--;
     }
+    sys_mutex_unlock(d->lock);
 }
 
 qdpn_connector_t *qdpn_connector(qdpn_driver_t *driver, const char *host,
@@ -476,7 +505,6 @@ qdpn_connector_t *qdpn_connector_fd(qdpn_driver_t *driver, int fd, void *context
     c->wakeup = 0;
     c->connection = NULL;
     c->transport = pn_transport();
-    c->sasl = pn_sasl(c->transport);
     c->input_done = false;
     c->output_done = false;
     c->context = context;
@@ -496,12 +524,23 @@ int qdpn_connector_get_fd(qdpn_connector_t *connector)
 
 qdpn_connector_t *qdpn_connector_head(qdpn_driver_t *driver)
 {
-    return driver ? DEQ_HEAD(driver->connectors) : NULL;
+    if (!driver)
+        return 0;
+
+    sys_mutex_lock(driver->lock);
+    qdpn_connector_t *head = DEQ_HEAD(driver->connectors);
+    sys_mutex_unlock(driver->lock);
+    return head;
 }
 
 qdpn_connector_t *qdpn_connector_next(qdpn_connector_t *connector)
 {
-    return connector ? DEQ_NEXT(connector) : NULL;
+    if (!connector || !connector->driver)
+        return 0;
+    sys_mutex_lock(connector->driver->lock);
+    qdpn_connector_t *next = DEQ_NEXT(connector);
+    sys_mutex_unlock(connector->driver->lock);
+    return next;
 }
 
 void qdpn_connector_trace(qdpn_connector_t *ctor, pn_trace_t trace)
@@ -509,11 +548,6 @@ void qdpn_connector_trace(qdpn_connector_t *ctor, pn_trace_t trace)
     if (!ctor) return;
     ctor->trace = trace;
     if (ctor->transport) pn_transport_trace(ctor->transport, trace);
-}
-
-pn_sasl_t *qdpn_connector_sasl(qdpn_connector_t *ctor)
-{
-    return ctor ? ctor->sasl : NULL;
 }
 
 pn_transport_t *qdpn_connector_transport(qdpn_connector_t *ctor)
@@ -572,8 +606,10 @@ void qdpn_connector_close(qdpn_connector_t *ctor)
     if (close(ctor->fd) == -1)
         perror("close");
     if (!ctor->closed) {
+        sys_mutex_lock(ctor->driver->lock);
         ctor->closed = true;
         ctor->driver->closed_count++;
+        sys_mutex_unlock(ctor->driver->lock);
     }
 }
 
@@ -740,6 +776,7 @@ qdpn_driver_t *qdpn_driver()
     DEQ_INIT(d->listeners);
     DEQ_INIT(d->connectors);
     d->log = qd_log_source("DRIVER");
+    d->lock = sys_mutex();
     d->listener_next = NULL;
     d->connector_next = NULL;
     d->closed_count = 0;
@@ -777,6 +814,7 @@ void qdpn_driver_free(qdpn_driver_t *d)
     while (DEQ_HEAD(d->listeners))
         qdpn_listener_free(DEQ_HEAD(d->listeners));
     free(d->fds);
+    sys_mutex_free(d->lock);
     free(d);
 }
 
@@ -796,6 +834,7 @@ int qdpn_driver_wakeup(qdpn_driver_t *d)
 
 static void qdpn_driver_rebuild(qdpn_driver_t *d)
 {
+    sys_mutex_lock(d->lock);
     size_t size = DEQ_SIZE(d->listeners) + DEQ_SIZE(d->connectors);
     while (d->capacity < size + 1) {
         d->capacity = d->capacity ? 2*d->capacity : 16;
@@ -832,6 +871,7 @@ static void qdpn_driver_rebuild(qdpn_driver_t *d)
         }
         c = DEQ_NEXT(c);
     }
+    sys_mutex_unlock(d->lock);
 }
 
 void qdpn_driver_wait_1(qdpn_driver_t *d)
@@ -864,6 +904,7 @@ int qdpn_driver_wait_3(qdpn_driver_t *d)
         while (read(d->ctrl[0], buffer, 512) == 512);
     }
 
+    sys_mutex_lock(d->lock);
     qdpn_listener_t *l = DEQ_HEAD(d->listeners);
     while (l) {
         l->pending = (l->idx && d->fds[l->idx].revents & POLLIN);
@@ -908,6 +949,7 @@ int qdpn_driver_wait_3(qdpn_driver_t *d)
 
     d->listener_next = DEQ_HEAD(d->listeners);
     d->connector_next = DEQ_HEAD(d->connectors);
+    sys_mutex_unlock(d->lock);
 
     return woken ? PN_INTR : 0;
 }
@@ -935,15 +977,18 @@ qdpn_listener_t *qdpn_driver_listener(qdpn_driver_t *d)
 {
     if (!d) return NULL;
 
+    sys_mutex_lock(d->lock);
     while (d->listener_next) {
         qdpn_listener_t *l = d->listener_next;
         d->listener_next = DEQ_NEXT(l);
 
         if (l->pending) {
+            sys_mutex_unlock(d->lock);
             return l;
         }
     }
 
+    sys_mutex_unlock(d->lock);
     return NULL;
 }
 
@@ -951,14 +996,18 @@ qdpn_connector_t *qdpn_driver_connector(qdpn_driver_t *d)
 {
     if (!d) return NULL;
 
+    sys_mutex_lock(d->lock);
     while (d->connector_next) {
         qdpn_connector_t *c = d->connector_next;
         d->connector_next = DEQ_NEXT(c);
 
-        if (c->closed || c->pending_read || c->pending_write || c->pending_tick || c->socket_error)
+        if (c->closed || c->pending_read || c->pending_write || c->pending_tick || c->socket_error) {
+            sys_mutex_unlock(d->lock);
             return c;
+        }
     }
 
+    sys_mutex_unlock(d->lock);
     return NULL;
 }
 

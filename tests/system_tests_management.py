@@ -26,6 +26,7 @@ from qpid_dispatch_internal.compat import OrderedDict, dictify
 from system_test import Qdrouterd, message, retry, retry_exception, wait_ports, Process
 from proton import ConnectionException
 from itertools import chain
+from time import sleep
 
 PREFIX = u'org.apache.qpid.dispatch.'
 MANAGEMENT = PREFIX + 'management'
@@ -81,7 +82,7 @@ class ManagementTest(system_test.TestCase):
         ])
         cls._routers = [cls.tester.qdrouterd(config=c, wait=False) for c in [conf0, conf1, conf2]]
 
-        # Stand-alone router for logging tests (avoid interfering with logging for other tests.)
+        # Standalone router for logging tests (avoid interfering with logging for other tests.)
         conflog=Qdrouterd.Config([
             ('router', { 'mode': 'standalone', 'routerId': 'logrouter'}),
             ('listener', {'port':cls.get_port(), 'role':'normal'}),
@@ -167,10 +168,10 @@ class ManagementTest(system_test.TestCase):
 
         port = self.get_port()
         # Note qdrouter schema defines port as string not int, since it can be a service name.
-        attributes = {'name':'foo', 'port':str(port), 'role':'normal', 'saslMechanisms': 'ANONYMOUS'}
+        attributes = {'name':'foo', 'port':str(port), 'role':'normal', 'saslMechanisms': 'ANONYMOUS', 'authenticatePeer': False}
         entity = self.assert_create_ok(LISTENER, 'foo', attributes)
         self.assertEqual(entity['name'], 'foo')
-        self.assertEqual(entity['addr'], '0.0.0.0')
+        self.assertEqual(entity['addr'], '127.0.0.1')
 
         # Connect via the new listener
         node3 = self.cleanup(Node.connect(Url(port=port)))
@@ -264,18 +265,21 @@ class ManagementTest(system_test.TestCase):
         for c in [
                 (FIXED_ADDRESS, 'a1', {'prefix':'foo', 'phase':0, 'fanout':'single', 'bias':'spread'}),
                 (FIXED_ADDRESS, 'a2', {'prefix':'foo', 'phase':1, 'fanout':'single', 'bias':'spread'}),
-                (CONNECTOR, 'wp_connector', {'port':str(wp_router.ports[0]), 'saslMechanisms': 'ANONYMOUS', 'role': 'on-demand'}),
+                (CONNECTOR, 'wp_connector', {'addr': '127.0.0.1', 'port':str(wp_router.ports[0]), 'saslMechanisms': 'ANONYMOUS', 'role': 'on-demand'}),
                 (WAYPOINT, 'wp', {'address': 'foo', 'inPhase': 0, 'outPhase': 1, 'connector': 'wp_connector'})
         ]:
             self.assert_create_ok(*c)
         assert retry(lambda: self.router.is_connected, wp_router.ports[0])
 
         # Verify the entities
-        id = 'connector/0.0.0.0:%s' % wp_router.ports[0]
+        id = 'connector/127.0.0.1:%s' % wp_router.ports[0]
         connector = self.node.read(identity=id)
         self.assertEqual(
             [connector.name, connector.addr, connector.port, connector.role],
-            ['wp_connector', '0.0.0.0', str(wp_router.ports[0]), 'on-demand'])
+            ['wp_connector', '127.0.0.1', str(wp_router.ports[0]), 'on-demand'])
+
+        # Pause to allow the waypoint to settle down
+        sleep(1)
 
         # Send a message through self.router, verify it goes via wp_router
         address=self.router.addresses[0]+"/foo"
@@ -399,9 +403,9 @@ class ManagementTest(system_test.TestCase):
             self.assertEqual(attrs['address'], 'amqp:/_topo/0/%s' % name)
             return name
 
-        self.assertEqual(set(["router1", "router2"]), set([check(n) for n in rnode_lists[0]]))
-        self.assertEqual(set(["router0", "router2"]), set([check(n) for n in rnode_lists[1]]))
-        self.assertEqual(set(["router1", "router0"]), set([check(n) for n in rnode_lists[2]]))
+        self.assertEqual(set(["router0", "router1", "router2"]), set([check(n) for n in rnode_lists[0]]))
+        self.assertEqual(set(["router0", "router1", "router2"]), set([check(n) for n in rnode_lists[1]]))
+        self.assertEqual(set(["router0", "router1", "router2"]), set([check(n) for n in rnode_lists[2]]))
 
     def test_entity_names(self):
         nodes = [self.cleanup(Node.connect(Url(r.addresses[0]))) for r in self.routers]
@@ -430,12 +434,12 @@ class ManagementTest(system_test.TestCase):
         remotes = sum([n.get_mgmt_nodes() for n in nodes], [])
         self.assertEqual(set([u'amqp:/_topo/0/router%s/$management' % i for i in [0, 1, 2]]),
                          set(remotes))
-        self.assertEqual(6, len(remotes))
+        self.assertEqual(9, len(remotes))
         # Query router2 indirectly via router1
         remote_url = Url(self.routers[0].addresses[0], path=Url(remotes[0]).path)
         remote = self.cleanup(Node.connect(remote_url))
         router_id = remotes[0].split("/")[3]
-        assert router_id in ['router1', 'router2']
+        assert router_id in ['router0', 'router1', 'router2']
         self.assertEqual([router_id], [r.routerId for r in remote.query(type=ROUTER).get_entities()])
 
     def test_get_types(self):

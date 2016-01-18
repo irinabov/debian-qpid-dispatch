@@ -62,11 +62,13 @@ def check_args(args, maxargs=0, minargs=0):
     Check number of arguments, raise UsageError if in correct.
     @param maxargs: max number of allowed args after command or None to skip check.
     @param minargs: min number of allowed args after command or None to skip check.
+    @return args padded with None to maxargs.
     """
     if minargs is not None and len(args) < minargs:
         raise UsageError("Not enough arguments, got %s need %s" % (len(args), minargs))
     if maxargs is not None and len(args) > maxargs:
         raise UsageError("Unexpected arguments: %s" % (" ".join(args[maxargs:])))
+    return args + [None] * (maxargs - len(args))
 
 def connection_options(options, title="Connection Options"):
     """Return an OptionGroup for connection options."""
@@ -90,12 +92,6 @@ def connection_options(options, title="Connection Options"):
 def opts_url(opts):
     """Fix up default URL settings based on options"""
     url = Url(opts.bus)
-
-    # Dispatch always allows SASL and requires it unless allow-no-sasl is configured.
-    # Add anonymous@ if no other username is specified to tell proton we want SASL ANONYMOUS.
-    # FIXME aconway 2015-02-17: this may change when proton supports more SASL mechs.
-    if not url.username:
-        url.username = "anonymous"
 
     # If the options indicate SSL, make sure we use the amqps scheme.
     if opts.ssl_certificate or opts.ssl_trustfile:

@@ -43,7 +43,6 @@ include_directories(
 
 # Build the qpid-dispatch library.
 set(qpid_dispatch_SOURCES
-  alloc.c
   amqp.c
   bitmask.c
   buffer.c
@@ -66,7 +65,9 @@ set(qpid_dispatch_SOURCES
   python_embedded.c
   router_agent.c
   router_config.c
+  router_delivery.c
   router_node.c
+  router_forwarders.c
   router_pynode.c
   schema_enum.c
   server.c
@@ -74,13 +75,17 @@ set(qpid_dispatch_SOURCES
   waypoint.c
   )
 
+if(USE_MEMORY_POOL)
+  list(APPEND qpid_dispatch_SOURCES alloc_pool.c)
+endif()
+
 set_property(
   SOURCE python_embedded.c router_pynode.c
   PROPERTY COMPILE_FLAGS -Wno-strict-aliasing
   )
 
 add_library(qpid-dispatch SHARED ${qpid_dispatch_SOURCES})
-target_link_libraries(qpid-dispatch ${proton_lib} ${pthread_lib} ${rt_lib} ${dl_lib} ${PYTHON_LIBRARIES})
+target_link_libraries(qpid-dispatch ${Proton_LIBRARIES} ${pthread_lib} ${rt_lib} ${dl_lib} ${PYTHON_LIBRARIES})
 set_target_properties(qpid-dispatch PROPERTIES
   VERSION "${SO_VERSION}"
   SOVERSION "${SO_VERSION_MAJOR}"

@@ -22,17 +22,20 @@
 #include "server_private.h"
 #include <qpid/dispatch/ctools.h>
 #include <qpid/dispatch/threading.h>
-#include <qpid/dispatch/alloc.h>
+#include "alloc.h"
 #include <assert.h>
 #include <stdio.h>
 
 static sys_mutex_t     *lock;
 static qd_timer_list_t  idle_timers;
 static qd_timer_list_t  scheduled_timers;
-static long             time_base;
+static qd_timestamp_t   time_base;
 
 ALLOC_DECLARE(qd_timer_t);
 ALLOC_DEFINE(qd_timer_t);
+
+/// For tests only
+sys_mutex_t* qd_timer_lock() { return lock; }
 
 //=========================================================================
 // Private static functions
@@ -104,11 +107,11 @@ void qd_timer_free(qd_timer_t *timer)
 }
 
 
-void qd_timer_schedule(qd_timer_t *timer, long duration)
+void qd_timer_schedule(qd_timer_t *timer, qd_timestamp_t duration)
 {
-    qd_timer_t *ptr;
-    qd_timer_t *last;
-    long        total_time;
+    qd_timer_t     *ptr;
+    qd_timer_t     *last;
+    qd_timestamp_t  total_time;
 
     sys_mutex_lock(lock);
     qd_timer_cancel_LH(timer);  // Timer is now on the idle list
@@ -193,7 +196,7 @@ void qd_timer_finalize(void)
 }
 
 
-long qd_timer_next_duration_LH(void)
+qd_timestamp_t qd_timer_next_duration_LH(void)
 {
     qd_timer_t *timer = DEQ_HEAD(scheduled_timers);
     if (timer)
@@ -202,10 +205,10 @@ long qd_timer_next_duration_LH(void)
 }
 
 
-void qd_timer_visit_LH(long current_time)
+void qd_timer_visit_LH(qd_timestamp_t current_time)
 {
-    long        delta;
-    qd_timer_t *timer = DEQ_HEAD(scheduled_timers);
+    qd_timestamp_t  delta;
+    qd_timer_t     *timer = DEQ_HEAD(scheduled_timers);
 
     if (time_base == 0) {
         time_base = current_time;

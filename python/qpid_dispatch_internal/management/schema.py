@@ -26,7 +26,7 @@ check for uniqueness of enties/attributes that are specified to be unique.
 A Schema can be loaded/dumped to a json file.
 """
 
-import sys, json
+import sys
 from qpid_dispatch.management.entity import EntityBase
 from qpid_dispatch.management.error import NotImplementedStatus
 from ..compat import OrderedDict
@@ -203,10 +203,11 @@ class AttributeType(object):
     @ivar defined_in: Annotation or EntityType in which this attribute is defined.
     @ivar create: If true the attribute can be set by CREATE.
     @ivar update: If true the attribute can be modified by UPDATE.
+    @ivar graph: If true the attribute could be graphed by a console.
     """
 
     def __init__(self, name, type=None, defined_in=None, default=None, required=False, unique=False,
-                 value=None, description="", create=False, update=False):
+                 value=None, description="", create=False, update=False, graph=False):
         """
         See L{AttributeType} instance variables.
         """
@@ -224,6 +225,7 @@ class AttributeType(object):
                                       self.name)
             self.create=create
             self.update=update
+            self.graph=graph
         except:
             ex, msg, trace = sys.exc_info()
             raise ValidationError, "Attribute '%s': %s" % (name, msg), trace
@@ -273,7 +275,8 @@ class AttributeType(object):
             ('default', self.default),
             ('required', self.required),
             ('unique', self.unique),
-            ('description', self.description)
+            ('description', self.description),
+            ('graph', self.graph)
         ])
 
     def __str__(self):
@@ -368,8 +371,8 @@ class EntityType(object):
         def check(a, b, what):
             overlap = set(a) & set(b)
             if overlap:
-                raise RedefinedError("'%s' cannot %s '%s', re-defines %s: %s"
-                                     % (self.name, how, other.short_name, what, ",".join(overlap)))
+                raise ValidationError("'%s' cannot %s '%s', re-defines %s: %s"
+                                      % (self.name, how, other.short_name, what, ",".join(overlap)))
         check(self.operations, other.operations, "operations")
         self.operations += other.operations
         check(self.attributes.iterkeys(), other.attributes.itervalues(), "attributes")
@@ -474,9 +477,6 @@ class EntityType(object):
             ('operations', self.operations),
             ('description', self.description or None)
         ])
-        if self.singleton: d['singleton'] = True
-        return d
-
 
     def __repr__(self): return "%s(%s)" % (type(self).__name__, self.name)
 

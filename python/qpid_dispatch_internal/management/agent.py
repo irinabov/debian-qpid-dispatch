@@ -65,13 +65,15 @@ Temporary solution is to lock the entire dispatch router lock during full refres
 Better solution coming soon...
 """
 
-import traceback, json
-from collections import namedtuple
+import traceback, json, pstats
 from itertools import ifilter, chain
 from traceback import format_exc
 from threading import Lock
+from cProfile import Profile
+from cStringIO import StringIO
 from ctypes import c_void_p, py_object, c_long
-from dispatch import IoAdapter, LogAdapter, LOG_INFO, LOG_DEBUG, LOG_ERROR
+from subprocess import Popen
+from ..dispatch import IoAdapter, LogAdapter, LOG_INFO, LOG_DEBUG, LOG_ERROR
 from qpid_dispatch.management.error import ManagementError, OK, CREATED, NO_CONTENT, STATUS_TEXT, \
     BadRequestStatus, InternalServerErrorStatus, NotImplementedStatus, NotFoundStatus
 from qpid_dispatch.management.entity import camelcase
@@ -150,6 +152,7 @@ class EntityAdapter(SchemaEntity):
         super(EntityAdapter, self).__init__(entity_type, attributes or {}, validate=validate)
         # Direct __dict__ access to avoid validation as schema attributes
         self.__dict__['_agent'] = agent
+        self.__dict__['_log'] = agent.log
         self.__dict__['_qd'] = agent.qd
         self.__dict__['_dispatch'] = agent.dispatch
         self.__dict__['_implementations'] = []
@@ -158,8 +161,8 @@ class EntityAdapter(SchemaEntity):
         """Set default identity and name if not already set, then do schema validation"""
         identity = self.attributes.get("identity")
         if not identity:
-            self.attributes["identity"] = "%s/%s" % (self.entity_type.short_name, self._identifier())
-        self.attributes.setdefault('name', self.attributes['identity'])
+            self.attributes[u"identity"] = "%s/%s" % (self.entity_type.short_name, self._identifier())
+        self.attributes.setdefault(u'name', self.attributes[u'identity'])
         super(EntityAdapter, self).validate(**kwargs)
 
     def _identifier(self):
@@ -298,6 +301,38 @@ class LinkRoutePatternEntity(EntityAdapter):
     def create(self):
         self._qd.qd_dispatch_configure_lrp(self._dispatch, self)
 
+class ConsoleEntity(EntityAdapter):
+    def create(self):
+        # if a named listener is present, use its addr:port 
+        name = self.attributes.get('listener')
+        if name:
+            listeners = self._agent.find_entity_by_type("listener")
+            for listener in listeners:
+                if listener.name == name:
+                    try:
+                        #required
+                        host   = listener.attributes['addr']
+                        port   = listener.attributes['port']
+                        wsport = self.attributes['wsport']
+                        #optional
+                        home   = self.attributes.get('home')
+                        args   = self.attributes.get('args')
+
+                        pargs = []
+                        pargs.append(self.attributes['proxy'])
+                        pargs.append(str(self.attributes['wsport']))
+                        pargs.append("%s:%s" % (host, port))
+                        if home:
+                            pargs.append("--web")
+                            pargs.append(self.attributes['home'])
+                        if args:
+                            pargs.append(args)
+
+                        #run the external program
+                        Popen(pargs)
+                    except:
+                        self._agent.log(LOG_ERROR, "Can't parse console entity: %s" % (format_exc()))
+                    break
 
 class DummyEntity(EntityAdapter):
     def callme(self, request):
@@ -501,15 +536,51 @@ class ManagementEntity(EntityAdapter):
             return str(Address.topological(node.attributes['routerId'], "$management", area))
         return (OK, self._agent.entities.map_type(node_address, 'router.node'))
 
-
     def get_schema(self, request):
         return (OK, self._schema.dump())
 
-    def get_json_schema(self, request):
-        indent = request.properties.get("indent")
-        if indent is not None: indent = int(indent)
-        return (OK, json.dumps(self._schema.dump(), indent=indent))
+    def _intprop(self, request, prop):
+        value = request.properties.get(prop)
+        if value is not None: value = int(value)
+        return value
 
+    def get_json_schema(self, request):
+        return (OK, json.dumps(self._schema.dump(), indent=self._intprop(request, "indent")))
+
+    def get_log(self, request):
+        logs = self._qd.qd_log_recent_py(self._intprop(request, "limit") or -1)
+        return (OK, logs)
+
+    def profile(self, request):
+        """Start/stop the python profiler, returns profile results"""
+        profile = self.__dict__.get("_profile")
+        if "start" in request.properties:
+            if not profile:
+                profile = self.__dict__["_profile"] = Profile()
+            profile.enable()
+            self._log(LOG_INFO, "Started python profiler")
+            return (OK, None)
+        if not profile:
+            raise BadRequestStatus("Profiler not started")
+        if "stop" in request.properties:
+            profile.create_stats()
+            self._log(LOG_INFO, "Stopped python profiler")
+            out = StringIO()
+            stats = pstats.Stats(profile, stream=out)
+            try:
+                stop = request.properties["stop"]
+                if stop == "kgrind": # Generate kcachegrind output using pyprof2calltree
+                    from pyprof2calltree import convert
+                    convert(stats, out)
+                elif stop == "visualize": # Start kcachegrind using pyprof2calltree
+                    from pyprof2calltree import visualize
+                    visualize(stats)
+                else:
+                    stats.print_stats() # Plain python profile stats
+                return (OK, out.getvalue())
+            finally:
+                out.close()
+        raise BadRequestStatus("Bad profile request %s" % (request))
 
 class Agent(object):
     """AMQP managment agent. Manages entities, directs requests to the correct entity."""
@@ -668,14 +739,17 @@ class Agent(object):
         requested_type = request.properties.get('type')
         if requested_type:
             requested_type = self.schema.entity_type(requested_type)
-            # Special case for management object, allow just type with no name/id
-            if self.management.entity_type.is_a(requested_type):
-                return self.management
-
         # ids is a map of identifying attribute values
         ids = dict((k, request.properties.get(k))
                    for k in ['name', 'identity'] if k in request.properties)
-        if not len(ids): raise BadRequestStatus("No name or identity provided")
+
+        # Special case for management object: if no name/id and no conflicting type
+        # then assume this is for "self"
+        if not ids:
+            if not requested_type or self.management.entity_type.is_a(requested_type):
+                return self.management
+            else:
+                raise BadRequestStatus("No name or identity provided")
 
         def attrvals():
             """String form of the id attribute values for error messages"""

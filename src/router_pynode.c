@@ -70,7 +70,7 @@ static PyObject *qd_add_router(PyObject *self, PyObject *args)
         //
         // Hash lookup the address to ensure there isn't an existing router address.
         //
-        qd_field_iterator_t *iter = qd_field_iterator_string(address, ITER_VIEW_ADDRESS_HASH);
+        qd_field_iterator_t *iter = qd_address_iterator_string(address, ITER_VIEW_ADDRESS_HASH);
         qd_address_t        *addr;
 
         qd_hash_retrieve(router->addr_hash, iter, (void**) &addr);
@@ -81,8 +81,7 @@ static PyObject *qd_add_router(PyObject *self, PyObject *args)
         // This record will be found whenever a "foreign" topological address to this
         // remote router is looked up.
         //
-        addr = qd_address();
-        addr->semantics = router_addr_semantics;
+        addr = qd_address(router_addr_semantics);
         qd_hash_insert(router->addr_hash, iter, addr, &addr->hash_handle);
         DEQ_INSERT_TAIL(router->addrs, addr);
         qd_entity_cache_add(QD_ROUTER_ADDRESS_TYPE, addr);
@@ -457,14 +456,13 @@ static PyObject* qd_map_destination(PyObject *self, PyObject *args)
         return 0;
     }
 
-    iter = qd_field_iterator_string(addr_string, ITER_VIEW_ALL);
+    iter = qd_address_iterator_string(addr_string, ITER_VIEW_ALL);
 
     sys_mutex_lock(router->lock);
     qd_hash_retrieve(router->addr_hash, iter, (void**) &addr);
     if (!addr) {
-        addr = qd_address();
+        addr = qd_address(router_semantics_for_addr(router, iter, phase, &unused));
         qd_hash_insert(router->addr_hash, iter, addr, &addr->hash_handle);
-        addr->semantics = router_semantics_for_addr(router, iter, phase, &unused);
         DEQ_ITEM_INIT(addr);
         DEQ_INSERT_TAIL(router->addrs, addr);
         qd_entity_cache_add(QD_ROUTER_ADDRESS_TYPE, addr);
@@ -508,7 +506,7 @@ static PyObject* qd_unmap_destination(PyObject *self, PyObject *args)
     }
 
     qd_router_node_t    *rnode = router->routers_by_mask_bit[maskbit];
-    qd_field_iterator_t *iter  = qd_field_iterator_string(addr_string, ITER_VIEW_ALL);
+    qd_field_iterator_t *iter  = qd_address_iterator_string(addr_string, ITER_VIEW_ALL);
 
     sys_mutex_lock(router->lock);
     qd_hash_retrieve(router->addr_hash, iter, (void**) &addr);
@@ -719,7 +717,7 @@ void qd_router_mobile_added(qd_router_t *router, qd_field_iterator_t *iter)
     PyObject *pValue;
 
     if (pyAdded && router->router_mode == QD_ROUTER_MODE_INTERIOR) {
-        qd_field_iterator_reset_view(iter, ITER_VIEW_ADDRESS_HASH);
+        qd_address_iterator_reset_view(iter, ITER_VIEW_ADDRESS_HASH);
         char *address = (char*) qd_field_iterator_copy(iter);
 
         qd_python_lock_state_t lock_state = qd_python_lock();

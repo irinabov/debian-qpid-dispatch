@@ -25,7 +25,6 @@
 //
 typedef struct qd_server_t           qd_server_t;
 typedef struct qd_container_t        qd_container_t;
-typedef struct qd_router_t           qd_router_t;
 typedef struct qd_waypoint_t         qd_waypoint_t;
 typedef struct qd_lrp_container_t    qd_lrp_container_t;
 typedef struct qd_lrp_t              qd_lrp_t;
@@ -53,6 +52,8 @@ struct qd_dispatch_t {
 
     int    thread_count;
     char  *container_name;
+    char  *sasl_config_path;
+    char  *sasl_config_name;
     char  *router_area;
     char  *router_id;
     qd_router_mode_t  router_mode;

@@ -22,7 +22,7 @@
 #include <qpid/dispatch/enum.h>
 #include <qpid/dispatch/server.h>
 #include <qpid/dispatch/user_fd.h>
-#include <qpid/dispatch/alloc.h>
+#include "alloc.h"
 #include <qpid/dispatch/ctools.h>
 #include <qpid/dispatch/log.h>
 #include <qpid/dispatch/driver.h>
@@ -100,6 +100,7 @@ struct qd_connection_t {
     qdpn_connector_t *pn_cxtr;
     pn_connection_t  *pn_conn;
     pn_collector_t   *collector;
+    pn_ssl_t         *ssl;
     qd_listener_t    *listener;
     qd_connector_t   *connector;
     void             *context; // Copy of context from listener or connector
@@ -141,31 +142,34 @@ DEQ_DECLARE(qd_work_item_t, qd_work_list_t);
 
 
 struct qd_server_t {
-    qd_dispatch_t           *qd;
-    int                      thread_count;
-    const char              *container_name;
-    qdpn_driver_t           *driver;
-    qd_log_source_t         *log_source;
-    qd_thread_start_cb_t     start_handler;
-    qd_conn_handler_cb_t     conn_handler;
-    qd_user_fd_handler_cb_t  ufd_handler;
-    void                    *start_context;
-    void                    *conn_handler_context;
-    sys_cond_t              *cond;
-    sys_mutex_t             *lock;
-    qd_thread_t            **threads;
-    qd_work_list_t           work_queue;
-    qd_timer_list_t          pending_timers;
-    bool                     a_thread_is_waiting;
-    int                      threads_active;
-    int                      pause_requests;
-    int                      threads_paused;
-    int                      pause_next_sequence;
-    int                      pause_now_serving;
-    qd_signal_handler_cb_t   signal_handler;
-    void                    *signal_context;
-    int                      pending_signal;
-    qd_connection_list_t     connections;
+    qd_dispatch_t            *qd;
+    int                       thread_count;
+    const char               *container_name;
+    const char               *sasl_config_path;
+    const char               *sasl_config_name;
+    qdpn_driver_t            *driver;
+    qd_log_source_t          *log_source;
+    qd_thread_start_cb_t      start_handler;
+    qd_conn_handler_cb_t      conn_handler;
+    qd_pn_event_handler_cb_t  pn_event_handler;
+    qd_user_fd_handler_cb_t   ufd_handler;
+    void                     *start_context;
+    void                     *conn_handler_context;
+    sys_cond_t               *cond;
+    sys_mutex_t              *lock;
+    qd_thread_t             **threads;
+    qd_work_list_t            work_queue;
+    qd_timer_list_t           pending_timers;
+    bool                      a_thread_is_waiting;
+    int                       threads_active;
+    int                       pause_requests;
+    int                       threads_paused;
+    int                       pause_next_sequence;
+    int                       pause_now_serving;
+    qd_signal_handler_cb_t    signal_handler;
+    void                     *signal_context;
+    int                       pending_signal;
+    qd_connection_list_t      connections;
 };
 
 ALLOC_DECLARE(qd_work_item_t);

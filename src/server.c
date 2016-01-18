@@ -27,7 +27,8 @@
 #include "dispatch_private.h"
 #include "server_private.h"
 #include "timer_private.h"
-#include "alloc_private.h"
+#include "alloc.h"
+#include "config.h"
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
@@ -88,63 +89,93 @@ qd_error_t qd_entity_refresh_connection(qd_entity_t* entity, void *impl)
     qd_connection_t *conn = (qd_connection_t*)impl;
     const qd_server_config_t *config =
         conn->connector ? conn->connector->config : conn->listener->config;
+    pn_transport_t *tport = 0;
+    pn_sasl_t      *sasl  = 0;
+    pn_ssl_t       *ssl   = 0;
+    const char     *mech  = 0;
+    const char     *user  = 0;
+
+    if (conn->pn_conn) {
+        tport = pn_connection_transport(conn->pn_conn);
+        ssl   = conn->ssl;
+    }
+    if (tport) {
+        sasl = pn_sasl(tport);
+        user = pn_transport_get_user(tport);
+    }
+    if (sasl)
+        mech = pn_sasl_get_mech(sasl);
 
     if (qd_entity_set_string(entity, "state", conn_state_name(conn->state)) == 0 &&
-        qd_entity_set_string(
-            entity, "container",
-            conn->pn_conn ? pn_connection_remote_container(conn->pn_conn) : 0) == 0 &&
+        qd_entity_set_string(entity, "container",
+                             conn->pn_conn ? pn_connection_remote_container(conn->pn_conn) : 0) == 0 &&
         connection_entity_update_host(entity, conn) == 0 &&
-        qd_entity_set_string(entity, "sasl", config->sasl_mechanisms) == 0 &&
+        qd_entity_set_string(entity, "sasl", mech) == 0 &&
         qd_entity_set_string(entity, "role", config->role) == 0 &&
-        qd_entity_set_string(entity, "dir", conn->connector ? "out" : "in") == 0)
+        qd_entity_set_string(entity, "dir", conn->connector ? "out" : "in") == 0 &&
+        qd_entity_set_string(entity, "user", user) == 0 &&
+        qd_entity_set_bool(entity, "isAuthenticated", tport && pn_transport_is_authenticated(tport)) == 0 &&
+        qd_entity_set_bool(entity, "isEncrypted", tport && pn_transport_is_encrypted(tport)) == 0 &&
+        qd_entity_set_bool(entity, "ssl", ssl != 0) == 0) {
+        if (ssl) {
+#define SSL_ATTR_SIZE 50
+            char proto[SSL_ATTR_SIZE];
+            char cipher[SSL_ATTR_SIZE];
+            pn_ssl_get_protocol_name(ssl, proto, SSL_ATTR_SIZE);
+            pn_ssl_get_cipher_name(ssl, cipher, SSL_ATTR_SIZE);
+            qd_entity_set_string(entity, "sslProto", proto);
+            qd_entity_set_string(entity, "sslCipher", cipher);
+            qd_entity_set_long(entity, "sslSsf", pn_ssl_get_ssf(ssl));
+        }
         return QD_ERROR_NONE;
+    }
     return qd_error_code();
 }
 
-static qd_error_t listener_setup_ssl(const qd_server_config_t *config, pn_transport_t *tport) {
-
+static qd_error_t listener_setup_ssl(qd_connection_t *ctx, const qd_server_config_t *config, pn_transport_t *tport)
+{
     pn_ssl_domain_t *domain = pn_ssl_domain(PN_SSL_MODE_SERVER);
     if (!domain) return qd_error(QD_ERROR_RUNTIME, "No SSL support");
 
     // setup my identifying cert:
     if (pn_ssl_domain_set_credentials(domain,
-				      config->ssl_certificate_file,
-				      config->ssl_private_key_file,
-				      config->ssl_password)) {
-	pn_ssl_domain_free(domain);
-	return qd_error(QD_ERROR_RUNTIME, "Cannot set SSL credentials");
+                                      config->ssl_certificate_file,
+                                      config->ssl_private_key_file,
+                                      config->ssl_password)) {
+        pn_ssl_domain_free(domain);
+        return qd_error(QD_ERROR_RUNTIME, "Cannot set SSL credentials");
     }
-    if (config->ssl_allow_unsecured_client) {
-	if (pn_ssl_domain_allow_unsecured_client(domain)) {
-	    pn_ssl_domain_free(domain);
-	    return qd_error(QD_ERROR_RUNTIME, "Cannot allow unsecured client");
-	}
+    if (!config->ssl_required) {
+        if (pn_ssl_domain_allow_unsecured_client(domain)) {
+            pn_ssl_domain_free(domain);
+            return qd_error(QD_ERROR_RUNTIME, "Cannot allow unsecured client");
+        }
     }
 
     // for peer authentication:
     if (config->ssl_trusted_certificate_db) {
-	if (pn_ssl_domain_set_trusted_ca_db(domain, config->ssl_trusted_certificate_db)) {
-	    pn_ssl_domain_free(domain);
-	    return qd_error(QD_ERROR_RUNTIME, "Cannot set truested SSL CA" );
-	}
+        if (pn_ssl_domain_set_trusted_ca_db(domain, config->ssl_trusted_certificate_db)) {
+            pn_ssl_domain_free(domain);
+            return qd_error(QD_ERROR_RUNTIME, "Cannot set trusted SSL CA" );
+        }
     }
 
     const char *trusted = config->ssl_trusted_certificate_db;
     if (config->ssl_trusted_certificates)
-	trusted = config->ssl_trusted_certificates;
+        trusted = config->ssl_trusted_certificates;
 
     // do we force the peer to send a cert?
     if (config->ssl_require_peer_authentication) {
-	if (!trusted || pn_ssl_domain_set_peer_authentication(domain, PN_SSL_VERIFY_PEER, trusted)) {
-	    pn_ssl_domain_free(domain);
-	    return qd_error(QD_ERROR_RUNTIME, "Cannot set peer authentication");
-	}
+        if (!trusted || pn_ssl_domain_set_peer_authentication(domain, PN_SSL_VERIFY_PEER, trusted)) {
+            pn_ssl_domain_free(domain);
+            return qd_error(QD_ERROR_RUNTIME, "Cannot set peer authentication");
+        }
     }
 
-    pn_ssl_t *ssl = pn_ssl(tport);
-    if (!ssl || pn_ssl_init(ssl, domain, 0)) {
-	pn_ssl_domain_free(domain);
-	return qd_error(QD_ERROR_RUNTIME, "Cannot initialize SSL");
+    ctx->ssl = pn_ssl(tport);
+    if (!ctx->ssl || pn_ssl_init(ctx->ssl, domain, 0)) {
+        pn_ssl_domain_free(domain);
+        return qd_error(QD_ERROR_RUNTIME, "Cannot initialize SSL");
     }
 
     return QD_ERROR_NONE;
@@ -162,7 +193,27 @@ static const char *log_incoming(char *buf, size_t size, qdpn_connector_t *cxtr)
     return buf;
 }
 
-static void thread_process_listeners(qd_server_t *qd_server)
+
+static void add_connection_properties(pn_connection_t *conn)
+{
+    static char *product_key = "product";
+    static char *product_val = "qpid-dispatch-router";
+    static char *version_key = "version";
+
+    pn_data_put_map(pn_connection_properties(conn));
+    pn_data_enter(pn_connection_properties(conn));
+
+    pn_data_put_symbol(pn_connection_properties(conn), pn_bytes(strlen(product_key), product_key));
+    pn_data_put_string(pn_connection_properties(conn), pn_bytes(strlen(product_val), product_val));
+
+    pn_data_put_symbol(pn_connection_properties(conn), pn_bytes(strlen(version_key), version_key));
+    pn_data_put_string(pn_connection_properties(conn), pn_bytes(strlen(QPID_DISPATCH_VERSION), QPID_DISPATCH_VERSION));
+
+    pn_data_exit(pn_connection_properties(conn));
+}
+
+
+static void thread_process_listeners_LH(qd_server_t *qd_server)
 {
     qdpn_driver_t    *driver = qd_server->driver;
     qdpn_listener_t  *listener;
@@ -174,10 +225,10 @@ static void thread_process_listeners(qd_server_t *qd_server)
         if (!cxtr)
             continue;
 
-	char logbuf[qd_log_max_len()];
+        char logbuf[qd_log_max_len()];
 
         qd_log(qd_server->log_source, QD_LOG_DEBUG, "Accepting %s",
-	       log_incoming(logbuf, sizeof(logbuf), cxtr));
+               log_incoming(logbuf, sizeof(logbuf), cxtr));
         ctx = new_qd_connection_t();
         DEQ_ITEM_INIT(ctx);
         ctx->state        = CONN_STATE_OPENING;
@@ -185,6 +236,7 @@ static void thread_process_listeners(qd_server_t *qd_server)
         ctx->enqueued     = 0;
         ctx->pn_cxtr      = cxtr;
         ctx->collector    = 0;
+        ctx->ssl          = 0;
         ctx->listener     = qdpn_listener_context(listener);
         ctx->connector    = 0;
         ctx->context      = ctx->listener->context;
@@ -200,9 +252,11 @@ static void thread_process_listeners(qd_server_t *qd_server)
         pn_connection_collect(conn, ctx->collector);
         pn_connection_set_container(conn, qd_server->container_name);
         pn_data_put_symbol(pn_connection_offered_capabilities(conn), pn_bytes(clen, (char*) QD_CAPABILITY_ANONYMOUS_RELAY));
+        add_connection_properties(conn);
         qdpn_connector_set_connection(cxtr, conn);
         pn_connection_set_context(conn, ctx);
         ctx->pn_conn = conn;
+        ctx->owner_thread = CONTEXT_NO_OWNER;
         qdpn_connector_set_context(cxtr, ctx);
 
         // qd_server->lock is already locked
@@ -223,12 +277,13 @@ static void thread_process_listeners(qd_server_t *qd_server)
 
         // Set up SSL if configured
         if (config->ssl_enabled) {
-	    qd_log(qd_server->log_source, QD_LOG_TRACE, "Configuring SSL on %s",
-		   log_incoming(logbuf, sizeof(logbuf), cxtr));
-            if (listener_setup_ssl(config, tport) != QD_ERROR_NONE) {
+            qd_log(qd_server->log_source, QD_LOG_TRACE, "Configuring SSL on %s",
+                   log_incoming(logbuf, sizeof(logbuf), cxtr));
+            if (listener_setup_ssl(ctx, config, tport) != QD_ERROR_NONE) {
                 qd_log(qd_server->log_source, QD_LOG_ERROR, "%s on %s",
                        qd_error_message(), log_incoming(logbuf, sizeof(logbuf), cxtr));
                 qdpn_connector_close(cxtr);
+                continue;
             }
         }
 
@@ -236,12 +291,14 @@ static void thread_process_listeners(qd_server_t *qd_server)
         // Set up SASL
         //
         pn_sasl_t *sasl = pn_sasl(tport);
-        pn_sasl_mechanisms(sasl, config->sasl_mechanisms);
-        pn_sasl_server(sasl);
-        pn_sasl_allow_skip(sasl, config->allow_no_sasl);
-        pn_sasl_done(sasl, PN_SASL_OK);  // TODO - This needs to go away
-
-        ctx->owner_thread = CONTEXT_NO_OWNER;
+        if (qd_server->sasl_config_path)
+            pn_sasl_config_path(sasl, qd_server->sasl_config_path);
+        pn_sasl_config_name(sasl, qd_server->sasl_config_name);
+        if (config->sasl_mechanisms)
+            pn_sasl_allowed_mechs(sasl, config->sasl_mechanisms);
+        pn_transport_require_auth(tport, config->requireAuthentication);
+        pn_transport_require_encryption(tport, config->requireEncryption);
+        pn_sasl_set_allow_insecure_mechs(sasl, config->allowInsecureAuthentication);
     }
 }
 
@@ -340,8 +397,10 @@ static int process_connector(qd_server_t *qd_server, qdpn_connector_t *cxtr)
             pn_connection_collect(conn, ctx->collector);
             pn_connection_set_container(conn, qd_server->container_name);
             pn_data_put_symbol(pn_connection_offered_capabilities(conn), pn_bytes(clen, (char*) QD_CAPABILITY_ANONYMOUS_RELAY));
+            add_connection_properties(conn);
             qdpn_connector_set_connection(cxtr, conn);
             pn_connection_set_context(conn, ctx);
+            pn_connection_open(conn);
             ctx->pn_conn = conn;
             ctx->state   = CONN_STATE_OPENING;
             assert(ctx->connector);
@@ -351,35 +410,38 @@ static int process_connector(qd_server_t *qd_server, qdpn_connector_t *cxtr)
         }
 
         case CONN_STATE_OPENING: {
-            pn_transport_t *tport = qdpn_connector_transport(cxtr);
-            pn_sasl_t      *sasl  = pn_sasl(tport);
+            qd_connection_t *qd_conn   = (qd_connection_t*) qdpn_connector_context(cxtr);
+            pn_collector_t  *collector = qd_connection_collector(qd_conn);
+            pn_event_t      *event;
 
-            if (pn_sasl_outcome(sasl) == PN_SASL_OK ||
-                pn_sasl_outcome(sasl) == PN_SASL_SKIPPED) {
-                ctx->state = CONN_STATE_OPERATIONAL;
+            events = 0;
+            event = pn_collector_peek(collector);
+            while (event) {
+                if (pn_event_type(event) == PN_CONNECTION_REMOTE_OPEN) {
+                    ctx->state = CONN_STATE_OPERATIONAL;
+                    qd_conn_event_t ce = QD_CONN_EVENT_LISTENER_OPEN;
 
-                qd_conn_event_t ce = QD_CONN_EVENT_PROCESS; // Initialize to keep the compiler happy
+                    if (ctx->connector) {
+                        ce = QD_CONN_EVENT_CONNECTOR_OPEN;
+                        ctx->connector->delay = 0;
+                    } else
+                        assert(ctx->listener);
 
-                if (ctx->listener) {
-                    ce = QD_CONN_EVENT_LISTENER_OPEN;
-                } else if (ctx->connector) {
-                    ce = QD_CONN_EVENT_CONNECTOR_OPEN;
-                    ctx->connector->delay = 0;
-                } else
-                    assert(0);
-
-                qd_server->conn_handler(qd_server->conn_handler_context,
-                                        ctx->context, ce, (qd_connection_t*) qdpn_connector_context(cxtr));
-                events = 1;
-                break;
-            }
-            else if (pn_sasl_outcome(sasl) != PN_SASL_NONE) {
-                ctx->state = CONN_STATE_FAILED;
-                if (ctx->connector) {
-                    const qd_server_config_t *config = ctx->connector->config;
-                    qd_log(qd_server->log_source, QD_LOG_TRACE, "Connection to %s:%s failed", config->host, config->port);
+                    qd_server->conn_handler(qd_server->conn_handler_context,
+                                            ctx->context, ce, (qd_connection_t*) qdpn_connector_context(cxtr));
+                    events = 1;
+                    break;  // Break without popping this event.  It will be re-processed in OPERATIONAL state.
+                } else if (pn_event_type(event) == PN_TRANSPORT_ERROR) {
+                    ctx->state = CONN_STATE_FAILED;
+                    if (ctx->connector) {
+                        const qd_server_config_t *config = ctx->connector->config;
+                        qd_log(qd_server->log_source, QD_LOG_TRACE, "Connection to %s:%s failed", config->host, config->port);
+                    }
                 }
+                pn_collector_pop(collector);
+                event = pn_collector_peek(collector);
             }
+            break;
         }
 
         case CONN_STATE_OPERATIONAL:
@@ -391,9 +453,19 @@ static int process_connector(qd_server_t *qd_server, qdpn_connector_t *cxtr)
             }
             else {
                 invoke_deferred_calls(ctx, false);
-                events = qd_server->conn_handler(qd_server->conn_handler_context, ctx->context,
-                                                 QD_CONN_EVENT_PROCESS,
-                                                 (qd_connection_t*) qdpn_connector_context(cxtr));
+
+                qd_connection_t *qd_conn   = (qd_connection_t*) qdpn_connector_context(cxtr);
+                pn_collector_t  *collector = qd_connection_collector(qd_conn);
+                pn_event_t      *event;
+
+                events = 0;
+                event = pn_collector_peek(collector);
+                while (event) {
+                    events += qd_server->pn_event_handler(qd_server->conn_handler_context, ctx->context, event, qd_conn);
+                    pn_collector_pop(collector);
+                    event = pn_collector_peek(collector);
+                }
+                events += qd_server->conn_handler(qd_server->conn_handler_context, ctx->context, QD_CONN_EVENT_WRITABLE, qd_conn);
             }
             break;
 
@@ -514,7 +586,7 @@ static void *thread_run(void *arg)
                 // use this value in driver_wait as the timeout.  If there are no scheduled
                 // timers, the returned value will be -1.
                 //
-                long duration = qd_timer_next_duration_LH();
+                qd_timestamp_t duration = qd_timer_next_duration_LH();
 
                 //
                 // Invoke the proton driver's wait sequence.  This is a bit of a hack for now
@@ -548,13 +620,13 @@ static void *thread_run(void *arg)
                 //
                 struct timespec tv;
                 clock_gettime(CLOCK_REALTIME, &tv);
-                long milliseconds = tv.tv_sec * 1000 + tv.tv_nsec / 1000000;
+                qd_timestamp_t milliseconds = ((qd_timestamp_t)tv.tv_sec) * 1000 + tv.tv_nsec / 1000000;
                 qd_timer_visit_LH(milliseconds);
 
                 //
                 // Process listeners (incoming connections).
                 //
-                thread_process_listeners(qd_server);
+                thread_process_listeners_LH(qd_server);
 
                 //
                 // Traverse the list of connectors-needing-service from the proton driver.
@@ -731,6 +803,7 @@ static void cxtr_try_open(void *context)
     ctx->enqueued     = 0;
     ctx->pn_conn      = 0;
     ctx->collector    = 0;
+    ctx->ssl          = 0;
     ctx->listener     = 0;
     ctx->connector    = ct;
     ctx->context      = ct->context;
@@ -740,19 +813,29 @@ static void cxtr_try_open(void *context)
     DEQ_INIT(ctx->deferred_calls);
     ctx->deferred_call_lock = sys_mutex();
 
+    qd_log(ct->server->log_source, QD_LOG_TRACE, "Connecting to %s:%s", ct->config->host, ct->config->port);
+
     //
     // qdpn_connector is not thread safe
     //
     sys_mutex_lock(ct->server->lock);
     ctx->pn_cxtr = qdpn_connector(ct->server->driver, ct->config->host, ct->config->port, (void*) ctx);
-    DEQ_INSERT_TAIL(ct->server->connections, ctx);
-    qd_entity_cache_add(QD_CONNECTION_TYPE, ctx);
-
+    if (ctx->pn_cxtr) {
+        DEQ_INSERT_TAIL(ct->server->connections, ctx);
+        qd_entity_cache_add(QD_CONNECTION_TYPE, ctx);
+    }
     sys_mutex_unlock(ct->server->lock);
+
+    if (ctx->pn_cxtr == 0) {
+        sys_mutex_free(ctx->deferred_call_lock);
+        free_qd_connection_t(ctx);
+        ct->delay = 10000;
+        qd_timer_schedule(ct->timer, ct->delay);
+        return;
+    }
 
     ct->ctx   = ctx;
     ct->delay = 5000;
-    qd_log(ct->server->log_source, QD_LOG_TRACE, "Connecting to %s:%s", ct->config->host, ct->config->port);
 
     //
     // Set up the transport, SASL, and SSL for the connection.
@@ -812,22 +895,27 @@ static void cxtr_try_open(void *context)
             }
         }
 
-        pn_ssl_t *ssl = pn_ssl(tport);
-        pn_ssl_init(ssl, domain, 0);
+        ctx->ssl = pn_ssl(tport);
+        pn_ssl_init(ctx->ssl, domain, 0);
         pn_ssl_domain_free(domain);
     }
 
     //
     // Set up SASL
     //
+    sys_mutex_lock(ct->server->lock);
     pn_sasl_t *sasl = pn_sasl(tport);
-    pn_sasl_mechanisms(sasl, config->sasl_mechanisms);
-    pn_sasl_client(sasl);
+    if (config->sasl_mechanisms)
+        pn_sasl_allowed_mechs(sasl, config->sasl_mechanisms);
+    pn_sasl_set_allow_insecure_mechs(sasl, config->allowInsecureAuthentication);
+    sys_mutex_unlock(ct->server->lock);
+
     ctx->owner_thread = CONTEXT_NO_OWNER;
 }
 
 
-qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *container_name)
+qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *container_name,
+                       const char *sasl_config_path, const char *sasl_config_name)
 {
     int i;
 
@@ -836,19 +924,22 @@ qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *containe
         return 0;
 
     DEQ_INIT(qd_server->connections);
-    qd_server->qd              = qd;
-    qd_server->log_source      = qd_log_source("SERVER");
-    qd_server->thread_count    = thread_count;
-    qd_server->container_name  = container_name;
-    qd_server->driver          = qdpn_driver();
-    qd_server->start_handler   = 0;
-    qd_server->conn_handler    = 0;
-    qd_server->signal_handler  = 0;
-    qd_server->ufd_handler     = 0;
-    qd_server->start_context   = 0;
-    qd_server->signal_context  = 0;
-    qd_server->lock            = sys_mutex();
-    qd_server->cond            = sys_cond();
+    qd_server->qd               = qd;
+    qd_server->log_source       = qd_log_source("SERVER");
+    qd_server->thread_count     = thread_count;
+    qd_server->container_name   = container_name;
+    qd_server->sasl_config_path = sasl_config_path;
+    qd_server->sasl_config_name = sasl_config_name;
+    qd_server->driver           = qdpn_driver();
+    qd_server->start_handler    = 0;
+    qd_server->conn_handler     = 0;
+    qd_server->pn_event_handler = 0;
+    qd_server->signal_handler   = 0;
+    qd_server->ufd_handler      = 0;
+    qd_server->start_context    = 0;
+    qd_server->signal_context   = 0;
+    qd_server->lock             = sys_mutex();
+    qd_server->cond             = sys_cond();
 
     qd_timer_initialize(qd_server->lock);
 
@@ -875,11 +966,9 @@ qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *containe
 void qd_server_free(qd_server_t *qd_server)
 {
     if (!qd_server) return;
-    int i;
-
-    for (i = 0; i < qd_server->thread_count; i++)
+    for (int i = 0; i < qd_server->thread_count; i++)
         thread_free(qd_server->threads[i]);
-
+    qd_timer_finalize();
     qdpn_driver_free(qd_server->driver);
     sys_mutex_free(qd_server->lock);
     sys_cond_free(qd_server->cond);
@@ -888,9 +977,13 @@ void qd_server_free(qd_server_t *qd_server)
 }
 
 
-void qd_server_set_conn_handler(qd_dispatch_t *qd, qd_conn_handler_cb_t handler, void *handler_context)
+void qd_server_set_conn_handler(qd_dispatch_t            *qd,
+                                qd_conn_handler_cb_t      handler,
+                                qd_pn_event_handler_cb_t  pn_event_handler,
+                                void                     *handler_context)
 {
     qd->server->conn_handler         = handler;
+    qd->server->pn_event_handler     = pn_event_handler;
     qd->server->conn_handler_context = handler_context;
 }
 
@@ -1214,6 +1307,7 @@ qd_user_fd_t *qd_user_fd(qd_dispatch_t *qd, int fd, void *context)
     ctx->enqueued     = 0;
     ctx->pn_conn      = 0;
     ctx->collector    = 0;
+    ctx->ssl          = 0;
     ctx->listener     = 0;
     ctx->connector    = 0;
     ctx->context      = 0;

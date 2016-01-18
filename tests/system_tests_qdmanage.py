@@ -18,7 +18,7 @@
 #
 
 import re, json, unittest, os
-from system_test import TestCase, Process, Qdrouterd, main_module
+from system_test import TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR
 from subprocess import PIPE, STDOUT
 from qpid_dispatch_internal.compat import OrderedDict, dictify
 from qpid_dispatch_internal.management.qdrouter import QdSchema
@@ -31,7 +31,7 @@ class QdmanageTest(TestCase):
 
     @staticmethod
     def ssl_file(name):
-        return os.path.join(os.path.dirname(__file__), 'ssl_certs', name)
+        return os.path.join(DIR, 'ssl_certs', name)
 
     @classmethod
     def setUpClass(cls):
@@ -41,9 +41,7 @@ class QdmanageTest(TestCase):
                              'cert-db': cls.ssl_file('ca-certificate.pem'),
                              'cert-file': cls.ssl_file('server-certificate.pem'),
                              'key-file': cls.ssl_file('server-private-key.pem'),
-                             'password': 'server-password',
-                             'allow-unsecured': False,
-                             'require-peer-auth': False}),
+                             'password': 'server-password'}),
             ('listener', {'port': cls.tester.get_port()}),
             ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl'})
         ])
@@ -53,7 +51,7 @@ class QdmanageTest(TestCase):
 
     def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
         p = self.popen(
-            ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address(), '--indent=-1'],
+            ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address(), '--indent=-1', '--timeout', str(TIMEOUT)],
             stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect)
         out = p.communicate(input)[0]
         try:
@@ -148,8 +146,15 @@ class QdmanageTest(TestCase):
 
     def test_get_schema(self):
         schema = dictify(QdSchema().dump())
-        actual = self.run_qdmanage("GET-JSON-SCHEMA")
+        actual = self.run_qdmanage("get-json-schema")
         self.assertEquals(schema, dictify(json.loads(actual)))
+        actual = self.run_qdmanage("get-schema")
+        self.assertEquals(schema, dictify(json.loads(actual)))
+
+    def test_get_log(self):
+        log = json.loads(self.run_qdmanage("get-log limit=1"))[0]
+        self.assertEquals(['AGENT', 'trace'], log[0:2])
+        self.assertRegexpMatches(log[2], 'get-log')
 
     def test_ssl(self):
         """Simple test for SSL connection. Note system_tests_qdstat has a more complete SSL test"""
