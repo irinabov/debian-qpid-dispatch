@@ -14,10 +14,6 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	dh_auto_install
-	mkdir -p debian/tmp/usr/share/man/man5
-	mkdir -p debian/tmp/usr/share/man/man8
-	cp doc/pre_built/man/man5/* debian/tmp/usr/share/man/man5
-	cp doc/pre_built/man/man8/* debian/tmp/usr/share/man/man8
 	chmod +x debian/tmp/usr/lib/qpid-dispatch/tests/ssl_certs/gencerts.sh
 
 override_dh_auto_test:
