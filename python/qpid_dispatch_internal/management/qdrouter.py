@@ -31,13 +31,16 @@ class QdSchema(schema.Schema):
     Qpid Dispatch Router management schema.
     """
 
-    CONFIGURATION_ENTITY = "configurationEntity"
-    OPERATIONAL_ENTITY = "operationalEntity"
+    CONFIGURATION_ENTITY = u"configurationEntity"
+    OPERATIONAL_ENTITY = u"operationalEntity"
 
     def __init__(self):
         """Load schema."""
         qd_schema = get_data('qpid_dispatch.management', 'qdrouter.json')
-        super(QdSchema, self).__init__(**json.loads(qd_schema, **JSON_LOAD_KWARGS))
+        try:
+            super(QdSchema, self).__init__(**json.loads(qd_schema, **JSON_LOAD_KWARGS))
+        except Exception,e:
+            raise ValueError("Invalid schema qdrouter.json: %s" % e)
         self.configuration_entity = self.entity_type(self.CONFIGURATION_ENTITY)
         self.operational_entity = self.entity_type(self.OPERATIONAL_ENTITY)
 

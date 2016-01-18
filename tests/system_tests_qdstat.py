@@ -35,8 +35,9 @@ class QdstatTest(system_test.TestCase):
         cls.router = cls.tester.qdrouterd('test-router', config)
 
     def run_qdstat(self, args, regexp=None, address=None):
-        p = self.popen(['qdstat', '--bus', str(address or self.router.addresses[0])] + args,
-                       name='qdstat-'+self.id(), stdout=PIPE, expect=None)
+        p = self.popen(
+            ['qdstat', '--bus', str(address or self.router.addresses[0]), '--timeout', str(system_test.TIMEOUT) ] + args,
+            name='qdstat-'+self.id(), stdout=PIPE, expect=None)
         out = p.communicate()[0]
         assert p.returncode == 0, \
             "qdstat exit status %s, output:\n%s" % (p.returncode, out)
@@ -56,18 +57,21 @@ class QdstatTest(system_test.TestCase):
         self.run_qdstat(['--links'], r'endpoint.*out.*local.*temp.')
 
     def test_nodes(self):
-        self.run_qdstat(['--nodes'], r'Router Nodes')
+        self.run_qdstat(['--nodes'], r'No Router List')
 
     def test_address(self):
         self.run_qdstat(['--address'], r'\$management')
 
     def test_memory(self):
-        self.run_qdstat(['--memory'], r'qd_address_t\s+[0-9]+')
+        out = self.run_qdstat(['--memory'])
+        if out.strip() == "No memory statistics available":
+            # router built w/o memory pools enabled]
+            return self.skipTest("Router's memory pools disabled")
+        regexp = r'qd_address_t\s+[0-9]+'
+        assert re.search(regexp, out, re.I), "Can't find '%s' in '%s'" % (regexp, out)
 
-    def do_test(self, url, args):
-        self.run_qdstat(['--general'] + args, 
-                        regexp=r'(?s)Router Statistics.*Mode\s*Standalone',
-                        address=str(url))
+    def test_log(self):
+        self.run_qdstat(['--log',  '--limit=5'], r'AGENT \(trace\).*GET-LOG')
 
 try:
     SSLDomain(SSLDomain.MODE_CLIENT)
@@ -76,43 +80,28 @@ try:
 
         @staticmethod
         def ssl_file(name):
-            return os.path.join(os.path.dirname(__file__), 'ssl_certs', name)
+            return os.path.join(system_test.DIR, 'ssl_certs', name)
 
         @classmethod
         def setUpClass(cls):
             super(QdstatSslTest, cls).setUpClass()
             config = system_test.Qdrouterd.Config([
-                ('ssl-profile', {'name': 'server-ssl-strict',
+                ('ssl-profile', {'name': 'server-ssl',
                                  'cert-db': cls.ssl_file('ca-certificate.pem'),
                                  'cert-file': cls.ssl_file('server-certificate.pem'),
                                  'key-file': cls.ssl_file('server-private-key.pem'),
-                                 'password': 'server-password',
-                                 'allow-unsecured': False,
-                                 'require-peer-auth': False}),
-                ('ssl-profile', {'name': 'server-ssl-unsecured',
-                                 'cert-db': cls.ssl_file('ca-certificate.pem'),
-                                 'cert-file': cls.ssl_file('server-certificate.pem'),
-                                 'key-file': cls.ssl_file('server-private-key.pem'),
-                                 'password': 'server-password',
-                                 'allow-unsecured': True,
-                                 'require-peer-auth': False}),
-                ('ssl-profile', {'name': 'server-ssl-auth',
-                                 'cert-db': cls.ssl_file('ca-certificate.pem'),
-                                 'cert-file': cls.ssl_file('server-certificate.pem'),
-                                 'key-file': cls.ssl_file('server-private-key.pem'),
-                                 'password': 'server-password',
-                                 'allow-unsecured': False,
-                                 'require-peer-auth': True}),
+                                 'password': 'server-password'}),
                 ('listener', {'port': cls.tester.get_port()}),
-                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl-strict'}),
-                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl-unsecured'}),
-                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl-auth'})
+                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl', 'authenticatePeer': 'no', 'requireSsl': 'yes'}),
+                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl', 'authenticatePeer': 'no', 'requireSsl': 'no'}),
+                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl', 'authenticatePeer': 'yes', 'requireSsl': 'yes',
+                              'saslMechanisms:': 'EXTERNAL'})
             ])
             cls.router = cls.tester.qdrouterd('test-router', config)
 
         def run_qdstat(self, args, regexp=None, address=None):
             p = self.popen(
-                ['qdstat', '--bus', str(address or self.router.addresses[0])] + args,
+                ['qdstat', '--bus', str(address or self.router.addresses[0]), '--timeout', str(system_test.TIMEOUT) ] + args,
                 name='qdstat-'+self.id(), stdout=PIPE, expect=None)
             out = p.communicate()[0]
             assert p.returncode == 0, \

@@ -23,10 +23,12 @@
 #include <qpid/dispatch/log.h>
 #include <qpid/dispatch/error.h>
 #include <qpid/dispatch/amqp.h>
-#include <qpid/dispatch/alloc.h>
+#include "alloc.h"
 #include <qpid/dispatch/router.h>
 #include <qpid/dispatch/error.h>
 
+
+#define DISPATCH_MODULE "qpid_dispatch_internal.dispatch"
 
 //===============================================================================
 // Control Functions
@@ -374,14 +376,10 @@ static PyMethodDef LogAdapter_methods[] = {
     {0, 0, 0, 0}
 };
 
-static PyMethodDef empty_methods[] = {
-    {0, 0, 0, 0}
-};
-
 static PyTypeObject LogAdapterType = {
     PyObject_HEAD_INIT(0)
     0,                         /* ob_size*/
-    "dispatch.LogAdapter",     /* tp_name*/
+    DISPATCH_MODULE ".LogAdapter",  /* tp_name*/
     sizeof(LogAdapter),        /* tp_basicsize*/
     0,                         /* tp_itemsize*/
     (destructor)LogAdapter_dealloc, /* tp_dealloc*/
@@ -541,7 +539,8 @@ static int IoAdapter_init(IoAdapter *self, PyObject *args, PyObject *kwds)
     if (!address) return -1;
     qd_error_clear();
     self->addr =
-        qd_router_register_address(self->qd, address, qd_io_rx_handler, py_semantics, global, self);
+        qd_router_register_address(self->qd, address, qd_io_rx_handler, self,
+                                   py_semantics, global, 0);
     if (qd_error_code()) {
         PyErr_SetString(PyExc_RuntimeError, qd_error_message());
         return -1;
@@ -627,7 +626,7 @@ static PyMethodDef IoAdapter_methods[] = {
 static PyTypeObject IoAdapterType = {
     PyObject_HEAD_INIT(0)
     0,                         /* ob_size*/
-    "dispatch.IoAdapter",      /* tp_name*/
+    DISPATCH_MODULE ".IoAdapter",  /* tp_name*/
     sizeof(IoAdapter),         /* tp_basicsize*/
     0,                         /* tp_itemsize*/
     (destructor)IoAdapter_dealloc, /* tp_dealloc*/
@@ -687,24 +686,29 @@ static void qd_register_constant(PyObject *module, const char *name, uint32_t va
     PyModule_AddObject(module, name, const_object);
 }
 
-
 static void qd_python_setup(void)
 {
     LogAdapterType.tp_new = PyType_GenericNew;
     IoAdapterType.tp_new  = PyType_GenericNew;
     if ((PyType_Ready(&LogAdapterType) < 0) || (PyType_Ready(&IoAdapterType) < 0)) {
         qd_error_py();
-        qd_log(log_source, QD_LOG_ERROR, "Unable to initialize Adapters");
+        qd_log(log_source, QD_LOG_CRITICAL, "Unable to initialize Adapters");
         abort();
     } else {
-        PyObject *m = Py_InitModule3("dispatch", empty_methods, "Dispatch Adapter Module");
-
         //
         // Append sys.path to include location of Dispatch libraries
         //
         if (dispatch_python_pkgdir) {
             PyObject *sys_path = PySys_GetObject("path");
             PyList_Append(sys_path, dispatch_python_pkgdir);
+        }
+
+        // Import the initial dispatch module (we will add C extensions to it)
+        PyObject *m = PyImport_ImportModule(DISPATCH_MODULE);
+        if (!m) {
+            qd_error_py();
+            qd_log(log_source, QD_LOG_CRITICAL, "Cannot load dispatch extension module '%s'", DISPATCH_MODULE);
+            abort();
         }
 
         //

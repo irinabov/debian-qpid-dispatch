@@ -11,26 +11,13 @@
                 "addr": {
                     "description":"IP address: ipv4 or ipv6 literal or a host name.",
                     "type": "string",
-                    "default": "0.0.0.0",
+                    "default": "127.0.0.1",
                     "create": true
                 },
                 "port": {
                     "description": "Port number or symbolic service name.",
                     "type": "string",
                     "default": "amqp",
-                    "create": true
-
-                }
-            }
-        },
-
-        "saslMechanisms": {
-            "description": "Attribute for a list of SASL mechanisms.",
-            "attributes": {
-                "saslMechanisms": {
-                    "type": "string",
-                    "required": true,
-                    "description": "Comma separated list of accepted SASL authentication mechanisms.",
                     "create": true
 
                 }
@@ -377,7 +364,7 @@
             "description": "Qpid dispatch router extensions to the standard org.amqp.management interface.",
             "extends": "org.amqp.management",
             "singleton": true,
-            "operations": ["GET-SCHEMA", "GET-JSON-SCHEMA"],
+            "operations": ["GET-SCHEMA", "GET-JSON-SCHEMA", "GET-LOG", "PROFILE"],
             "operationDefs": {
                 "GET-SCHEMA": {
                     "description": "Get the qdrouterd schema for this router in AMQP map format",
@@ -413,6 +400,27 @@
                     "response": {
                         "body": {
                             "description": "The qdrouter schema as a JSON string.",
+                            "type": "string"
+                        }
+                    }
+                },
+                "GET-LOG": {
+                    "description": "Get recent log entries from the router.",
+                    "request": {
+                        "properties": {
+                            "identity": {
+                                "description": "Set to the value `self`",
+                                "type": "string"
+                            },
+                            "limit": {
+                                "description": "Maximum number of log entries to get.",
+                                "type": "integer"
+                            }
+                        }
+                    },
+                    "response": {
+                        "body": {
+                            "description": "A list of log entries where each entry is a list of: module name(string), level name(string), message text(string), file name(string or None), line number(integer or None) , timestamp(integer)",
                             "type": "string"
                         }
                     }
@@ -458,6 +466,19 @@
                     "description": "A file to dump debugging information that can't be logged normally.",
                     "create": true
 
+                },
+                "saslConfigPath": {
+                    "type": "path",
+                    "description": "Absolute path to the SASL configuration file.",
+                    "required": false,
+                    "create": true
+                },
+                "saslConfigName": {
+                    "type": "string",
+                    "description": "Name of the SASL configuration.  This string + '.conf' is the name of the configuration file.",
+                    "required": false,
+                    "default": "qdrouterd",
+                    "create": true
                 }
             }
         },
@@ -524,17 +545,21 @@
                     "description": "Deprecated - This value is no longer used in the router.",
                     "create": true
                 },
-	        "addrCount": {
+
+                "addrCount": {
                     "type":
-                    "integer", "description":"Number of addresses known to the router."
+                    "integer", "description":"Number of addresses known to the router.",
+                    "graph": true
                 },
-	        "linkCount": {
+                "linkCount": {
                     "type": "integer",
-                    "description":"Number of links attached to the router node."
+                    "description":"Number of links attached to the router node.",
+                    "graph": true
                 },
-	        "nodeCount": {
+                "nodeCount": {
                     "type": "integer",
-                    "description":"Number of known peer router nodes."
+                    "description":"Number of known peer router nodes.",
+                    "graph": true
                 }
             }
         },
@@ -546,14 +571,31 @@
             "annotations": [
                 "addrPort",
                 "connectionRole",
-                "sslProfile",
-                "saslMechanisms"
+                "sslProfile"
             ],
             "attributes": {
-                "requirePeerAuth": {
+                "saslMechanisms": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Comma separated list of accepted SASL authentication mechanisms.",
+                    "create": true
+                },
+                "authenticatePeer": {
                     "type": "boolean",
-                    "default": true,
-                    "description": "Only for listeners using SSL.  If set to 'yes', attached clients will be required to supply a certificate.  If the certificate is not traceable to a CA in the ssl profile's cert-db, authentication fails for the connection.",
+                    "default": false,
+                    "description": "yes: Require the peer's identity to be authenticated; no: Do not require any authentication.",
+                    "create": true
+                },
+                "requireEncryption": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "yes: Require the connection to the peer to be encrypted; no: Permit non-encrypted communication with the peer",
+                    "create": true
+                },
+                "requireSsl": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "yes: Require the use of SSL or TLS on the connection; no: Allow clients to connect without SSL or TLS.",
                     "create": true
                 },
                 "trustedCerts": {
@@ -561,23 +603,27 @@
                     "description": "This optional setting can be used to reduce the set of available CAs for client authentication.  If used, this setting must provide a path to a PEM file that contains the trusted certificates.",
                     "create": true
                 },
-                "allowUnsecured": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "For listeners using SSL only.  If set to 'yes' the listener will allow both SSL-secured clients and non-SSL clients to connect.",
-                    "create": true
-                },
-                "allowNoSasl": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "If set to 'yes', this option causes the listener to allow clients to connect even if they skip the SASL authentication protocol.",
-                    "create": true
-                },
                 "maxFrameSize": {
                     "type": "integer",
                     "default": 65536,
                     "description": "Defaults to 65536.  If specified, it is the maximum frame size in octets that will be used in the connection-open negotiation with a connected peer.  The frame size is the largest contiguous set of uninterrupted data that can be sent for a message delivery over the connection. Interleaving of messages on different links is done at frame granularity.",
                     "create": true
+                },
+
+                "requirePeerAuth": {
+                    "type": "boolean",
+                    "create": true,
+                    "description": "Deprecated - This attribute is now controlled by the authenticatePeer attribute."
+                },
+                "allowUnsecured": {
+                    "type": "boolean",
+                    "create": true,
+                    "description": "Deprecated - This attribute is now controlled by the requireEncryption attribute."
+                },
+                "allowNoSasl": {
+                    "type": "boolean",
+                    "create": true,
+                    "description": "Deprecated - This attribute is now controlled by the authenticatePeer attribute."
                 }
             }
         },
@@ -589,10 +635,15 @@
             "annotations": [
                 "addrPort",
                 "connectionRole",
-                "sslProfile",
-                "saslMechanisms"
+                "sslProfile"
             ],
             "attributes": {
+                "saslMechanisms": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Comma separated list of accepted SASL authentication mechanisms.",
+                    "create": true
+                },
                 "allowRedirect": {
                     "type": "boolean",
                     "default": true,
@@ -754,8 +805,8 @@
                 "linkType": {"type": ["endpoint", "waypoint", "inter-router", "inter-area"]},
                 "linkDir": {"type": ["in", "out"]},
                 "owningAddr": {"type": "string"},
-                "eventFifoDepth": {"type": "integer"},
-                "msgFifoDepth": {"type": "integer"},
+                "eventFifoDepth": {"type": "integer", "graph": true},
+                "msgFifoDepth": {"type": "integer", "graph": true},
                 "remoteContainer": {"type": "string"}
             }
         },
@@ -765,13 +816,13 @@
             "extends": "operationalEntity",
             "attributes": {
                 "inProcess": {"type": "boolean"},
-                "subscriberCount": {"type": "integer"},
-                "remoteCount": {"type": "integer"},
-                "deliveriesIngress": {"type": "integer"},
-                "deliveriesEgress": {"type": "integer"},
-                "deliveriesTransit": {"type": "integer"},
-                "deliveriesToContainer": {"type": "integer"},
-                "deliveriesFromContainer": {"type": "integer"},
+                "subscriberCount": {"type": "integer", "graph": true},
+                "remoteCount": {"type": "integer", "graph": true},
+                "deliveriesIngress": {"type": "integer", "graph": true},
+                "deliveriesEgress": {"type": "integer", "graph": true},
+                "deliveriesTransit": {"type": "integer", "graph": true},
+                "deliveriesToContainer": {"type": "integer", "graph": true},
+                "deliveriesFromContainer": {"type": "integer", "graph": true},
                 "key": {
                     "description": "Internal unique (to this router) key to identify the address",
                     "type": "string"
@@ -839,9 +890,41 @@
                     "type": ["in", "out"]
                 },
                 "role": {"type": "string"},
+                "isAuthenticated": {
+                    "description": "Indicates whether the identity of the connection's user is authentic.",
+                    "type": "boolean"
+                },
+                "isEncrypted": {
+                    "description": "Indicates whether the connection content is encrypted.",
+                    "type": "boolean"
+                },
                 "sasl": {
-                    "description": "SASL mechanism used for authentication.",
+                    "description": "SASL mechanism in effect for authentication.",
                     "type": "string"
+                },
+                "user": {
+                    "description": "Identity of the authenticated user.",
+                    "type": "string"
+                },
+                "ssl": {
+                    "description": "True iff SSL/TLS is in effect for this connection.",
+                    "type": "boolean"
+                },
+                "sslProto": {
+                    "description": "SSL protocol name",
+                    "type": "string"
+                },
+                "sslCipher": {
+                    "description": "SSL cipher name",
+                    "type": "string"
+                },
+                "sslSsf": {
+                    "description": "SSL strength factor in effect",
+                    "type": "integer"
+                },
+                "properties": {
+                    "description": "Connection properties supplied by the peer.",
+                    "type": "map"
                 }
             }
         },
@@ -853,13 +936,27 @@
                 "typeName": {"type": "string"},
                 "typeSize": {"type": "integer"},
                 "transferBatchSize": {"type": "integer"},
-                "localFreeListMax": {"type": "integer"},
-                "globalFreeListMax": {"type": "integer"},
-                "totalAllocFromHeap": {"type": "integer"},
-                "totalFreeToHeap": {"type": "integer"},
-                "heldByThreads": {"type": "integer"},
-                "batchesRebalancedToThreads": {"type": "integer"},
-                "batchesRebalancedToGlobal": {"type": "integer"}
+                "localFreeListMax": {"type": "integer", "graph": true},
+                "globalFreeListMax": {"type": "integer", "graph": true},
+                "totalAllocFromHeap": {"type": "integer", "graph": true},
+                "totalFreeToHeap": {"type": "integer", "graph": true},
+                "heldByThreads": {"type": "integer", "graph": true},
+                "batchesRebalancedToThreads": {"type": "integer", "graph": true},
+                "batchesRebalancedToGlobal": {"type": "integer", "graph": true}
+            }
+        },
+
+        "console": {
+            "description": "Start a websocket/tcp proxy and http file server to serve the web console",
+            "extends": "configurationEntity",
+            "singleton": true,
+            "attributes": { 
+                "listener": {"type": "string", "description": "The name of the listener to send the proxied tcp traffic to."},
+                "wsport": {"type": "integer", "description": "port on which to listen for websocket traffic", "default": 5673},
+                "proxy": {"type": "string", "description": "The full path to the proxy program to run."},
+                "home": {"type": "string", "description": "The full path to the html/css/js files for the console."},
+                "args": {"type": "string", "description": "Optional args to pass the proxy program for logging, authentication, etc."}  
+
             }
         },
 

@@ -17,8 +17,8 @@
 # under the License.
 #
 
-from data import LinkState, MessageHELLO
-from dispatch import LOG_INFO, LOG_TRACE
+from data import MessageHELLO
+from qpid_dispatch_internal.dispatch import LOG_INFO, LOG_TRACE
 
 class HelloProtocol(object):
     """

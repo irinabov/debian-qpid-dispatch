@@ -23,9 +23,11 @@ set (CMAKE_BUILD_TYPE RelWithDebInfo CACHE string
 if (CMAKE_BUILD_TYPE MATCHES "Deb")
   set (has_debug_symbols " (has debug symbols)")
 endif (CMAKE_BUILD_TYPE MATCHES "Deb")
-message("Build type is \"${CMAKE_BUILD_TYPE}\"${has_debug_symbols}")
 
 project(qpid-dispatch C)
+
+# Build time switch to turn off memory pooling.
+option(USE_MEMORY_POOL "Use per-thread memory pools" ON)
 
 file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION.txt" QPID_DISPATCH_VERSION)
 
@@ -44,8 +46,8 @@ if (NOT PYTHONLIBS_FOUND)
      message(FATAL_ERROR "Python Development Libraries are needed.")
 endif (NOT PYTHONLIBS_FOUND)
 
-set (SO_VERSION_MAJOR 0)
-set (SO_VERSION_MINOR 1)
+set (SO_VERSION_MAJOR 1)
+set (SO_VERSION_MINOR 0)
 set (SO_VERSION "${SO_VERSION_MAJOR}.${SO_VERSION_MINOR}")
 
 if (NOT DEFINED LIB_SUFFIX)
@@ -81,11 +83,18 @@ set(QPID_DISPATCH_CONFDIR ${SYSCONF_INSTALL_DIR}/qpid-dispatch)
 ##
 ## Find dependencies
 ##
-find_library(proton_lib qpid-proton)
 find_library(pthread_lib pthread)
 find_library(dl_lib dl)
 find_library(rt_lib rt)
-find_path(proton_include proton/version.h)
+find_package(Proton 0.10 REQUIRED)
+
+##
+## Find Valgrind
+##
+find_program(VALGRIND_EXECUTABLE valgrind DOC "Location of the valgrind program")
+mark_as_advanced(VALGRIND_EXECUTABLE)
+find_package_handle_standard_args(VALGRIND DEFAULT_MSG VALGRIND_EXECUTABLE)
+option(USE_VALGRIND "Use valgrind when running tests" OFF)
 
 ##
 ## Include directories used by all sub-directories.
@@ -93,7 +102,7 @@ find_path(proton_include proton/version.h)
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_BINARY_DIR}/include
-    ${proton_include}
+    ${Proton_INCLUDE_DIRS}
     ${PYTHON_INCLUDE_PATH}
     )
 
@@ -116,6 +125,7 @@ file(GLOB headers "include/qpid/dispatch/*.h")
 install(FILES ${headers} DESTINATION ${INCLUDE_INSTALL_DIR}/qpid/dispatch)
 install(FILES include/qpid/dispatch.h DESTINATION ${INCLUDE_INSTALL_DIR}/qpid)
 install(FILES etc/qdrouterd.conf DESTINATION ${SYSCONF_INSTALL_DIR}/qpid-dispatch)
+install(FILES etc/sasl2/qdrouterd.conf DESTINATION ${SYSCONF_INSTALL_DIR}/sasl2)
 
 # Tools
 install(PROGRAMS
@@ -143,3 +153,13 @@ add_subdirectory(tests)
 add_subdirectory(python)
 add_subdirectory(router)
 add_subdirectory(doc)
+
+# reconfigure.in is a workaround to force cmake re-configuration. For example,
+# we use GLOB to collect .h files for install and apidoc, so if you _remove_ a
+# .h file it won't trigger automatic re-configure and everybody's builds will
+# fail till they run cmake manually.
+#
+# If you do check in such a change, increase the number in this file by 1.
+# That will force automatic re-configure and everybody will be happy.
+#
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/reconfigure.in ${CMAKE_CURRENT_BINARY_DIR}/reconfigure)

@@ -59,16 +59,15 @@ static void qd_waypoint_visit_sink_LH(qd_dispatch_t *qd, qd_waypoint_t *wp)
         // Compose the phased-address and search the routing table for the address.
         // If it's not found, add it to the table but leave the link/router linkages empty.
         //
-        qd_field_iterator_t *iter = qd_field_iterator_string(wp->address, ITER_VIEW_ADDRESS_HASH);
-        qd_field_iterator_set_phase(iter, wp->in_phase);
+        qd_field_iterator_t *iter = qd_address_iterator_string(wp->address, ITER_VIEW_ADDRESS_HASH);
+        qd_address_iterator_set_phase(iter, wp->in_phase);
         qd_hash_retrieve(router->addr_hash, iter, (void*) &addr);
 
         if (!addr) {
-            addr = qd_address();
+            addr = qd_address(router_semantics_for_addr(router, iter, wp->in_phase, &unused));
             qd_hash_insert(router->addr_hash, iter, addr, &addr->hash_handle);
             DEQ_INSERT_TAIL(router->addrs, addr);
             addr->waypoint  = true;
-            addr->semantics = router_semantics_for_addr(router, iter, wp->in_phase, &unused);
             qd_entity_cache_add(QD_ROUTER_ADDRESS_TYPE, addr);
         }
 
@@ -98,14 +97,16 @@ static void qd_waypoint_visit_sink_LH(qd_dispatch_t *qd, qd_waypoint_t *wp)
         rlink->target         = 0;
         DEQ_INIT(rlink->event_fifo);
         DEQ_INIT(rlink->msg_fifo);
+        DEQ_INIT(rlink->deliveries);
+
         qd_entity_cache_add(QD_ROUTER_LINK_TYPE, rlink);
         DEQ_INSERT_TAIL(router->links, rlink);
         qd_link_set_context(wp->out_link, rlink);
         qd_router_add_link_ref_LH(&addr->rlinks, rlink);
 
         if (DEQ_SIZE(addr->rlinks) == 1) {
-            qd_field_iterator_t *iter = qd_field_iterator_string(wp->address, ITER_VIEW_ADDRESS_HASH);
-            qd_field_iterator_set_phase(iter, wp->in_phase);
+            qd_field_iterator_t *iter = qd_address_iterator_string(wp->address, ITER_VIEW_ADDRESS_HASH);
+            qd_address_iterator_set_phase(iter, wp->in_phase);
             qd_router_mobile_added(router, iter);
             qd_field_iterator_free(iter);
         }
@@ -133,16 +134,15 @@ static void qd_waypoint_visit_source_LH(qd_dispatch_t *qd, qd_waypoint_t *wp)
         // Compose the phased-address and search the routing table for the address.
         // If it's not found, add it to the table but leave the link/router linkages empty.
         //
-        qd_field_iterator_t *iter = qd_field_iterator_string(wp->address, ITER_VIEW_ADDRESS_HASH);
-        qd_field_iterator_set_phase(iter, wp->out_phase);
+        qd_field_iterator_t *iter = qd_address_iterator_string(wp->address, ITER_VIEW_ADDRESS_HASH);
+        qd_address_iterator_set_phase(iter, wp->out_phase);
         qd_hash_retrieve(router->addr_hash, iter, (void*) &addr);
 
         if (!addr) {
-            addr = qd_address();
+            addr = qd_address(router_semantics_for_addr(router, iter, wp->out_phase, &unused));
             qd_hash_insert(router->addr_hash, iter, addr, &addr->hash_handle);
             DEQ_INSERT_TAIL(router->addrs, addr);
             addr->waypoint  = true;
-            addr->semantics = router_semantics_for_addr(router, iter, wp->out_phase, &unused);
             qd_entity_cache_add(QD_ROUTER_ADDRESS_TYPE, addr);
         }
 
@@ -172,6 +172,8 @@ static void qd_waypoint_visit_source_LH(qd_dispatch_t *qd, qd_waypoint_t *wp)
         rlink->target         = 0;
         DEQ_INIT(rlink->event_fifo);
         DEQ_INIT(rlink->msg_fifo);
+        DEQ_INIT(rlink->deliveries);
+
         qd_entity_cache_add(QD_ROUTER_LINK_TYPE, rlink);
         DEQ_INSERT_TAIL(router->links, rlink);
         qd_link_set_context(wp->in_link, rlink);

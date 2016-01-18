@@ -49,31 +49,19 @@ DEQ_DECLARE(qd_node_t, qd_node_list_t);
 ALLOC_DECLARE(qd_node_t);
 ALLOC_DEFINE(qd_node_t);
 
+
 /** Encapsulates a proton link for sending and receiving messages */
 struct qd_link_t {
-    pn_session_t *pn_sess;
-    pn_link_t    *pn_link;
-    void         *context;
-    qd_node_t    *node;
-    bool          drain_mode;
+    pn_session_t       *pn_sess;
+    pn_link_t          *pn_link;
+    void               *context;
+    qd_node_t          *node;
+    bool                drain_mode;
+    bool                close_sess_with_link;
 };
 
 ALLOC_DECLARE(qd_link_t);
 ALLOC_DEFINE(qd_link_t);
-
-/** Encapsulates a proton message delivery */
-struct qd_delivery_t {
-    pn_delivery_t *pn_delivery;
-    qd_delivery_t *peer;
-    void          *context;
-    uint64_t       disposition;
-    qd_link_t     *link;
-    int            in_fifo;
-    bool           pending_delete;
-};
-
-ALLOC_DECLARE(qd_delivery_t);
-ALLOC_DEFINE(qd_delivery_t);
 
 
 typedef struct qdc_node_type_t {
@@ -103,7 +91,7 @@ static void setup_outgoing_link(qd_container_t *container, pn_link_t *pn_link)
     // TODO - Extract the name from the structured source
 
     if (source) {
-        iter   = qd_field_iterator_string(source, ITER_VIEW_NODE_ID);
+        iter   = qd_address_iterator_string(source, ITER_VIEW_NODE_ID);
         qd_hash_retrieve(container->node_map, iter, (void*) &node);
         qd_field_iterator_free(iter);
     }
@@ -113,8 +101,9 @@ static void setup_outgoing_link(qd_container_t *container, pn_link_t *pn_link)
         if (container->default_node)
             node = container->default_node;
         else {
-            // Reject the link
-            // TODO - When the API allows, add an error message for "no available node"
+            pn_condition_t *cond = pn_link_condition(pn_link);
+            pn_condition_set_name(cond, "amqp:not-found");
+            pn_condition_set_description(cond, "Source node does not exist");
             pn_link_close(pn_link);
             pn_link_free(pn_link);
             return;
@@ -123,6 +112,9 @@ static void setup_outgoing_link(qd_container_t *container, pn_link_t *pn_link)
 
     qd_link_t *link = new_qd_link_t();
     if (!link) {
+        pn_condition_t *cond = pn_link_condition(pn_link);
+        pn_condition_set_name(cond, "amqp:internal-error");
+        pn_condition_set_description(cond, "Insufficient memory");
         pn_link_close(pn_link);
         pn_link_free(pn_link);
         return;
@@ -133,6 +125,7 @@ static void setup_outgoing_link(qd_container_t *container, pn_link_t *pn_link)
     link->context    = 0;
     link->node       = node;
     link->drain_mode = pn_link_get_drain(pn_link);
+    link->close_sess_with_link = false;
 
     pn_link_set_context(pn_link, link);
     node->ntype->outgoing_handler(node->context, link);
@@ -145,10 +138,9 @@ static void setup_incoming_link(qd_container_t *container, pn_link_t *pn_link)
     qd_node_t   *node = 0;
     const char  *target = pn_terminus_get_address(pn_link_remote_target(pn_link));
     qd_field_iterator_t *iter;
-    // TODO - Extract the name from the structured target
 
     if (target) {
-        iter   = qd_field_iterator_string(target, ITER_VIEW_NODE_ID);
+        iter   = qd_address_iterator_string(target, ITER_VIEW_NODE_ID);
         qd_hash_retrieve(container->node_map, iter, (void*) &node);
         qd_field_iterator_free(iter);
     }
@@ -158,8 +150,9 @@ static void setup_incoming_link(qd_container_t *container, pn_link_t *pn_link)
         if (container->default_node)
             node = container->default_node;
         else {
-            // Reject the link
-            // TODO - When the API allows, add an error message for "no available node"
+            pn_condition_t *cond = pn_link_condition(pn_link);
+            pn_condition_set_name(cond, "amqp:not-found");
+            pn_condition_set_description(cond, "Target node does not exist");
             pn_link_close(pn_link);
             pn_link_free(pn_link);
             return;
@@ -168,6 +161,9 @@ static void setup_incoming_link(qd_container_t *container, pn_link_t *pn_link)
 
     qd_link_t *link = new_qd_link_t();
     if (!link) {
+        pn_condition_t *cond = pn_link_condition(pn_link);
+        pn_condition_set_name(cond, "amqp:internal-error");
+        pn_condition_set_description(cond, "Insufficient memory");
         pn_link_close(pn_link);
         pn_link_free(pn_link);
         return;
@@ -178,6 +174,7 @@ static void setup_incoming_link(qd_container_t *container, pn_link_t *pn_link)
     link->context    = 0;
     link->node       = node;
     link->drain_mode = pn_link_get_drain(pn_link);
+    link->close_sess_with_link = false;
 
     pn_link_set_context(pn_link, link);
     node->ntype->incoming_handler(node->context, link);
@@ -212,24 +209,11 @@ static void do_receive(pn_delivery_t *pnd)
 {
     pn_link_t     *pn_link  = pn_delivery_link(pnd);
     qd_link_t     *link     = (qd_link_t*) pn_link_get_context(pn_link);
-    qd_delivery_t *delivery = (qd_delivery_t*) pn_delivery_get_context(pnd);
 
     if (link) {
         qd_node_t *node = link->node;
         if (node) {
-            if (!delivery) {
-                delivery = new_qd_delivery_t();
-                delivery->pn_delivery    = pnd;
-                delivery->peer           = 0;
-                delivery->context        = 0;
-                delivery->disposition    = 0;
-                delivery->link           = link;
-                delivery->in_fifo        = 0;
-                delivery->pending_delete = false;
-                pn_delivery_set_context(pnd, delivery);
-            }
-
-            node->ntype->rx_handler(node->context, link, delivery);
+            node->ntype->rx_handler(node->context, link, pnd);
             return;
         }
     }
@@ -248,12 +232,11 @@ static void do_updated(pn_delivery_t *pnd)
 {
     pn_link_t     *pn_link  = pn_delivery_link(pnd);
     qd_link_t     *link     = (qd_link_t*) pn_link_get_context(pn_link);
-    qd_delivery_t *delivery = (qd_delivery_t*) pn_delivery_get_context(pnd);
 
-    if (link && delivery) {
+    if (link) {
         qd_node_t *node = link->node;
         if (node)
-            node->ntype->disp_handler(node->context, link, delivery);
+            node->ntype->disp_handler(node->context, link, pnd);
     }
 }
 
@@ -263,19 +246,21 @@ static int close_handler(void* unused, pn_connection_t *conn, qd_connection_t* q
     qd_connection_manager_connection_closed(qd_conn);
 
     //
-    // Close all links, passing False as the 'closed' argument.  These links are not
+    // Close all links, passing QD_LOST as the reason.  These links are not
     // being properly 'detached'.  They are being orphaned.
     //
     pn_link_t *pn_link = pn_link_head(conn, PN_LOCAL_ACTIVE);
+    pn_link_t *link_to_free;
     while (pn_link) {
         qd_link_t *link = (qd_link_t*) pn_link_get_context(pn_link);
         if (link) {
             qd_node_t *node = link->node;
-            if (node)
-                node->ntype->link_detach_handler(node->context, link, 0);
+            if (node) {
+                node->ntype->link_detach_handler(node->context, link, QD_LOST);
+            }
         }
         pn_link_close(pn_link);
-        pn_link_t *link_to_free = pn_link;
+        link_to_free = pn_link;
         pn_link = pn_link_next(pn_link, PN_LOCAL_ACTIVE);
         pn_link_free(link_to_free);
     }
@@ -296,129 +281,10 @@ static int close_handler(void* unused, pn_connection_t *conn, qd_connection_t* q
 }
 
 
-static int process_handler(qd_container_t *container, void* unused, qd_connection_t *qd_conn)
+static int writable_handler(void* unused, pn_connection_t *conn, qd_connection_t* qd_conn)
 {
-    pn_session_t    *ssn;
-    pn_link_t       *pn_link;
-    qd_link_t       *qd_link;
-    pn_delivery_t   *delivery;
-    pn_collector_t  *collector   = qd_connection_collector(qd_conn);
-    pn_connection_t *conn        = qd_connection_pn(qd_conn);
-    pn_event_t      *event;
-    int              event_count = 0;
-
-    //
-    // Spin through the collected events for this connection and process them
-    // individually.
-    //
-    event = pn_collector_peek(collector);
-    while (event) {
-        event_count++;
-
-        switch (pn_event_type(event)) {
-        case PN_CONNECTION_REMOTE_OPEN :
-            if (pn_connection_state(conn) & PN_LOCAL_UNINIT)
-                pn_connection_open(conn);
-            qd_connection_manager_connection_opened(qd_conn);
-            break;
-
-        case PN_CONNECTION_REMOTE_CLOSE :
-            if (pn_connection_state(conn) == (PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED))
-                pn_connection_close(conn);
-            qd_connection_manager_connection_closed(qd_conn);
-            break;
-
-        case PN_SESSION_REMOTE_OPEN :
-            ssn = pn_event_session(event);
-            if (pn_session_state(ssn) & PN_LOCAL_UNINIT) {
-                pn_session_set_incoming_capacity(ssn, 1000000);
-                pn_session_open(ssn);
-            }
-            break;
-
-        case PN_SESSION_REMOTE_CLOSE :
-            ssn = pn_event_session(event);
-            if (pn_session_state(ssn) == (PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED)) {
-                // remote has nuked our session.  Check for any links that were
-                // left open and forcibly detach them, since no detaches will
-                // arrive on this session.
-                pn_connection_t *conn = pn_session_connection(ssn);
-                pn_link_t *pn_link = pn_link_head(conn, PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE);
-                while (pn_link) {
-                    if (pn_link_session(pn_link) == ssn) {
-                        qd_link_t *qd_link = (qd_link_t *)pn_link_get_context(pn_link);
-                        if (qd_link && qd_link->node) {
-                            qd_log(container->log_source, QD_LOG_NOTICE,
-                                   "Aborting link '%s' due to parent session end",
-                                   pn_link_name(pn_link));
-                            qd_link->node->ntype->link_detach_handler(qd_link->node->context,
-                                                                      qd_link, 1); // assume
-                                                                                   // closed?
-                            pn_link_close(pn_link);
-                            pn_link_free(pn_link);
-                        }
-                    }
-                    pn_link = pn_link_next(pn_link, PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE);
-                }
-                pn_session_close(ssn);
-                pn_session_free(ssn);
-            }
-            break;
-
-        case PN_LINK_REMOTE_OPEN :
-            pn_link = pn_event_link(event);
-            if (pn_link_state(pn_link) & PN_LOCAL_UNINIT) {
-                if (pn_link_is_sender(pn_link))
-                    setup_outgoing_link(container, pn_link);
-                else
-                    setup_incoming_link(container, pn_link);
-            } else if (pn_link_state(pn_link) & PN_LOCAL_ACTIVE)
-                handle_link_open(container, pn_link);
-            break;
-
-        case PN_LINK_REMOTE_CLOSE :
-            pn_link = pn_event_link(event);
-            if (pn_link_state(pn_link) == (PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED)) {
-                qd_link = (qd_link_t*) pn_link_get_context(pn_link);
-                qd_node_t *node = qd_link->node;
-                if (node)
-                    node->ntype->link_detach_handler(node->context, qd_link, 1); // TODO - get 'closed' from detach message
-                pn_link_close(pn_link);
-                pn_link_free(pn_link);
-            }
-            break;
-
-        case PN_LINK_FINAL :
-            pn_link = pn_event_link(event);
-            qd_link = (qd_link_t*) pn_link_get_context(pn_link);
-            free_qd_link_t(qd_link);
-            break;
-
-        case PN_LINK_FLOW :
-            pn_link = pn_event_link(event);
-            qd_link = (qd_link_t*) pn_link_get_context(pn_link);
-            if (qd_link && qd_link->node && qd_link->node->ntype->link_flow_handler)
-                qd_link->node->ntype->link_flow_handler(qd_link->node->context, qd_link);
-            
-
-        case PN_DELIVERY :
-            delivery = pn_event_delivery(event);
-            if (pn_delivery_readable(delivery))
-                do_receive(delivery);
-
-            if (pn_delivery_updated(delivery)) {
-                do_updated(delivery);
-                pn_delivery_clear(delivery);
-            }
-            break;
-
-        default :
-            break;
-        }
-
-        pn_collector_pop(collector);
-        event = pn_collector_peek(collector);
-    }
+    pn_link_t *pn_link;
+    int        event_count = 0;
 
     //
     // Call the attached node's writable handler for all active links
@@ -427,15 +293,164 @@ static int process_handler(qd_container_t *container, void* unused, qd_connectio
     // deliveries are a subset of the traffic that flows both directions on links.
     //
     if (pn_connection_state(conn) == (PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE)) {
-        pn_link = pn_link_head(conn, PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE);
+        pn_link = pn_link_head(conn, 0);
         while (pn_link) {
             assert(pn_session_connection(pn_link_session(pn_link)) == conn);
             event_count += do_writable(pn_link);
-            pn_link = pn_link_next(pn_link, PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE);
+            pn_link = pn_link_next(pn_link, 0);
         }
     }
-
     return event_count;
+}
+
+
+int pn_event_handler(void *handler_context, void *conn_context, pn_event_t *event, qd_connection_t *qd_conn)
+{
+    qd_container_t  *container = (qd_container_t*) handler_context;
+    pn_connection_t *conn      = qd_connection_pn(qd_conn);
+    pn_session_t    *ssn;
+    pn_link_t       *pn_link;
+    qd_link_t       *qd_link;
+    pn_delivery_t   *delivery;
+
+    switch (pn_event_type(event)) {
+    case PN_CONNECTION_REMOTE_OPEN :
+        if (pn_connection_state(conn) & PN_LOCAL_UNINIT)
+            pn_connection_open(conn);
+        qd_connection_manager_connection_opened(qd_conn);
+        break;
+
+    case PN_CONNECTION_REMOTE_CLOSE :
+        if (pn_connection_state(conn) == (PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED))
+            pn_connection_close(conn);
+        qd_connection_manager_connection_closed(qd_conn);
+        break;
+
+    case PN_SESSION_REMOTE_OPEN :
+        ssn = pn_event_session(event);
+        if (pn_session_state(ssn) & PN_LOCAL_UNINIT) {
+            pn_session_set_incoming_capacity(ssn, 1000000);
+            pn_session_open(ssn);
+        }
+        break;
+
+    case PN_SESSION_REMOTE_CLOSE :
+        ssn = pn_event_session(event);
+        if (pn_session_state(ssn) == (PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED)) {
+            // remote has nuked our session.  Check for any links that were
+            // left open and forcibly detach them, since no detaches will
+            // arrive on this session.
+            pn_connection_t *conn = pn_session_connection(ssn);
+            pn_link_t *pn_link = pn_link_head(conn, PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE);
+            while (pn_link) {
+                if (pn_link_session(pn_link) == ssn) {
+                    qd_link_t *qd_link = (qd_link_t *)pn_link_get_context(pn_link);
+                    if (qd_link && qd_link->node) {
+                        qd_log(container->log_source, QD_LOG_NOTICE,
+                               "Aborting link '%s' due to parent session end",
+                               pn_link_name(pn_link));
+                        qd_link->node->ntype->link_detach_handler(qd_link->node->context,
+                                                                  qd_link, QD_LOST);
+                    }
+                }
+                pn_link = pn_link_next(pn_link, PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE);
+            }
+            pn_session_close(ssn);
+            pn_session_free(ssn);
+        }
+        break;
+
+    case PN_LINK_REMOTE_OPEN :
+        pn_link = pn_event_link(event);
+        if (pn_link_state(pn_link) & PN_LOCAL_UNINIT) {
+            if (pn_link_is_sender(pn_link))
+                setup_outgoing_link(container, pn_link);
+            else
+                setup_incoming_link(container, pn_link);
+        } else if (pn_link_state(pn_link) & PN_LOCAL_ACTIVE)
+            handle_link_open(container, pn_link);
+        break;
+
+    case PN_LINK_REMOTE_CLOSE :
+    case PN_LINK_REMOTE_DETACH :
+        pn_link = pn_event_link(event);
+        qd_link = (qd_link_t*) pn_link_get_context(pn_link);
+        if (qd_link) {
+            qd_node_t *node = qd_link->node;
+            qd_detach_type_t dt = pn_event_type(event) == PN_LINK_REMOTE_CLOSE ? QD_CLOSED : QD_DETACHED;
+            if (node)
+                node->ntype->link_detach_handler(node->context, qd_link, dt);
+
+            //
+            // If the qd_link does not reference the pn_link, we have already freed the pn_link.
+            // If we attempt to free it again, proton will crash.
+            //
+            if (qd_link->pn_link == pn_link) {
+                pn_link_close(pn_link);
+                pn_link_free(pn_link);
+            }
+        }
+        break;
+
+    case PN_LINK_FINAL :
+        pn_link = pn_event_link(event);
+        qd_link = (qd_link_t*) pn_link_get_context(pn_link);
+        break;
+
+    case PN_LINK_FLOW :
+        pn_link = pn_event_link(event);
+        qd_link = (qd_link_t*) pn_link_get_context(pn_link);
+        if (qd_link && qd_link->node && qd_link->node->ntype->link_flow_handler)
+            qd_link->node->ntype->link_flow_handler(qd_link->node->context, qd_link);
+        break;
+
+    case PN_DELIVERY :
+        delivery = pn_event_delivery(event);
+        if (pn_delivery_readable(delivery))
+            do_receive(delivery);
+
+        if (pn_delivery_updated(delivery)) {
+            do_updated(delivery);
+            pn_delivery_clear(delivery);
+        }
+        break;
+
+    case PN_EVENT_NONE :
+    case PN_REACTOR_INIT :
+    case PN_REACTOR_QUIESCED :
+    case PN_REACTOR_FINAL :
+    case PN_TIMER_TASK :
+    case PN_CONNECTION_INIT :
+    case PN_CONNECTION_BOUND :
+    case PN_CONNECTION_UNBOUND :
+    case PN_CONNECTION_LOCAL_OPEN :
+    case PN_CONNECTION_LOCAL_CLOSE :
+    case PN_CONNECTION_FINAL :
+    case PN_SESSION_INIT :
+    case PN_SESSION_LOCAL_OPEN :
+    case PN_SESSION_LOCAL_CLOSE :
+    case PN_SESSION_FINAL :
+    case PN_LINK_INIT :
+    case PN_LINK_LOCAL_OPEN :
+    case PN_LINK_LOCAL_CLOSE :
+    case PN_LINK_LOCAL_DETACH :
+    case PN_TRANSPORT :
+    case PN_TRANSPORT_ERROR :
+    case PN_TRANSPORT_HEAD_CLOSED :
+    case PN_TRANSPORT_TAIL_CLOSED :
+    case PN_TRANSPORT_CLOSED :
+    case PN_TRANSPORT_AUTHENTICATED :
+    case PN_SELECTABLE_INIT :
+    case PN_SELECTABLE_UPDATED :
+    case PN_SELECTABLE_READABLE :
+    case PN_SELECTABLE_WRITABLE :
+    case PN_SELECTABLE_ERROR :
+    case PN_SELECTABLE_EXPIRED :
+    case PN_SELECTABLE_FINAL :
+        break;
+    }
+
+    return 1;
 }
 
 
@@ -451,8 +466,6 @@ static void open_handler(qd_container_t *container, qd_connection_t *conn, qd_di
     sys_mutex_lock(container->lock);
     qdc_node_type_t *nt_item = DEQ_HEAD(container->node_type_list);
     sys_mutex_unlock(container->lock);
-
-    pn_connection_open(qd_connection_pn(conn));
 
     while (nt_item) {
         nt = nt_item->ntype;
@@ -480,7 +493,7 @@ static int handler(void *handler_context, void *conn_context, qd_conn_event_t ev
     case QD_CONN_EVENT_LISTENER_OPEN:  open_handler(container, qd_conn, QD_INCOMING, conn_context);   break;
     case QD_CONN_EVENT_CONNECTOR_OPEN: open_handler(container, qd_conn, QD_OUTGOING, conn_context);   break;
     case QD_CONN_EVENT_CLOSE:          return close_handler(conn_context, conn, qd_conn);
-    case QD_CONN_EVENT_PROCESS:        return process_handler(container, conn_context, qd_conn);
+    case QD_CONN_EVENT_WRITABLE:       return writable_handler(conn_context, conn, qd_conn);
     }
 
     return 0;
@@ -501,7 +514,7 @@ qd_container_t *qd_container(qd_dispatch_t *qd)
     DEQ_INIT(container->nodes);
     DEQ_INIT(container->node_type_list);
 
-    qd_server_set_conn_handler(qd, handler, container);
+    qd_server_set_conn_handler(qd, handler, pn_event_handler, container);
 
     qd_log(container->log_source, QD_LOG_TRACE, "Container Initialized");
     return container;
@@ -538,7 +551,7 @@ int qd_container_register_node_type(qd_dispatch_t *qd, const qd_node_type_t *nt)
     qd_container_t *container = qd->container;
 
     int result;
-    qd_field_iterator_t *iter = qd_field_iterator_string(nt->type_name, ITER_VIEW_ALL);
+    qd_field_iterator_t *iter = qd_field_iterator_string(nt->type_name);
     qdc_node_type_t     *nt_item = NEW(qdc_node_type_t);
     DEQ_ITEM_INIT(nt_item);
     nt_item->ntype = nt;
@@ -601,7 +614,7 @@ qd_node_t *qd_container_create_node(qd_dispatch_t        *qd,
     node->life_policy    = life_policy;
 
     if (name) {
-        qd_field_iterator_t *iter = qd_field_iterator_string(name, ITER_VIEW_ALL);
+        qd_field_iterator_t *iter = qd_field_iterator_string(name);
         sys_mutex_lock(container->lock);
         result = qd_hash_insert(container->node_map, iter, node, 0);
         if (result >= 0)
@@ -629,7 +642,7 @@ void qd_container_destroy_node(qd_node_t *node)
     qd_container_t *container = node->container;
 
     if (node->name) {
-        qd_field_iterator_t *iter = qd_field_iterator_string(node->name, ITER_VIEW_ALL);
+        qd_field_iterator_t *iter = qd_field_iterator_string(node->name);
         sys_mutex_lock(container->lock);
         qd_hash_remove(container->node_map, iter);
         DEQ_REMOVE(container->nodes, node);
@@ -675,6 +688,7 @@ qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, c
     link->context    = node->context;
     link->node       = node;
     link->drain_mode = pn_link_get_drain(link->pn_link);
+    link->close_sess_with_link = true;
 
     pn_link_set_context(link->pn_link, link);
 
@@ -684,7 +698,7 @@ qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, c
 }
 
 
-void qd_link_free(qd_link_t *link)
+void qd_link_free_LH(qd_link_t *link)
 {
     if (!link) return;
     free_qd_link_t(link);
@@ -705,6 +719,8 @@ void *qd_link_get_context(qd_link_t *link)
 
 void qd_link_set_conn_context(qd_link_t *link, void *context)
 {
+    if (!link || !link->pn_link)
+        return;
     pn_session_t *pn_sess = pn_link_session(link->pn_link);
     if (!pn_sess)
         return;
@@ -720,6 +736,8 @@ void qd_link_set_conn_context(qd_link_t *link, void *context)
 
 void *qd_link_get_conn_context(qd_link_t *link)
 {
+    if (!link || !link->pn_link)
+        return 0;
     pn_session_t *pn_sess = pn_link_session(link->pn_link);
     if (!pn_sess)
         return 0;
@@ -791,15 +809,15 @@ pn_terminus_t *qd_link_remote_target(qd_link_t *link)
 
 void qd_link_activate(qd_link_t *link)
 {
-    if (!link || !link->pn_link || pn_link_state(link->pn_link) != (PN_LOCAL_ACTIVE|PN_REMOTE_ACTIVE))
+    if (!link || !link->pn_link)
         return;
 
     pn_session_t *sess = pn_link_session(link->pn_link);
-    if (!sess || pn_session_state(sess) != (PN_LOCAL_ACTIVE|PN_REMOTE_ACTIVE))
+    if (!sess)
         return;
 
     pn_connection_t *conn = pn_session_connection(sess);
-    if (!conn || pn_connection_state(conn) != (PN_LOCAL_ACTIVE|PN_REMOTE_ACTIVE))
+    if (!conn)
         return;
 
     qd_connection_t *ctx = pn_connection_get_context(conn);
@@ -812,8 +830,15 @@ void qd_link_activate(qd_link_t *link)
 
 void qd_link_close(qd_link_t *link)
 {
-    pn_link_close(link->pn_link);
-    pn_link_free(link->pn_link);
+    if (link->pn_link) {
+        pn_link_close(link->pn_link);
+        pn_link_free(link->pn_link);
+        link->pn_link = 0;
+    }
+    if (link->close_sess_with_link && link->pn_sess) {
+        pn_session_close(link->pn_sess);
+        pn_session_free(link->pn_sess);
+    }
 }
 
 
@@ -829,146 +854,3 @@ bool qd_link_drain_changed(qd_link_t *link, bool *mode)
 }
 
 
-qd_delivery_t *qd_delivery(qd_link_t *link, pn_delivery_tag_t tag)
-{
-    pn_link_t *pnl = qd_link_pn(link);
-
-    //
-    // If there is a current delivery on this outgoing link, something
-    // is wrong with the delivey algorithm.  We assume that the current
-    // delivery ('pnd' below) is the one created by pn_delivery.  If it is
-    // not, then my understanding of how proton works is incorrect.
-    //
-    assert(!pn_link_current(pnl));
-
-    pn_delivery(pnl, tag);
-    pn_delivery_t *pnd = pn_link_current(pnl);
-
-    if (!pnd)
-        return 0;
-
-    qd_delivery_t *delivery = new_qd_delivery_t();
-    delivery->pn_delivery    = pnd;
-    delivery->peer           = 0;
-    delivery->context        = 0;
-    delivery->disposition    = 0;
-    delivery->link           = link;
-    delivery->in_fifo        = 0;
-    delivery->pending_delete = false;
-    pn_delivery_set_context(pnd, delivery);
-
-    return delivery;
-}
-
-
-void qd_delivery_free_LH(qd_delivery_t *delivery, uint64_t final_disposition)
-{
-    if (delivery->pn_delivery) {
-        if (final_disposition > 0)
-            pn_delivery_update(delivery->pn_delivery, final_disposition);
-        pn_delivery_set_context(delivery->pn_delivery, 0);
-        pn_delivery_settle(delivery->pn_delivery);
-        delivery->pn_delivery = 0;
-    }
-
-    assert(!delivery->peer);
-
-    if (delivery->in_fifo)
-        delivery->pending_delete = true;
-    else {
-        free_qd_delivery_t(delivery);
-    }
-}
-
-
-void qd_delivery_link_peers_LH(qd_delivery_t *right, qd_delivery_t *left)
-{
-    right->peer = left;
-    left->peer  = right;
-}
-
-
-void qd_delivery_unlink_LH(qd_delivery_t *delivery)
-{
-    if (delivery->peer) {
-        delivery->peer->peer = 0;
-        delivery->peer       = 0;
-    }
-}
-
-
-void qd_delivery_fifo_enter_LH(qd_delivery_t *delivery)
-{
-    delivery->in_fifo++;
-}
-
-
-bool qd_delivery_fifo_exit_LH(qd_delivery_t *delivery)
-{
-    delivery->in_fifo--;
-    if (delivery->in_fifo == 0 && delivery->pending_delete) {
-        free_qd_delivery_t(delivery);
-        return false;
-    }
-
-    return true;
-}
-
-
-void qd_delivery_set_context(qd_delivery_t *delivery, void *context)
-{
-    delivery->context = context;
-}
-
-
-void *qd_delivery_context(qd_delivery_t *delivery)
-{
-    return delivery->context;
-}
-
-
-qd_delivery_t *qd_delivery_peer(qd_delivery_t *delivery)
-{
-    return delivery->peer;
-}
-
-
-pn_delivery_t *qd_delivery_pn(qd_delivery_t *delivery)
-{
-    return delivery->pn_delivery;
-}
-
-
-void qd_delivery_settle(qd_delivery_t *delivery)
-{
-    if (delivery->pn_delivery) {
-        pn_delivery_set_context(delivery->pn_delivery, 0);
-        pn_delivery_settle(delivery->pn_delivery);
-        delivery->pn_delivery = 0;
-    }
-}
-
-
-bool qd_delivery_settled(qd_delivery_t *delivery)
-{
-    return pn_delivery_settled(delivery->pn_delivery);
-}
-
-
-bool qd_delivery_disp_changed(qd_delivery_t *delivery)
-{
-    return delivery->disposition != pn_delivery_remote_state(delivery->pn_delivery);
-}
-
-
-uint64_t qd_delivery_disp(qd_delivery_t *delivery)
-{
-    delivery->disposition = pn_delivery_remote_state(delivery->pn_delivery);
-    return delivery->disposition;
-}
-
-
-qd_link_t *qd_delivery_link(qd_delivery_t *delivery)
-{
-    return delivery->link;
-}

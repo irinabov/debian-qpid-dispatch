@@ -62,7 +62,7 @@ try:
     # In this case we won't have access to the run.py module so no valgrind.
     from run import with_valgrind
 except ImportError:
-    def with_valgrind(args, outfile): return args
+    def with_valgrind(args, outfile): return (args, 0)
 
 # Optional modules
 MISSING_MODULES = []
@@ -95,6 +95,8 @@ def find_exe(program):
                 return exe_file
     return None
 
+# The directory where this module lives. Used to locate static configuration files etc.
+DIR = os.path.dirname(__file__)
 
 def _check_requirements():
     """If requirements are missing, return a message, else return empty string."""
@@ -119,10 +121,11 @@ def retry_delay(deadline, delay, max_delay):
     time.sleep(min(delay, remaining))
     return min(delay*2, max_delay)
 
+# Valgrind significantly slows down the response time of the router, so use a
+# long default timeout
+TIMEOUT = float(os.environ.get("QPID_SYSTEM_TEST_TIMEOUT", 60))
 
-DEFAULT_TIMEOUT = float(os.environ.get("QPID_SYSTEM_TEST_TIMEOUT", 10))
-
-def retry(function, timeout=DEFAULT_TIMEOUT, delay=.001, max_delay=1):
+def retry(function, timeout=TIMEOUT, delay=.001, max_delay=1):
     """Call function until it returns a true value or timeout expires.
     Double the delay for each retry up to max_delay.
     Returns what function returns or None if timeout expires.
@@ -137,7 +140,7 @@ def retry(function, timeout=DEFAULT_TIMEOUT, delay=.001, max_delay=1):
             if delay is None:
                 return None
 
-def retry_exception(function, timeout=DEFAULT_TIMEOUT, delay=.001, max_delay=1, exception_test=None):
+def retry_exception(function, timeout=TIMEOUT, delay=.001, max_delay=1, exception_test=None):
     """Call function until it returns without exception or timeout expires.
     Double the delay for each retry up to max_delay.
     Calls exception_test with any exception raised by function, exception_test
@@ -156,7 +159,7 @@ def retry_exception(function, timeout=DEFAULT_TIMEOUT, delay=.001, max_delay=1, 
             if delay is None:
                 raise
 
-def port_available(port, host='0.0.0.0'):
+def port_available(port, host='127.0.0.1'):
     """Return true if connecting to host:port gives 'connection refused'."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -168,7 +171,7 @@ def port_available(port, host='0.0.0.0'):
         pass
     return False
 
-def wait_port(port, host='0.0.0.0', **retry_kwargs):
+def wait_port(port, host='127.0.0.1', **retry_kwargs):
     """Wait up to timeout for port (on host) to be connectable.
     Takes same keyword arguments as retry to control the timeout"""
     def check(e):
@@ -227,13 +230,14 @@ class Process(subprocess.Popen):
         """
         self.name = name or os.path.basename(args[0])
         self.args, self.expect = args, expect
+        self.outdir = os.getcwd()
         self.outfile = self.unique(self.name)
         self.out = open(self.outfile + '.out', 'w')
         with open(self.outfile + '.cmd', 'w') as f: f.write("%s\n" % ' '.join(args))
         self.torndown = False
         kwargs.setdefault('stdout', self.out)
         kwargs.setdefault('stderr', subprocess.STDOUT)
-        args = with_valgrind(args, self.outfile + '.vg')
+        args, self.valgrind_error = with_valgrind(args, self.outfile + '.vg')
         try:
             super(Process, self).__init__(args, **kwargs)
         except Exception, e:
@@ -250,10 +254,14 @@ class Process(subprocess.Popen):
             return
         self.torndown = True
         status = self.poll()
-        if status is None:
+        if status is None:    # still running
             self.terminate()
-            if self.wait() is None:
+            rc = self.wait()
+            if rc is None:
                 self.kill()
+            if self.valgrind_error and rc == self.valgrind_error:
+                # Report that valgrind found errors
+                status = rc;
         self.out.close()
         self.check_exit(status)
 
@@ -266,6 +274,8 @@ class Process(subprocess.Popen):
             else:
                 actual = "exit %s"%status
             assert condition, "Expected %s but %s: %s"%(expect, actual, self.name)
+        assert not self.valgrind_error or status != self.valgrind_error, \
+            "Valgrind detected errors!  See log file %s/%s.vg" % (self.outdir, self.outfile)
         if self.expect == Process.RUNNING:
             check(status is None, "still running")
         elif self.expect == Process.EXIT_OK:
@@ -295,8 +305,8 @@ class Qdrouterd(Process):
         """
 
         DEFAULTS = {
-            'listener':{'addr':'0.0.0.0', 'sasl-mechanisms':'ANONYMOUS'},
-            'connector':{'addr':'0.0.0.0', 'sasl-mechanisms':'ANONYMOUS', 'role':'on-demand'},
+            'listener':{'addr':'0.0.0.0', 'saslMechanisms':'ANONYMOUS', 'authenticatePeer': 'no'},
+            'connector':{'addr':'127.0.0.1', 'saslMechanisms':'ANONYMOUS', 'role':'on-demand'},
             'container':{'debugDump':"qddebug.txt"}
         }
 
@@ -352,7 +362,7 @@ class Qdrouterd(Process):
     def management(self):
         """Return a management agent proxy for this router"""
         if not self._management:
-            self._management = Node.connect(self.addresses[0], timeout=DEFAULT_TIMEOUT)
+            self._management = Node.connect(self.addresses[0], timeout=TIMEOUT)
         return self._management
 
     def teardown(self):
@@ -369,14 +379,14 @@ class Qdrouterd(Process):
     @property
     def addresses(self):
         """Return amqp://host:port addresses for all listeners"""
-        return ["amqp://anonymous@%s:%s"%(l['addr'], l['port']) for l in self.config.sections('listener')]
+        return ["amqp://%s:%s"%(l['addr'], l['port']) for l in self.config.sections('listener')]
 
     @property
     def hostports(self):
         """Return host:port for all listeners"""
         return ["%s:%s"%(l['addr'], l['port']) for l in self.config.sections('listener')]
 
-    def is_connected(self, port, host='0.0.0.0'):
+    def is_connected(self, port, host='127.0.0.1'):
         """If router has a connection to host:port return the management info.
         Otherwise return None"""
         try:
@@ -481,7 +491,7 @@ class Qpidd(Process):
 class Messenger(proton.Messenger):
     """Convenience additions to proton.Messenger"""
 
-    def __init__(self, name=None, timeout=DEFAULT_TIMEOUT, blocking=True):
+    def __init__(self, name=None, timeout=TIMEOUT, blocking=True):
         super(Messenger, self).__init__(name)
         self.timeout = timeout
         self.blocking = blocking
