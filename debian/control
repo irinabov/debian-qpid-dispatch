@@ -17,7 +17,7 @@ Homepage: http://qpid.apache.org/components/dispatch-router
 Package: libqpid-dispatch1
 Architecture: any
 Depends: libqpid-proton4, ${shlibs:Depends}, ${misc:Depends}
-Pre-Depends: multiarch-support
+Pre-Depends: ${misc:Pre-Depends}
 Multi-Arch: same
 Description: Qpid Dispatch Router library
  The Dispatch router is an AMQP router that provides advanced interconnect
