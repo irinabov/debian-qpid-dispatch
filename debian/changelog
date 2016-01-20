@@ -1,8 +1,8 @@
-qpid-dispatch (0.5-2qpid+wily1) wily; urgency=medium
+qpid-dispatch (0.5-1qpid+trusty1) wily; urgency=medium
 
   * Rebased to Dispatch 0.5.
 
- -- Irina Boverman <iboverma@redhat.com>  Thu, 14 Jan 2016 17:16:49 -0400
+ -- Irina Boverman <iboverma@redhat.com>  Thu, 20 Jan 2016 10:16:49 -0400
 
 qpid-dispatch (0.4-2qpid+trusty1) trusty; urgency=medium
 
