@@ -7,8 +7,5 @@ usr/lib/qpid-dispatch/python/qpid_dispatch_internal/compat/*.py
 usr/lib/qpid-dispatch/python/qpid_dispatch_internal/management/*.py
 usr/lib/qpid-dispatch/python/qpid_dispatch_internal/tools/*.py
 usr/lib/python2.7/dist-packages/qpid_dispatch/*.py
-usr/lib/python2.7/dist-packages/qpid_dispatch/proton_future/*.py
-usr/lib/python2.7/dist-packages/qpid_dispatch/router/*.py
-usr/lib/python2.7/dist-packages/qpid_dispatch/compat/*.py
 usr/lib/python2.7/dist-packages/qpid_dispatch/management/*.py
-usr/lib/python2.7/dist-packages/qpid_dispatch/tools/*.py
+usr/lib/python2.7/dist-packages/qpid_dispatch_site.py
