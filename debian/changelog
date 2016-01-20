@@ -1,4 +1,4 @@
-qpid-dispatch (0.5-2qpid+wily1) wily; urgency=medium
+qpid-dispatch (0.5-1qpid+wily1) wily; urgency=medium
 
   * Rebased to Dispatch 0.5.
 
