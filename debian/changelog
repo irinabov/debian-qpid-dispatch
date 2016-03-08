@@ -1,14 +1,14 @@
-qpid-dispatch (0.5-6qpid+wily1) wily; urgency=medium
+qpid-dispatch (0.5-5qpid+trusty1) trusty; urgency=medium
 
   * Rebuilt against proton 0.12.0.
 
- -- Irina Boverman <iboverma@redhat.com>  Tue, 8 Mar 2016 10:46:49 -0400
+ -- Irina Boverman <iboverma@redhat.com>  Tue,  8 Mar 2016 13:16:49 -0400
 
-qpid-dispatch (0.5-5qpid+wily1) wily; urgency=medium
+qpid-dispatch (0.5-4qpid+trusty1) trusty; urgency=medium
 
   * Rebased to Dispatch 0.5.
 
- -- Irina Boverman <iboverma@redhat.com>  Wed, 20 Jan 2016 10:16:49 -0400
+ -- Irina Boverman <iboverma@redhat.com>  Thu, 20 Jan 2016 10:16:49 -0400
 
 qpid-dispatch (0.4-2qpid+trusty1) trusty; urgency=medium
 
