@@ -3,8 +3,8 @@ Description=Qpid Dispatch router daemon
 Requires=network.target
 
 [Service]
-User=qpidd
-Group=qpidd
+User=qdrouterd
+Group=qdrouterd
 Type=simple
 ExecStart=/usr/sbin/qdrouterd -c /etc/qpid-dispatch/qdrouterd.conf
 
