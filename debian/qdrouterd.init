@@ -32,26 +32,26 @@ SCRIPTNAME=/etc/init.d/$NAME
 
 do_start()
 {
-	start-stop-daemon --start --quiet --pidfile $PIDFILE --exec $DAEMON --test > /dev/null \
+	start-stop-daemon --start --user qdrouterd --chuid qdrouterd --quiet --pidfile $PIDFILE --exec $DAEMON --test > /dev/null \
 		|| return 1
-	start-stop-daemon --start --quiet --pidfile $PIDFILE --exec $DAEMON --make-pidfile --background -- \
+	start-stop-daemon --start --user qdrouterd --chuid qdrouterd --quiet --pidfile $PIDFILE --exec $DAEMON --make-pidfile --background -- \
 		$DAEMON_ARGS \
 		|| return 2
 }
 
 do_stop()
 {
-	start-stop-daemon --stop --quiet --retry=30 --pidfile $PIDFILE --name $NAME
+	start-stop-daemon --stop --user qdrouterd --quiet --retry=30 --pidfile $PIDFILE --name $NAME
 	RETVAL="$?"
 	[ "$RETVAL" = 2 ] && return 2
-	start-stop-daemon --stop --quiet --oknodo --retry=30 --exec $DAEMON
+	start-stop-daemon --stop --user qdrouterd --quiet --oknodo --retry=30 --exec $DAEMON
 	[ "$?" = 2 ] && return 2
 	rm -f $PIDFILE
 	return "$RETVAL"
 }
 
 do_reload() {
-	start-stop-daemon --stop --signal 1 --quiet --pidfile $PIDFILE --name $NAME
+	start-stop-daemon --stop --signal 1 --user qdrouterd --quiet --pidfile $PIDFILE --name $NAME
 	return 0
 }
 

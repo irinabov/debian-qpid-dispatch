@@ -11,17 +11,17 @@ set -e
 
 case "$1" in
     configure)
-        # create user qpidd if missing
-        if ! getent passwd qpidd > /dev/null ; then
+        # create user qdrouterd if missing
+        if ! getent passwd qdrouterd > /dev/null ; then
             echo "Adding system-user qdrouterd" 1>&2
-            adduser --system --home /var/run/qpid --group --no-create-home --disabled-password qpidd
+            adduser --system --home /var/run/qpid --group --no-create-home --disabled-password qdrouterd
         else
             echo "System-user qdrouterd already exists" 1>&2
         fi
 
         # ensure qdrouterd owns its own configuration file
         if [ -f $CONFFILE ]; then
-            chown qpidd:qpidd $CONFFILE 2>/dev/null
+            chown qdrouterd:qdrouterd $CONFFILE 2>/dev/null
             chmod 640 $CONFFILE
         fi
     ;;
