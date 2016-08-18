@@ -1,3 +1,9 @@
+qpid-dispatch (0.6.1-1qpid+trusty1) trusty; urgency=medium
+
+  * Rebuilt against proton 0.13.1.
+
+ -- Irina Boverman <iboverma@redhat.com>  Thu, 18 Aug 2016 10:04:45 -0400
+
 qpid-dispatch (0.5-5qpid+trusty1) trusty; urgency=medium
 
   * Rebuilt against proton 0.12.0.
