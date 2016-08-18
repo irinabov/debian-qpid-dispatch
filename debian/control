@@ -10,7 +10,7 @@ Build-Depends: debhelper (>= 9),
                graphviz,
                python-sphinx, 
                doxygen,
-               libqpid-proton6-dev (>= 0.13.0),
+               libqpid-proton7-dev (>= 0.13.0),
                python-qpid-proton (>= 0.13.0)
 Standards-Version: 3.9.5
 Homepage: http://qpid.apache.org/components/dispatch-router
