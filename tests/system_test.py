@@ -52,11 +52,12 @@ export PYTHONPATH="$PYTHONPATH:/usr/local/lib/proton/bindings/python:/usr/local/
 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib64"
 """
 
-import os, time, socket, random, subprocess, shutil, unittest, __main__, re
+import errno, os, time, socket, random, subprocess, shutil, unittest, __main__, re
 from copy import copy
 import proton
 from proton import Message
 from qpid_dispatch.management.client import Node
+
 try:
     # NOTE: the tests can be run outside a build to test an installed dispatch.
     # In this case we won't have access to the run.py module so no valgrind.
@@ -159,26 +160,37 @@ def retry_exception(function, timeout=TIMEOUT, delay=.001, max_delay=1, exceptio
             if delay is None:
                 raise
 
-def port_available(port, host='127.0.0.1'):
+def get_local_host_socket(protocol_family='IPv4'):
+    if protocol_family == 'IPv4':
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        host = '127.0.0.1'
+    elif protocol_family == 'IPv6':
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        host = '::1'
+
+    return s, host
+
+def port_available(port, protocol_family='IPv4'):
     """Return true if connecting to host:port gives 'connection refused'."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s, host = get_local_host_socket(protocol_family)
+
     try:
         s.connect((host, port))
         s.close()
     except socket.error, e:
-        return e.errno == 111
+        return e.errno == errno.ECONNREFUSED
     except:
         pass
     return False
 
-def wait_port(port, host='127.0.0.1', **retry_kwargs):
+def wait_port(port, protocol_family='IPv4', **retry_kwargs):
     """Wait up to timeout for port (on host) to be connectable.
     Takes same keyword arguments as retry to control the timeout"""
     def check(e):
         """Only retry on connection refused"""
-        if not isinstance(e, socket.error) or not e.errno == 111:
+        if not isinstance(e, socket.error) or not e.errno == errno.ECONNREFUSED:
             raise
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s, host = get_local_host_socket(protocol_family)
     try:
         retry_exception(lambda: s.connect((host, port)), exception_test=check,
                         **retry_kwargs)
@@ -187,11 +199,11 @@ def wait_port(port, host='127.0.0.1', **retry_kwargs):
 
     finally: s.close()
 
-def wait_ports(ports, host="127.0.0.1", **retry_kwargs):
+def wait_ports(ports, **retry_kwargs):
     """Wait up to timeout for all ports (on host) to be connectable.
     Takes same keyword arguments as retry to control the timeout"""
-    for p in ports:
-        wait_port(p, host=host, **retry_kwargs)
+    for port, protocol_family in ports.iteritems():
+        wait_port(port=port, protocol_family=protocol_family, **retry_kwargs)
 
 def message(**properties):
     """Convenience to create a proton.Message with properties set"""
@@ -305,9 +317,9 @@ class Qdrouterd(Process):
         """
 
         DEFAULTS = {
-            'listener':{'addr':'0.0.0.0', 'saslMechanisms':'ANONYMOUS', 'authenticatePeer': 'no'},
-            'connector':{'addr':'127.0.0.1', 'saslMechanisms':'ANONYMOUS', 'role':'on-demand'},
-            'container':{'debugDump':"qddebug.txt"}
+            'listener': {'host':'0.0.0.0', 'saslMechanisms':'ANONYMOUS', 'idleTimeoutSeconds': '120', 'authenticatePeer': 'no'},
+            'connector': {'host':'127.0.0.1', 'saslMechanisms':'ANONYMOUS', 'idleTimeoutSeconds': '120', 'role':'on-demand'},
+            'router': {'mode': 'standalone', 'id': 'QDR', 'debugDump': 'qddebug.txt',  'workerThreads': 1}
         }
 
         def sections(self, name):
@@ -315,7 +327,7 @@ class Qdrouterd(Process):
             return [p for n, p in self if n == name]
 
         @property
-        def router_id(self): return self.sections("router")[0]["routerId"]
+        def router_id(self): return self.sections("router")[0]["id"]
 
         def defaults(self):
             """Fill in default values in gconfiguration"""
@@ -334,7 +346,7 @@ class Qdrouterd(Process):
 
     def __init__(self, name=None, config=Config(), pyinclude=None, wait=True):
         """
-        @param name: name used for for output files, default to routerId from config.
+        @param name: name used for for output files, default to id from config.
         @param config: router configuration
         @keyword wait: wait for router to be ready (call self.wait_ready())
         """
@@ -372,6 +384,22 @@ class Qdrouterd(Process):
         super(Qdrouterd, self).teardown()
 
     @property
+    def ports_family(self):
+        """
+        Return a dict of listener ports and the respective port family
+        Example -
+        { 23456: 'IPv4', 243455: 'IPv6' }
+        """
+        ports_fam = {}
+        for l in self.config.sections('listener'):
+            if l.get('protocolFamily'):
+                ports_fam[l['port']] = l['protocolFamily']
+            else:
+                ports_fam[l['port']] = 'IPv4'
+
+        return ports_fam
+
+    @property
     def ports(self):
         """Return list of configured ports for all listeners"""
         return [l['port'] for l in self.config.sections('listener')]
@@ -379,18 +407,48 @@ class Qdrouterd(Process):
     @property
     def addresses(self):
         """Return amqp://host:port addresses for all listeners"""
-        return ["amqp://%s:%s"%(l['addr'], l['port']) for l in self.config.sections('listener')]
+        address_list = []
+        for l in self.config.sections('listener'):
+            protocol_family = l.get('protocolFamily')
+            if protocol_family == 'IPv6':
+                address_list.append("amqp://[%s]:%s"%(l['host'], l['port']))
+            elif protocol_family == 'IPv4':
+                address_list.append("amqp://%s:%s"%(l['host'], l['port']))
+            else:
+                # Default to IPv4
+                address_list.append("amqp://%s:%s"%(l['host'], l['port']))
+
+        return address_list
 
     @property
     def hostports(self):
         """Return host:port for all listeners"""
-        return ["%s:%s"%(l['addr'], l['port']) for l in self.config.sections('listener')]
+        address_list = []
+        for l in self.config.sections('listener'):
+            protocol_family = l.get('protocolFamily')
+            if protocol_family == 'IPv6':
+                address_list.append("[%s]:%s"%(l['host'], l['port']))
+            elif protocol_family == 'IPv4':
+                address_list.append("%s:%s"%(l['host'], l['port']))
+            else:
+                # Default to IPv4
+                address_list.append("%s:%s"%(l['host'], l['port']))
+
+        return address_list
 
     def is_connected(self, port, host='127.0.0.1'):
-        """If router has a connection to host:port return the management info.
+        """If router has a connection to host:port:identity return the management info.
         Otherwise return None"""
         try:
-            return self.management.read(identity="connection/%s:%s" % (host, port))
+            ret_val = False
+            response = self.management.query(type="org.apache.qpid.dispatch.connection")
+            index_name = response.attribute_names.index('name')
+            index_identity = response.attribute_names.index('identity')
+            for result in response.results:
+                outs = 'connection/%s:%s:%s' % (host, port, str(result[index_identity]))
+                if result[index_name] == outs:
+                    ret_val = True
+            return ret_val
         except:
             return False
 
@@ -407,10 +465,23 @@ class Qdrouterd(Process):
             # endswith check is because of M0/L/R prefixes
             addrs = self.management.query(
                 type='org.apache.qpid.dispatch.router.address',
-                attribute_names=['name', 'subscriberCount', 'remoteCount']).get_entities()
+                attribute_names=[u'name', u'subscriberCount', u'remoteCount']).get_entities()
+
             addrs = [a for a in addrs if a['name'].endswith(address)]
+
             return addrs and addrs[0]['subscriberCount'] >= subscribers and addrs[0]['remoteCount'] >= remotes
         assert retry(check, **retry_kwargs)
+
+    def get_host(self, protocol_family):
+        if protocol_family == 'IPv4':
+            return '127.0.0.1'
+        elif protocol_family == 'IPv6':
+            return '::1'
+        else:
+            return '127.0.0.1'
+
+    def wait_ports(self, **retry_kwargs):
+        wait_ports(self.ports_family, **retry_kwargs)
 
     def wait_connectors(self, **retry_kwargs):
         """
@@ -418,13 +489,14 @@ class Qdrouterd(Process):
         @param retry_kwargs: keyword args for L{retry}
         """
         for c in self.config.sections('connector'):
-            assert retry(lambda: self.is_connected(c['port']), **retry_kwargs), "Port not connected %s" % c['port']
+            assert retry(lambda: self.is_connected(port=c['port'], host=self.get_host(c.get('protocolFamily'))),
+                         **retry_kwargs), "Port not connected %s" % c['port']
 
     def wait_ready(self, **retry_kwargs):
         """Wait for ports and connectors to be ready"""
         if not self._wait_ready:
             self._wait_ready = True
-            wait_ports(self.ports, **retry_kwargs)
+            self.wait_ports(**retry_kwargs)
             self.wait_connectors(**retry_kwargs)
         return self
 
@@ -440,7 +512,6 @@ class Qdrouterd(Process):
             return retry_exception(lambda: node.query('org.apache.qpid.dispatch.router'))
         except:
             return False
-
 
     def wait_router_connected(self, router_id, **retry_kwargs):
         retry(lambda: self.is_router_connected(router_id), **retry_kwargs)
@@ -466,6 +537,7 @@ class Qpidd(Process):
             name=name, expect=Process.RUNNING)
         self.port = self.config['port'] or 5672
         self.address = "127.0.0.1:%s"%self.port
+
         self._management = None
         if wait:
             self.wait_ready()
@@ -522,7 +594,11 @@ class Tester(object):
 - Utilities to create processes and servers, manage ports etc.
 - Clean up processes on teardown"""
 
-    # Wipe the old test tree when we are first imported.
+    # Top level directory above any Tester directories.
+    # CMake-generated configuration may be found here.
+    top_dir = os.getcwd()
+
+    # The root directory for Tester directories, under top_dir
     root_dir = os.path.abspath(__name__+'.dir')
 
     def __init__(self, id):
@@ -587,7 +663,7 @@ class Tester(object):
     next_port = random.randint(port_range[0], port_range[1])
 
     @classmethod
-    def get_port(cls):
+    def get_port(cls, protocol_family='IPv4'):
         """Get an unused port"""
         def advance():
             """Advance with wrap-around"""
@@ -595,10 +671,10 @@ class Tester(object):
             if cls.next_port >= cls.port_range[1]:
                 cls.next_port = cls.port_range[0]
         start = cls.next_port
-        while not port_available(cls.next_port):
+        while not port_available(cls.next_port, protocol_family):
             advance()
             if cls.next_port == start:
-                raise Exception("No avaliable ports in range %s", cls.port_range)
+                raise Exception("No available ports in range %s", cls.port_range)
         p = cls.next_port
         advance()
         return p

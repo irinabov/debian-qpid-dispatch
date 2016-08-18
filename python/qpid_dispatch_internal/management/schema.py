@@ -155,7 +155,7 @@ BUILTIN_TYPES = OrderedDict(
                           Type("entityId", str),
                           Type("integer", int),
                           Type("list", list),
-                          Type("map", map),
+                          Type("map", dict),
                           BooleanType()])
 
 def get_type(rep):
@@ -206,7 +206,7 @@ class AttributeType(object):
     @ivar graph: If true the attribute could be graphed by a console.
     """
 
-    def __init__(self, name, type=None, defined_in=None, default=None, required=False, unique=False,
+    def __init__(self, name, type=None, defined_in=None, default=None, required=False, unique=False, hidden=False,
                  value=None, description="", create=False, update=False, graph=False):
         """
         See L{AttributeType} instance variables.
@@ -216,6 +216,7 @@ class AttributeType(object):
             self.defined_in = defined_in
             self.atype = get_type(type)
             self.required = required
+            self.hidden = hidden
             self.default = default
             self.value = value
             self.unique = unique
@@ -232,7 +233,7 @@ class AttributeType(object):
 
     def missing_value(self, check_required=True, add_default=True, **kwargs):
         """
-        Fill in missing default and fixed values but don't resolve references.
+        Fill in missing default and fixed values.
         @keyword check_required: Raise an exception if required attributes are misssing.
         @keyword add_default:  Add a default value for missing attributes.
         @param kwargs: See L{Schema.validate_all}
@@ -244,11 +245,10 @@ class AttributeType(object):
         if check_required and self.required:
             raise ValidationError("Missing required attribute '%s'" % (self.name))
 
-    def validate(self, value, resolve=lambda x: x, check_unique=None, **kwargs):
+    def validate(self, value, check_unique=None, **kwargs):
         """
         Validate value for this attribute definition.
         @param value: The value to validate.
-        @param resolve: function to resolve value references.
         @keyword check_unique: set of (name, value) to check for attribute uniqueness.
             None means don't check for uniqueness.
         @param create: if true, check that the attribute allows create
@@ -256,11 +256,11 @@ class AttributeType(object):
         @param kwargs: See L{Schema.validate_all}
         @return: value converted to the correct python type. Rais exception if any check fails.
         """
-        value = resolve(value)
         if self.unique and not _is_unique(check_unique, (self.name, value)):
             raise ValidationError("Duplicate value '%s' for unique attribute '%s'"%(value, self.name))
-        if self.value and value != resolve(self.value):
-            raise ValidationError("Attribute '%s' has fixed value '%s' but given '%s'"%(self.name, resolve(self.value), value))
+        if self.value and value != self.value:
+            raise ValidationError("Attribute '%s' has fixed value '%s' but given '%s'"%(
+                self.name, self.value, value))
         try:
             return self.atype.validate(value, **kwargs)
         except (TypeError, ValueError), e:
@@ -314,14 +314,15 @@ class EntityType(object):
     @ivar short_name: Un-prefixed short name.
     @ivar attributes: Map of L{AttributeType} for entity.
     @ivar singleton: If true only one entity of this type is allowed.
-    #ivar annotation: List of names of sections annotationd by this entity.
+    @ivar referential: True if an entity/annotation can be referred to by name.
+    @ivar annotations: List of names of sections annotationd by this entity.
     """
-    def __init__(self, name, schema, attributes=None, operations=None, operationDefs=None, description="", fullName=True, singleton=False, annotations=None, extends=None, **kwargs):
+    def __init__(self, name, schema, attributes=None, operations=None, operationDefs=None, description="", fullName=True, singleton=False, annotations=None, extends=None, referential=False, **kwargs):
         """
         @param name: name of the entity type.
         @param schema: schema for this type.
         @param singleton: True if entity type is a singleton.
-        @param annotation: List of names of annotation types for this entity.
+        @param annotations: List of names of annotation types for this entity.
         @param attributes: Map of attributes {name: {type:, default:, required:, unique:}}
         @param description: Human readable description.
         @param operations: Allowed operations, list of operation names.
@@ -332,18 +333,22 @@ class EntityType(object):
             if fullName:
                 self.name = schema.long_name(name)
                 self.short_name = schema.short_name(name)
+
+                if self.short_name.startswith("router.config."):
+                    self.short_name = self.short_name.replace("router.config.", "")
             else:
                 self.name = self.short_name = name
             self.attributes = OrderedDict((k, AttributeType(k, defined_in=self, **v))
                                               for k, v in (attributes or {}).iteritems())
             self.operations = operations or []
-            # Bases and annotations are resolved in self.resolve
+            # Bases and annotations are resolved in self.init()
             self.base = extends
             self.all_bases = []
             self.annotations = annotations or []
-            # This map defines values that can be referred to using $$ in the schema.
-            self.refs = {'entityType': self.name}
+            # List of annotations that are singletons
+            self.references = []
             self.singleton = singleton
+            self.referential = referential
             self._init = False      # Have not yet initialized from base and attributes.
             # Operation definitions
             self.operation_defs = dict((name, OperationDef(name, **op))
@@ -353,7 +358,7 @@ class EntityType(object):
             raise ValidationError, "%s '%s': %s" % (type(self).__name__, name, msg), trace
 
     def init(self):
-        """Resolve bases and annotations after all types are loaded."""
+        """Find bases and annotations after all types are loaded."""
         if self._init: return
         self._init = True
         if self.base:
@@ -362,6 +367,8 @@ class EntityType(object):
             self.all_bases = [self.base] + self.base.all_bases
             self._extend(self.base, 'extend')
         if self.annotations:
+            self.references = [x for x in self.annotations
+                                if self.schema.annotation(x).referential]
             self.annotations = [self.schema.annotation(a) for a in self.annotations]
         for a in self.annotations:
             self._extend(a, 'be annotated')
@@ -377,32 +384,13 @@ class EntityType(object):
         self.operations += other.operations
         check(self.attributes.iterkeys(), other.attributes.itervalues(), "attributes")
         self.attributes.update(other.attributes)
+        if other.name == 'entity':
+            # Fill in entity "type" attribute automatically.
+            self.attributes["type"]["value"] = self.name
 
     def extends(self, base): return base in self.all_bases
 
     def is_a(self, type): return type == self or self.extends(type)
-
-    def resolve(self, value, attributes):
-        """
-        Resolve a $ or $$ reference.
-        $attr refers to another attribute.
-        $$name refers to a value in EntityType.refs
-        """
-        values = [value]
-        while True:
-            if isinstance(value, basestring) and value.startswith('$$'):
-                if value[2:] not in self.refs:
-                    raise ValidationError("Invalid entity type reference '%s'"%value)
-                value = self.refs[value[2:]]
-            elif isinstance(value, basestring) and value.startswith('$'):
-                if value[1:] not in self.attributes:
-                    raise ValidationError("Invalid attribute reference '%s'"%value)
-                value = attributes.get(value[1:])
-            else:
-                return value # Not a reference, don't need to resolve
-            if value == values[0]: # Circular reference
-                raise ValidationError("Unresolved circular reference '%s'"%values)
-            values.append(value)
 
     def attribute(self, name):
         """Get the AttributeType for name"""
@@ -442,8 +430,7 @@ class EntityType(object):
             for name, value in attributes.iteritems():
                 if name == 'type':
                     value = self.schema.long_name(value)
-                attributes[name] = self.attribute(name).validate(
-                    value, lambda v: self.resolve(v, attributes), **kwargs)
+                attributes[name] = self.attribute(name).validate(value, **kwargs)
         except ValidationError, e:
             raise  ValidationError, "%s: %s"%(self, e), sys.exc_info()[2]
 
@@ -475,7 +462,9 @@ class EntityType(object):
                 (k, v.dump()) for k, v in self.attributes.iteritems()
                 if k != 'type')), # Don't dump 'type' attribute, dumped separately.
             ('operations', self.operations),
-            ('description', self.description or None)
+            ('description', self.description or None),
+            ('references', self.references),
+            ('singleton', self.singleton)
         ])
 
     def __repr__(self): return "%s(%s)" % (type(self).__name__, self.name)
@@ -514,11 +503,14 @@ class Schema(object):
         else:
             self.prefix = self.prefixdot = ""
         self.description = description
+
         def parsedefs(cls, defs):
             return OrderedDict((self.long_name(k), cls(k, self, **v))
                                for k, v in (defs or {}).iteritems())
+
         self.annotations = parsedefs(Annotation, annotations)
         self.entity_types = parsedefs(EntityType, entityTypes)
+
         self.all_attributes = set()
 
         for e in self.entity_types.itervalues():
@@ -634,8 +626,8 @@ class SchemaEntity(EntityBase):
         self.attributes.setdefault('type', entity_type.name)
         if validate: self.validate()
 
-    def __setitem__(self, name, value):
-        super(SchemaEntity, self).__setitem__(name, value)
+    def _set(self, name, value):
+        super(SchemaEntity, self)._set(name, value)
         self.validate()
 
     def validate(self, **kwargs):

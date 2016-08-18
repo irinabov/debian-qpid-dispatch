@@ -23,6 +23,7 @@
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/iterator.h>
 #include <qpid/dispatch/log.h>
+#include <proton/object.h>
 #include "message_private.h"
 #include "compose_private.h"
 #include "aprintf.h"
@@ -55,6 +56,8 @@ static const unsigned char * const TAGS_BINARY                  = (unsigned char
 static const unsigned char * const TAGS_ANY                     = (unsigned char*) "\x45\xc0\xd0\xc1\xd1\xa0\xb0"
     "\xa1\xb1\xa3\xb3\xe0\xf0"
     "\x40\x56\x41\x42\x50\x60\x70\x52\x43\x80\x53\x44\x51\x61\x71\x54\x81\x55\x72\x82\x74\x84\x94\x73\x83\x98";
+
+PN_HANDLE(PN_DELIVERY_CTX);
 
 ALLOC_DEFINE_CONFIG(qd_message_t, sizeof(qd_message_pvt_t), 0, 0);
 ALLOC_DEFINE(qd_message_content_t);
@@ -100,14 +103,15 @@ static const char REPR_END[] = "}\0";
 
 /* TODO aconway 2014-05-13: more detailed message representation. */
 char* qd_message_repr(qd_message_t *msg, char* buffer, size_t len) {
-    qd_message_check(msg, QD_DEPTH_BODY);
-    char *begin = buffer;
-    char *end = buffer + len - sizeof(REPR_END); /* Save space for ending */
-    aprintf(&begin, end, "Message{", msg);
-    copy_field(msg, QD_FIELD_TO, INT_MAX, "to='", "'", &begin, end);
-    copy_field(msg, QD_FIELD_REPLY_TO, INT_MAX, " reply-to='", "'", &begin, end);
-    copy_field(msg, QD_FIELD_BODY, 16, " body='", "'", &begin, end);
-    aprintf(&begin, end, "%s", REPR_END);   /* We saved space at the beginning. */
+    if (qd_message_check(msg, QD_DEPTH_BODY)) {
+        char *begin = buffer;
+        char *end = buffer + len - sizeof(REPR_END); /* Save space for ending */
+        aprintf(&begin, end, "Message{", msg);
+        copy_field(msg, QD_FIELD_TO, INT_MAX, "to='", "'", &begin, end);
+        copy_field(msg, QD_FIELD_REPLY_TO, INT_MAX, " reply-to='", "'", &begin, end);
+        copy_field(msg, QD_FIELD_BODY, 16, " body='", "'", &begin, end);
+        aprintf(&begin, end, "%s", REPR_END);   /* We saved space at the beginning. */
+    }
     return buffer;
 }
 
@@ -318,14 +322,22 @@ static int qd_check_and_advance(qd_buffer_t         **buffer,
     int pre_consume = 1;  // Count the already extracted tag
     int consume     = 0;
     unsigned char tag = next_octet(&test_cursor, &test_buffer);
-    if (!test_cursor) return 0;
-    switch (tag) {
-    case 0x45 : // list0
-        break;
 
-    case 0xd0 : // list32
-    case 0xd1 : // map32
-    case 0xb0 : // vbin32
+    unsigned char tag_subcat = tag & 0xF0;
+    if (!test_cursor && tag_subcat != 0x40)
+        return 0;
+
+    switch (tag_subcat) {
+    case 0x40:               break;
+    case 0x50: consume = 1;  break;
+    case 0x60: consume = 2;  break;
+    case 0x70: consume = 4;  break;
+    case 0x80: consume = 8;  break;
+    case 0x90: consume = 16; break;
+
+    case 0xB0:
+    case 0xD0:
+    case 0xF0:
         pre_consume += 3;
         consume |= ((int) next_octet(&test_cursor, &test_buffer)) << 24;
         if (!test_cursor) return 0;
@@ -335,9 +347,9 @@ static int qd_check_and_advance(qd_buffer_t         **buffer,
         if (!test_cursor) return 0;
         // Fall through to the next case...
 
-    case 0xc0 : // list8
-    case 0xc1 : // map8
-    case 0xa0 : // vbin8
+    case 0xA0:
+    case 0xC0:
+    case 0xE0:
         pre_consume += 1;
         consume |= (int) next_octet(&test_cursor, &test_buffer);
         if (!test_cursor) return 0;
@@ -539,6 +551,7 @@ qd_message_t *qd_message()
     DEQ_INIT(msg->ma_to_override);
     DEQ_INIT(msg->ma_trace);
     DEQ_INIT(msg->ma_ingress);
+    msg->ma_phase = 0;
     msg->content = new_qd_message_content_t();
 
     if (msg->content == 0) {
@@ -604,6 +617,7 @@ qd_message_t *qd_message_copy(qd_message_t *in_msg)
     qd_buffer_list_clone(&copy->ma_to_override, &msg->ma_to_override);
     qd_buffer_list_clone(&copy->ma_trace, &msg->ma_trace);
     qd_buffer_list_clone(&copy->ma_ingress, &msg->ma_ingress);
+    copy->ma_phase = msg->ma_phase;
 
     copy->content = content;
 
@@ -658,6 +672,18 @@ void qd_message_set_to_override_annotation(qd_message_t *in_msg, qd_composed_fie
     qd_compose_free(to_field);
 }
 
+void qd_message_set_phase_annotation(qd_message_t *in_msg, int phase)
+{
+    qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
+    msg->ma_phase = phase;
+}
+
+int qd_message_get_phase_annotation(const qd_message_t *in_msg)
+{
+    qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
+    return msg->ma_phase;
+}
+
 void qd_message_set_ingress_annotation(qd_message_t *in_msg, qd_composed_field_t *ingress_field)
 {
     qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
@@ -671,7 +697,9 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
     pn_link_t        *link = pn_delivery_link(delivery);
     ssize_t           rc;
     qd_buffer_t      *buf;
-    qd_message_pvt_t *msg  = (qd_message_pvt_t*) pn_delivery_get_context(delivery);
+
+    pn_record_t *record    = pn_delivery_attachments(delivery);
+    qd_message_pvt_t *msg  = (qd_message_pvt_t*) pn_record_get(record, PN_DELIVERY_CTX);
 
     //
     // If there is no message associated with the delivery, this is the first time
@@ -680,7 +708,8 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
     //
     if (!msg) {
         msg = (qd_message_pvt_t*) qd_message();
-        pn_delivery_set_context(delivery, (void*) msg);
+        pn_record_def(record, PN_DELIVERY_CTX, PN_WEAKREF);
+        pn_record_set(record, PN_DELIVERY_CTX, (void*) msg);
     }
 
     //
@@ -705,15 +734,20 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
         //
         if (rc == PN_EOS) {
             //
+            // Clear the value in the record with key PN_DELIVERY_CTX
+            //
+            pn_record_set(record, PN_DELIVERY_CTX, 0);
+
+            //
             // If the last buffer in the list is empty, remove it and free it.  This
             // will only happen if the size of the message content is an exact multiple
             // of the buffer size.
             //
+
             if (qd_buffer_size(buf) == 0) {
                 DEQ_REMOVE_TAIL(msg->content->buffers);
                 qd_buffer_free(buf);
             }
-            pn_delivery_set_context(delivery, 0);
 
             char repr[qd_message_repr_len()];
             qd_log(log_source, QD_LOG_TRACE, "Received %s on link %s",
@@ -760,7 +794,6 @@ static void send_handler(void *context, const unsigned char *start, int length)
 // create a buffer chain holding the outgoing message annotations section
 static bool compose_message_annotations(qd_message_pvt_t *msg, qd_buffer_list_t *out)
 {
-    DEQ_INIT(*out);
     if (!DEQ_IS_EMPTY(msg->ma_to_override) ||
         !DEQ_IS_EMPTY(msg->ma_trace) ||
         !DEQ_IS_EMPTY(msg->ma_ingress)) {
@@ -783,6 +816,11 @@ static bool compose_message_annotations(qd_message_pvt_t *msg, qd_buffer_list_t 
             qd_compose_insert_buffers(out_ma, &msg->ma_ingress);
         }
 
+        if (msg->ma_phase != 0) {
+            qd_compose_insert_symbol(out_ma, QD_MA_PHASE);
+            qd_compose_insert_int(out_ma, msg->ma_phase);
+        }
+
         qd_compose_end_map(out_ma);
 
         qd_compose_take_buffers(out_ma, out);
@@ -793,7 +831,9 @@ static bool compose_message_annotations(qd_message_pvt_t *msg, qd_buffer_list_t 
     return false;
 }
 
-void qd_message_send(qd_message_t *in_msg, qd_link_t *link)
+void qd_message_send(qd_message_t *in_msg,
+                     qd_link_t    *link,
+                     bool          strip_annotations)
 {
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
     qd_message_content_t *content = msg->content;
@@ -807,7 +847,9 @@ void qd_message_send(qd_message_t *in_msg, qd_link_t *link)
            pn_link_name(pnl));
 
     qd_buffer_list_t new_ma;
-    if (compose_message_annotations(msg, &new_ma)) {
+    DEQ_INIT(new_ma);
+
+    if (strip_annotations || compose_message_annotations(msg, &new_ma)) {
         //
         // This is the case where the message annotations have been modified.
         // The message send must be divided into sections:  The existing header;

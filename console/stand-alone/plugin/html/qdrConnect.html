@@ -1,0 +1,101 @@
+<!--
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+-->
+<div class="row-fluid" ng-controller="QDR.SettingsController">
+      <div class="login container" ng-hide="connecting">
+          <div class="row" id="dispatch-login-container">
+              <div class="connect-column">
+                  <div class="alert alert-success">
+                      <p>
+                          Enter the address and port of a <strong><a href="http://qpid.apache.org/components/dispatch-router/" target="_blank">Qpid Dispatch Router</a></strong> to connect..
+                      </p>
+
+                      <p>
+                          The port should be a websockets <==> tcp proxy.
+                      </p>
+
+                      <p>
+                          When Autostart is checked, you will be automatically logged in to the router the next time you start the console.
+                      </p>
+
+                  </div>
+              </div>
+              <div class="connect-column connect-form">
+                  <div class="span2 offset4">
+                      <!-- <div simple-form name="settings" data="formConfig" entity="formEntity"></div> -->
+                      <form class="form-horizontal no-bottom-margin" novalidate name="settings" action="" method="post">
+                          <fieldset>
+                              <div class="control-group">
+                                  <label class="control-label">Address: </label>
+                                  <div class="controls">
+                                      <input type="text" description="Router address" ng-model="formEntity.address" name="address" required="required" autofocus="autofocus" class="ng-pristine ng-valid ng-valid-required">
+                                      <span class="help-block"></span>
+                                  </div>
+                              </div>
+                              <div class="control-group">
+                                  <label class="control-label" title="Port to connect to, by default 5673">Port: </label>
+                                  <div class="controls">
+                                      <input type="number" description="Router port" tooltip="Ports to connect to, by default 5672" ng-model="formEntity.port" name="port" title="Port to connect to, by default 5673" class="ng-scope ng-pristine ng-valid ng-valid-number">
+                                      <span class="help-block"></span>
+                                  </div>
+                              </div>
+                              <!--
+                                              <div class="control-group">
+                                                  <label class="control-label">Username: </label>
+                                                  <div class="controls">
+                                                      <input type="text" description="User Name" ng-model="formEntity.username" name="username" class="ng-pristine ng-valid">
+                                                      <span class="help-block"></span>
+                                                  </div>
+                                              </div>
+                                              <div class="control-group">
+                                                  <label class="control-label">Password: </label>
+                                                  <div class="controls">
+                                                      <input type="password" description="Password" ng-model="formEntity.password" name="password" class="ng-pristine ng-valid">
+                                                      <span class="help-block"></span>
+                                                  </div>
+                                              </div>
+                              -->
+                              <div class="control-group">
+                                  <label class="control-label" title="Whether or not the connection should be started as soon as you navigate to the console">Autostart: </label>
+                                  <div class="controls">
+                                      <input type="checkbox" description="Connect at startup" tooltip="Whether or not the connection should be started as soon as you navigate to the console" ng-model="formEntity.autostart" name="autostart" title="Whether or not the connection should be started as soon as you log into hawtio" class="ng-scope ng-pristine ng-valid">
+                                      <span class="help-block"></span>
+                                  </div>
+                              </div>
+                              <input type="submit" style="position: absolute; left: -9999px; width: 1px; height: 1px;">
+                          </fieldset>
+                      </form>
+                      <p></p>
+                      <div>
+                          <button class="btn btn-primary pull-right" ng-disabled="settings.$invalid" ng-click="connect()">{{buttonText()}}</button>
+                      </div>
+                  </div>
+              </div>
+          </div>
+      </div>
+
+  <div class="span4 centered" ng-show="connecting">
+    <i class="icon-spin icon-spinner icon-4x"></i>
+    <p>Please wait, connecting now...</p>
+  </div>
+  <div class="centered" ng-show="connectionError">
+    <p>There was a connection error: {{connectionErrorText}}</p>
+  </div>
+
+  <div class="span4"></div>
+</div>

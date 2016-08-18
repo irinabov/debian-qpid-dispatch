@@ -199,3 +199,13 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+
+###############################################
+# Thrid Party Dependency Licensing Information:
+###############################################
+
+console/stand-alone/plugin/lib/rhea-min.js is licensed under the above Apache License, Version 2.0
+
+console/hawtio/src/main/webapp/plugin/lib/rhea-min.js is licensed under the above Apache License, Version 2.0
+

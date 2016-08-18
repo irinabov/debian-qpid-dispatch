@@ -33,7 +33,7 @@ class NodeTracker(object):
         self.container             = container
         self.my_id                 = container.id
         self.max_routers           = max_routers
-        self.link_state            = LinkState(None, self.my_id, 0, [])
+        self.link_state            = LinkState(None, self.my_id, 0, {})
         self.link_state_changed    = False
         self.recompute_topology    = False
         self.last_topology_change  = 0
@@ -54,7 +54,7 @@ class NodeTracker(object):
     def refresh_entity(self, attributes):
         """Refresh management attributes"""
         attributes.update({
-            "routerId": self.my_id,
+            "id": self.my_id,
             "instance": self.container.instance, # Boot number, integer
             "linkState": [ls for ls in self.link_state.peers], # List of neighbour nodes
             "nextHop":  "(self)",
@@ -146,8 +146,9 @@ class NodeTracker(object):
             collection = {self.my_id : self.link_state}
             for node_id, node in self.nodes.items():
                 collection[node_id] = node.link_state
-            next_hops, valid_origins = self.container.path_engine.calculate_routes(collection)
+            next_hops, costs, valid_origins = self.container.path_engine.calculate_routes(collection)
             self.container.log_ls(LOG_TRACE, "Computed next hops: %r" % next_hops)
+            self.container.log_ls(LOG_TRACE, "Computed costs: %r" % costs)
             self.container.log_ls(LOG_TRACE, "Computed valid origins: %r" % valid_origins)
 
             ##
@@ -157,8 +158,10 @@ class NodeTracker(object):
                 node     = self.nodes[node_id]
                 next_hop = self.nodes[next_hop_id]
                 vo       = valid_origins[node_id]
+                cost     = costs[node_id]
                 node.set_next_hop(next_hop)
                 node.set_valid_origins(vo)
+                node.set_cost(cost)
 
         ##
         ## Send link-state requests and mobile-address requests to the nodes
@@ -184,7 +187,7 @@ class NodeTracker(object):
             self.container.link_state_engine.send_ra(now)
 
 
-    def neighbor_refresh(self, node_id, instance, link_id, now):
+    def neighbor_refresh(self, node_id, instance, link_id, cost, now):
         """
         Invoked when the hello protocol has received positive confirmation
         of continued bi-directional connectivity with a neighbor router.
@@ -204,7 +207,7 @@ class NodeTracker(object):
         if node.set_link_id(link_id):
             self.nodes_by_link_id[link_id] = node
             node.request_link_state()
-            if self.link_state.add_peer(node_id):
+            if self.link_state.add_peer(node_id, cost):
                 self.link_state_changed = True
 
         ##
@@ -225,7 +228,7 @@ class NodeTracker(object):
         """
         Invoked when an inter-router link is dropped.
         """
-        self.container.log_ls(LOG_INFO, "Router Link Lost - link_id=%d" % link_id)
+        self.container.log_ls(LOG_INFO, "Link to Neighbor Router Lost - link_tag=%d" % link_id)
         node_id = self.link_id_to_node_id(link_id)
         if node_id:
             self.nodes_by_link_id.pop(link_id)
@@ -364,8 +367,9 @@ class RouterNode(object):
         self.maskbit                 = self.parent._allocate_maskbit()
         self.neighbor_refresh_time   = 0.0
         self.peer_link_id            = None
-        self.link_state              = LinkState(None, self.id, 0, [])
+        self.link_state              = LinkState(None, self.id, 0, {})
         self.next_hop_router         = None
+        self.cost                    = None
         self.valid_origins           = None
         self.mobile_addresses        = []
         self.mobile_address_sequence = 0
@@ -379,13 +383,14 @@ class RouterNode(object):
     def refresh_entity(self, attributes):
         """Refresh management attributes"""
         attributes.update({
-            "routerId": self.id,
+            "id": self.id,
             "instance": self.instance, # Boot number, integer
             "linkState": [ls for ls in self.link_state.peers], # List of neighbour nodes
             "nextHop":  self.next_hop_router and self.next_hop_router.id,
             "validOrigins": self.valid_origins,
             "address": Address.topological(self.id, area=self.parent.container.area),
-            "routerLink": self.peer_link_id
+            "routerLink": self.peer_link_id,
+            "cost": self.cost
         })
 
     def _logify(self, addr):
@@ -442,6 +447,14 @@ class RouterNode(object):
         self.log(LOG_TRACE, "Node %s valid origins: %r" % (self.id, valid_origins))
 
 
+    def set_cost(self, cost):
+        if self.cost == cost:
+            return
+        self.cost = cost
+        self.adapter.set_cost(self.maskbit, cost)
+        self.log(LOG_TRACE, "Node %s cost: %d" % (self.id, cost))
+
+
     def remove_next_hop(self):
         if self.next_hop_router:
             self.next_hop_router = None
@@ -486,10 +499,7 @@ class RouterNode(object):
 
     def map_address(self, addr):
         self.mobile_addresses.append(addr)
-        phase = '0'
-        if addr[0] == 'M':
-            phase = addr[1]
-        self.adapter.map_destination(phase, addr, self.maskbit)
+        self.adapter.map_destination(addr, self.maskbit)
         self.log(LOG_DEBUG, "Remote destination %s mapped to router %s" % (self._logify(addr), self.id))
 
 
@@ -532,6 +542,6 @@ class RouterNode(object):
         self.instance = instance
         self.link_state.del_all_peers()
         self.unmap_all_addresses()
-        self.log(LOG_TRACE, "Node %s detected restart" % self.id)
+        self.log(LOG_INFO, "Detected Restart of Router Node %s" % self.id)
         return True
 

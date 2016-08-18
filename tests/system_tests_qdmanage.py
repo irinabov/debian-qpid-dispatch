@@ -18,7 +18,7 @@
 #
 
 import re, json, unittest, os
-from system_test import TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR
+from system_test import TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR, wait_port
 from subprocess import PIPE, STDOUT
 from qpid_dispatch_internal.compat import OrderedDict, dictify
 from qpid_dispatch_internal.management.qdrouter import QdSchema
@@ -36,18 +36,28 @@ class QdmanageTest(TestCase):
     @classmethod
     def setUpClass(cls):
         super(QdmanageTest, cls).setUpClass()
-        config = Qdrouterd.Config([
+        cls.inter_router_port = cls.tester.get_port()
+        config_1 = Qdrouterd.Config([
+            ('router', {'mode': 'interior', 'id': 'R1'}),
             ('ssl-profile', {'name': 'server-ssl',
                              'cert-db': cls.ssl_file('ca-certificate.pem'),
                              'cert-file': cls.ssl_file('server-certificate.pem'),
                              'key-file': cls.ssl_file('server-private-key.pem'),
                              'password': 'server-password'}),
             ('listener', {'port': cls.tester.get_port()}),
+            ('connector', {'role': 'inter-router', 'port': cls.inter_router_port}),
             ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl'})
         ])
-        cls.router = cls.tester.qdrouterd('test-router', config, wait=True)
 
-    def address(self): return self.router.addresses[0]
+        config_2 = Qdrouterd.Config([
+            ('router', {'mode': 'interior', 'id': 'R2'}),
+            ('listener', {'role': 'inter-router', 'port': cls.inter_router_port}),
+        ])
+        cls.router_2 = cls.tester.qdrouterd('test_router_2', config_2, wait=True)
+        cls.router_1 = cls.tester.qdrouterd('test_router_1', config_1, wait=True)
+
+    def address(self):
+        return self.router_1.addresses[0]
 
     def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
         p = self.popen(
@@ -94,7 +104,6 @@ class QdmanageTest(TestCase):
         self.run_qdmanage('delete --name mydummy')
         self.run_qdmanage('read --name=mydummy', expect=Process.EXIT_FAIL)
 
-
     def test_stdin(self):
         """Test piping from stdin"""
         def check(cmd, expect, input, copy=None):
@@ -121,22 +130,27 @@ class QdmanageTest(TestCase):
         check_list('update', expect_list, json.dumps(expect_list))
 
     def test_query(self):
-        def long_type(name): return u'org.apache.qpid.dispatch.'+name
-        types = ['listener', 'log', 'container', 'router', 'router.link']
+
+        def long_type(name):
+            return u'org.apache.qpid.dispatch.'+name
+
+        types = ['listener', 'log', 'container', 'router']
         long_types = [long_type(name) for name in types]
 
         qall = json.loads(self.run_qdmanage('query'))
         qall_types = set([e['type'] for e in qall])
-        for t in long_types: self.assertIn(t, qall_types)
+        for t in long_types:
+            self.assertIn(t, qall_types)
 
         qlistener = json.loads(self.run_qdmanage('query --type=listener'))
         self.assertEqual([long_type('listener')]*2, [e['type'] for e in qlistener])
-        self.assertEqual(self.router.ports[0], int(qlistener[0]['port']))
+        self.assertEqual(self.router_1.ports[0], int(qlistener[0]['port']))
 
         qattr = json.loads(
             self.run_qdmanage('query type name'))
 
-        for e in qattr: self.assertEqual(2, len(e))
+        for e in qattr:
+            self.assertEqual(2, len(e))
 
         def name_type(entities):
             ignore_types = [long_type(t) for t in ['router.link', 'connection', 'router.address']]
@@ -158,10 +172,143 @@ class QdmanageTest(TestCase):
 
     def test_ssl(self):
         """Simple test for SSL connection. Note system_tests_qdstat has a more complete SSL test"""
-        url = Url(self.router.addresses[1], scheme="amqps")
+        url = Url(self.router_1.addresses[1], scheme="amqps")
         schema = dictify(QdSchema().dump())
         actual = self.run_qdmanage("GET-JSON-SCHEMA")
         self.assertEquals(schema, dictify(json.loads(actual)))
+
+    def test_update(self):
+        exception = False
+        try:
+            # Try to not set 'output'
+            json.loads(self.run_qdmanage("UPDATE --type org.apache.qpid.dispatch.log --name log/DEFAULT output="))
+        except Exception as e:
+            exception = True
+            self.assertTrue("InternalServerErrorStatus: CError: Configuration: Failed to open log file ''" in e.message)
+        self.assertTrue(exception)
+
+        # Set a valid 'output'
+        output = json.loads(self.run_qdmanage("UPDATE --type org.apache.qpid.dispatch.log --name log/DEFAULT "
+                                              "enable=trace+ output=A.log"))
+        self.assertEqual("A.log", output['output'])
+        self.assertEqual("trace+", output['enable'])
+
+    def create(self, type, name, port):
+        create_command = 'CREATE --type=' + type + ' --name=' + name + ' host=0.0.0.0 port=' + port
+        connector = json.loads(self.run_qdmanage(create_command))
+        return connector
+
+    def test_create_delete_connector(self):
+        long_type = 'org.apache.qpid.dispatch.connector'
+        query_command = 'QUERY --type=' + long_type
+        output = json.loads(self.run_qdmanage(query_command))
+        name = output[0]['name']
+
+        # Delete an existing connector
+        delete_command = 'DELETE --type=' + long_type + ' --name=' + name
+        self.run_qdmanage(delete_command)
+        output = json.loads(self.run_qdmanage(query_command))
+        self.assertEqual(output, [])
+
+        # Re-create the connector and then try wait_connectors
+        self.create(long_type, name, str(QdmanageTest.inter_router_port))
+
+        results = json.loads(self.run_qdmanage('QUERY --type=org.apache.qpid.dispatch.connection'))
+
+        created = False
+        for result in results:
+            name = result['name']
+            if 'connection/0.0.0.0:%s:' % QdmanageTest.inter_router_port in name:
+                created = True
+        self.assertTrue(created)
+
+    def test_zzz_add_connector(self):
+        port = self.get_port()
+        # dont provide role and make sure that role is defaulted to 'normal'
+        command = "CREATE --type=connector --name=eaconn1 port=" + str(port) + " host=0.0.0.0"
+        output = json.loads(self.run_qdmanage(command))
+        self.assertEqual("normal", output['role'])
+
+        exception = False
+        try:
+            port = self.get_port()
+            # provide the same connector name (eaconn1) and make sure there is a duplicate value failure
+            command = "CREATE --type=connector --name=eaconn1 port=" + str(port) + " host=0.0.0.0"
+            output = json.loads(self.run_qdmanage(command))
+        except Exception as e:
+            self.assertTrue("Duplicate value 'eaconn1' for unique attribute 'name'" in e.message)
+            exception = True
+
+        self.assertTrue(exception)
+
+        port = self.get_port()
+        # provide role as 'normal' and make sure that it is preserved
+        command = "CREATE --type=connector --name=eaconn2 port=" + str(port) + " host=0.0.0.0 role=normal"
+        output = json.loads(self.run_qdmanage(command))
+        self.assertEqual("normal", output['role'])
+
+    def test_zzz_create_delete_listener(self):
+        long_type = 'org.apache.qpid.dispatch.listener'
+        name = 'ealistener'
+
+        listener_port = self.get_port()
+
+        listener = self.create(long_type, name, str(listener_port))
+        self.assertEquals(listener['type'], long_type)
+        self.assertEquals(listener['name'], name)
+
+        exception_occurred = False
+
+        try:
+            # Try to connect to the port that was closed, it should not return an error
+            wait_port(listener_port, timeout=2)
+        except Exception as e:
+            exception_occurred = True
+
+        self.assertFalse(exception_occurred)
+
+        delete_command = 'DELETE --type=' + long_type + ' --name=' + name
+        self.run_qdmanage(delete_command)
+
+        exception_occurred = False
+        try:
+            # Try deleting an already deleted connector, this should raise an exception
+            self.run_qdmanage(delete_command)
+        except Exception as e:
+            exception_occurred = True
+            self.assertTrue("NotFoundStatus: No entity with name='" + name + "'" in e.message)
+
+        self.assertTrue(exception_occurred)
+
+        try:
+            # Try to connect to that port, it should not return an error
+            wait_port(listener_port, timeout=2)
+        except Exception as e:
+            exception_occurred = True
+
+        self.assertTrue(exception_occurred)
+
+        # Now try the same thing with a short_type
+        short_type = 'listener'
+
+        listener_port = self.get_port()
+
+        listener = self.create(long_type, name, str(listener_port))
+        self.assertEquals(listener['type'], long_type)
+        self.assertEquals(listener['name'], name)
+
+        delete_command = 'DELETE --type=' + short_type + ' --name=' + name
+        self.run_qdmanage(delete_command)
+
+        exception_occurred = False
+
+        try:
+            # Try to connect to that port, it should not return an error
+            wait_port(listener_port, timeout=2)
+        except Exception as e:
+            exception_occurred = True
+
+        self.assertTrue(exception_occurred)
 
 if __name__ == '__main__':
     unittest.main(main_module())

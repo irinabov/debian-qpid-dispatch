@@ -35,6 +35,11 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <assert.h>
+#include <time.h>
+
+#ifdef __sun
+#include <signal.h>
+#endif
 
 #include <qpid/dispatch/driver.h>
 #include <qpid/dispatch/threading.h>
@@ -56,6 +61,12 @@
 
 DEQ_DECLARE(qdpn_listener_t, qdpn_listener_list_t);
 DEQ_DECLARE(qdpn_connector_t, qdpn_connector_list_t);
+
+const char *protocol_family_ipv4 = "IPv4";
+const char *protocol_family_ipv6 = "IPv6";
+
+const char *AF_INET6_STR = "AF_INET6";
+const char *AF_INET_STR = "AF_INET";
 
 struct qdpn_driver_t {
     qd_log_source_t *log;
@@ -97,6 +108,7 @@ struct qdpn_connector_t {
     DEQ_LINKS(qdpn_connector_t);
     qdpn_driver_t *driver;
     char name[PN_NAME_MAX];
+    char hostip[PN_NAME_MAX];
     pn_timestamp_t wakeup;
     pn_connection_t *connection;
     pn_transport_t *transport;
@@ -129,35 +141,17 @@ static void pni_fatal(const char *text)
     exit(1);
 }
 
-#ifdef USE_CLOCK_GETTIME
-#include <time.h>
 pn_timestamp_t pn_i_now(void)
 {
     struct timespec now;
-    if (clock_gettime(CLOCK_REALTIME, &now)) pni_fatal("clock_gettime() failed");
+#ifdef CLOCK_MONOTONIC_COARSE
+    int cid = CLOCK_MONOTONIC_COARSE;
+#else
+    int cid = CLOCK_MONOTONIC;
+#endif
+    if (clock_gettime(cid, &now)) pni_fatal("clock_gettime() failed");
     return ((pn_timestamp_t)now.tv_sec) * 1000 + (now.tv_nsec / 1000000);
 }
-#elif defined(USE_WIN_FILETIME)
-#include <windows.h>
-pn_timestamp_t pn_i_now(void)
-{
-    FILETIME now;
-    GetSystemTimeAsFileTime(&now);
-    ULARGE_INTEGER t;
-    t.u.HighPart = now.dwHighDateTime;
-    t.u.LowPart = now.dwLowDateTime;
-    // Convert to milliseconds and adjust base epoch
-    return t.QuadPart / 10000 - 11644473600000;
-}
-#else
-#include <sys/time.h>
-pn_timestamp_t pn_i_now(void)
-{
-    struct timeval now;
-    if (gettimeofday(&now, NULL)) pni_fatal("gettimeofday failed");
-    return ((pn_timestamp_t)now.tv_sec) * 1000 + (now.tv_usec / 1000);
-}
-#endif
 
 static bool pni_eq_nocase(const char *a, const char *b)
 {
@@ -227,7 +221,7 @@ static int qdpn_create_socket(int af)
 }
 
 
-static void qdpn_configure_sock(qdpn_driver_t *driver, int sock)
+static void qdpn_configure_sock(qdpn_driver_t *driver, int sock, bool tcp)
 {
     //
     // Set the socket to be non-blocking for asynchronous operation.
@@ -243,23 +237,47 @@ static void qdpn_configure_sock(qdpn_driver_t *driver, int sock)
     // Note:  It would be more correct for the "level" argument to be SOL_TCP.  However, there
     //        are portability issues with this macro so we use IPPROTO_TCP instead.
     //
-    int tcp_nodelay = 1;
-    if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (void*) &tcp_nodelay, sizeof(tcp_nodelay)) < 0)
-        qdpn_log_errno(driver, "setsockopt");
+    if (tcp) {
+        int tcp_nodelay = 1;
+        if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (void*) &tcp_nodelay, sizeof(tcp_nodelay)) < 0)
+            qdpn_log_errno(driver, "setsockopt");
+    }
 }
 
 
-qdpn_listener_t *qdpn_listener(qdpn_driver_t *driver, const char *host,
-                               const char *port, void* context)
+/**
+ * Sets the ai_family field on the addrinfo struct based on the passed in NON-NULL protocol_family.
+ * If the passed in protocol family does not match IPv6, IPv4, the function does not set the ai_family field
+ */
+static void qd_set_addr_ai_family(qdpn_driver_t *driver, struct addrinfo *addr, const char* protocol_family)
+{
+    if (protocol_family) {
+        if(strcmp(protocol_family, protocol_family_ipv6) == 0)
+            addr->ai_family = AF_INET6;
+        else if(strcmp(protocol_family, protocol_family_ipv4) == 0)
+            addr->ai_family = AF_INET;
+    }
+}
+
+
+qdpn_listener_t *qdpn_listener(qdpn_driver_t *driver,
+                               const char *host,
+                               const char *port,
+                               const char *protocol_family,
+                               void* context)
 {
     if (!driver) return NULL;
 
-    struct addrinfo *addr;
-    int code = getaddrinfo(host, port, NULL, &addr);
+    struct addrinfo hints = {0}, *addr;
+    hints.ai_socktype = SOCK_STREAM;
+    int code = getaddrinfo(host, port, &hints, &addr);
     if (code) {
         qd_log(driver->log, QD_LOG_ERROR, "getaddrinfo(%s, %s): %s\n", host, port, gai_strerror(code));
         return 0;
     }
+
+    // Set the protocol family before creating the socket.
+    qd_set_addr_ai_family(driver, addr, protocol_family);
 
     int sock = qdpn_create_socket(addr->ai_family);
     if (sock < 0) {
@@ -363,12 +381,15 @@ void qdpn_listener_set_context(qdpn_listener_t *listener, void *context)
     listener->context = context;
 }
 
-qdpn_connector_t *qdpn_listener_accept(qdpn_listener_t *l)
+qdpn_connector_t *qdpn_listener_accept(qdpn_listener_t *l,
+                                       void *policy,
+                                       bool (*policy_fn)(void *, const char *name),
+                                       bool *counted)
 {
     if (!l || !l->pending) return NULL;
     char name[PN_NAME_MAX];
-    char host[MAX_HOST];
     char serv[MAX_SERV];
+    char hostip[MAX_HOST];
 
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_UNSPEC;
@@ -379,14 +400,23 @@ qdpn_connector_t *qdpn_listener_accept(qdpn_listener_t *l)
         qdpn_log_errno(l->driver, "accept");
         return 0;
     } else {
-        int code;
-        if ((code = getnameinfo((struct sockaddr *) &addr, addrlen, host, MAX_HOST, serv, MAX_SERV, 0))) {
+        int code = getnameinfo((struct sockaddr *) &addr, addrlen, hostip, MAX_HOST, serv, MAX_SERV, NI_NUMERICHOST | NI_NUMERICSERV);
+        if (code != 0) {
             qd_log(l->driver->log, QD_LOG_ERROR, "getnameinfo: %s\n", gai_strerror(code));
             close(sock);
             return 0;
         } else {
-            qdpn_configure_sock(l->driver, sock);
-            snprintf(name, PN_NAME_MAX-1, "%s:%s", host, serv);
+            qdpn_configure_sock(l->driver, sock, true);
+            snprintf(name, PN_NAME_MAX-1, "%s:%s", hostip, serv);
+        }
+    }
+
+    if (policy_fn) {
+        if (!(*policy_fn)(policy, name)) {
+            close(sock);
+            return 0;
+        } else {
+            *counted = true;
         }
     }
 
@@ -395,6 +425,7 @@ qdpn_connector_t *qdpn_listener_accept(qdpn_listener_t *l)
 
     qdpn_connector_t *c = qdpn_connector_fd(l->driver, sock, NULL);
     snprintf(c->name, PN_NAME_MAX, "%s", name);
+    snprintf(c->hostip, PN_NAME_MAX, "%s", hostip);
     c->listener = l;
     return c;
 }
@@ -445,17 +476,24 @@ static void qdpn_driver_remove_connector(qdpn_driver_t *d, qdpn_connector_t *c)
     sys_mutex_unlock(d->lock);
 }
 
-qdpn_connector_t *qdpn_connector(qdpn_driver_t *driver, const char *host,
-                                 const char *port, void *context)
+qdpn_connector_t *qdpn_connector(qdpn_driver_t *driver,
+                                 const char *host,
+                                 const char *port,
+                                 const char *protocol_family,
+                                 void *context)
 {
     if (!driver) return NULL;
 
-    struct addrinfo *addr;
-    int code = getaddrinfo(host, port, NULL, &addr);
+    struct addrinfo hints = {0}, *addr;
+    hints.ai_socktype = SOCK_STREAM;
+    int code = getaddrinfo(host, port, &hints, &addr);
     if (code) {
         qd_log(driver->log, QD_LOG_ERROR, "getaddrinfo(%s, %s): %s", host, port, gai_strerror(code));
         return 0;
     }
+
+    // Set the protocol family before creating the socket.
+    qd_set_addr_ai_family(driver, addr, protocol_family);
 
     int sock = qdpn_create_socket(addr->ai_family);
     if (sock == PN_INVALID_SOCKET) {
@@ -464,7 +502,7 @@ qdpn_connector_t *qdpn_connector(qdpn_driver_t *driver, const char *host,
         return 0;
     }
 
-    qdpn_configure_sock(driver, sock);
+    qdpn_configure_sock(driver, sock, true);
 
     if (connect(sock, addr->ai_addr, addr->ai_addrlen) == -1) {
         if (errno != EINPROGRESS) {
@@ -592,6 +630,12 @@ const char *qdpn_connector_name(const qdpn_connector_t *ctor)
     return ctor->name;
 }
 
+const char *qdpn_connector_hostip(const qdpn_connector_t *ctor)
+{
+    if (!ctor) return 0;
+    return ctor->hostip;
+}
+
 qdpn_listener_t *qdpn_connector_listener(qdpn_connector_t *ctor)
 {
     return ctor ? ctor->listener : NULL;
@@ -628,6 +672,7 @@ void qdpn_connector_free(qdpn_connector_t *ctor)
     if (!ctor) return;
 
     if (ctor->driver) qdpn_driver_remove_connector(ctor->driver, ctor);
+    pn_transport_unbind(ctor->transport);
     pn_transport_free(ctor->transport);
     ctor->transport = NULL;
     if (ctor->connection) pn_class_decref(PN_OBJECT, ctor->connection);
@@ -646,6 +691,18 @@ void qdpn_connector_activate(qdpn_connector_t *ctor, qdpn_activate_criteria_t cr
         ctor->status |= PN_SEL_RD;
         break;
     }
+}
+
+
+void qdpn_activate_all(qdpn_driver_t *d)
+{
+    sys_mutex_lock(d->lock);
+    qdpn_connector_t *c = DEQ_HEAD(d->connectors);
+    while (c) {
+        c->status |= PN_SEL_WR;
+        c = DEQ_NEXT(c);
+    }
+    sys_mutex_unlock(d->lock);
 }
 
 
@@ -735,7 +792,11 @@ void qdpn_connector_process(qdpn_connector_t *c)
                 c->status |= PN_SEL_WR;
                 if (c->pending_write) {
                     c->pending_write = false;
+                    #ifdef MSG_NOSIGNAL
                     ssize_t n = send(c->fd, pn_transport_head(transport), pending, MSG_NOSIGNAL);
+                    #else
+                    ssize_t n = send(c->fd, pn_transport_head(transport), pending, 0);
+                    #endif
                     if (n < 0) {
                         // XXX
                         if (errno != EAGAIN) {
@@ -754,7 +815,8 @@ void qdpn_connector_process(qdpn_connector_t *c)
                 c->output_done = true;
                 c->status &= ~PN_SEL_WR;
             }
-        }
+        } else
+            c->status &= ~PN_SEL_WR;
 
         // Closed?
 
@@ -794,6 +856,15 @@ qdpn_driver_t *qdpn_driver()
     if (pipe(d->ctrl)) {
         perror("Can't create control pipe");
     }
+
+    qdpn_configure_sock(d, d->ctrl[0], false);
+    qdpn_configure_sock(d, d->ctrl[1], false);
+
+#ifdef __sun
+    struct sigaction act;
+    act.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &act, NULL);
+#endif
 
     return d;
 }

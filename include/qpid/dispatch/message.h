@@ -167,13 +167,23 @@ void qd_message_set_trace_annotation(qd_message_t *msg, qd_composed_field_t *tra
  * method must not reference it after this call.
  *
  * @param msg Pointer to an outgoing message.
- * @param to_field Pointer to a composed field representing the to overrid
+ * @param to_field Pointer to a composed field representing the to override
  * address that will be used as the value for the QD_MA_TO map entry.  If null,
  * the message will not have a QA_MA_TO message annotation field.  Ownership of
  * this field is transferred to the message.
  *
  */
 void qd_message_set_to_override_annotation(qd_message_t *msg, qd_composed_field_t *to_field);
+
+/**
+ * Set a phase for the phase annotation in the message.
+ *
+ * @param msg Pointer to an outgoing message.
+ * @param phase The phase of the address for the outgoing message.
+ *
+ */
+void qd_message_set_phase_annotation(qd_message_t *msg, int phase);
+int  qd_message_get_phase_annotation(const qd_message_t *msg);
 
 /**
  * Set the value for the QD_MA_INGRESS field in the outgoing message
@@ -207,7 +217,7 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery);
  * @param msg A pointer to a message to be sent.
  * @param link The outgoing link on which to send the message.
  */
-void qd_message_send(qd_message_t *msg, qd_link_t *link);
+void qd_message_send(qd_message_t *msg, qd_link_t *link, bool strip_outbound_annotations);
 
 /**
  * Check that the message is well-formed up to a certain depth.  Any part of the message that is

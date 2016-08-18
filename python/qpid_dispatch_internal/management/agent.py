@@ -73,7 +73,7 @@ from cProfile import Profile
 from cStringIO import StringIO
 from ctypes import c_void_p, py_object, c_long
 from subprocess import Popen
-from ..dispatch import IoAdapter, LogAdapter, LOG_INFO, LOG_DEBUG, LOG_ERROR
+from ..dispatch import IoAdapter, LogAdapter, LOG_INFO, LOG_WARNING, LOG_DEBUG, LOG_ERROR, TREATMENT_ANYCAST_CLOSEST
 from qpid_dispatch.management.error import ManagementError, OK, CREATED, NO_CONTENT, STATUS_TEXT, \
     BadRequestStatus, InternalServerErrorStatus, NotImplementedStatus, NotFoundStatus
 from qpid_dispatch.management.entity import camelcase
@@ -81,6 +81,7 @@ from .schema import ValidationError, SchemaEntity, EntityType
 from .qdrouter import QdSchema
 from ..router.message import Message
 from ..router.address import Address
+from ..policy.policy_manager import PolicyManager
 
 
 def dictstr(d):
@@ -136,7 +137,6 @@ class PythonImplementation(Implementation):
         self.refresh_entity = impl.refresh_entity
 
 
-
 class EntityAdapter(SchemaEntity):
     """
     Base class for agent entities with operations as well as attributes.
@@ -155,14 +155,21 @@ class EntityAdapter(SchemaEntity):
         self.__dict__['_log'] = agent.log
         self.__dict__['_qd'] = agent.qd
         self.__dict__['_dispatch'] = agent.dispatch
+        self.__dict__['_policy'] = agent.policy
         self.__dict__['_implementations'] = []
 
     def validate(self, **kwargs):
         """Set default identity and name if not already set, then do schema validation"""
         identity = self.attributes.get("identity")
-        if not identity:
+        name = self.attributes.get("name")
+        if identity:
+            if not name:
+                self.attributes[u"name"] = "%s/%s" % (self.entity_type.short_name, self._identifier())
+        else:
             self.attributes[u"identity"] = "%s/%s" % (self.entity_type.short_name, self._identifier())
-        self.attributes.setdefault(u'name', self.attributes[u'identity'])
+            if not name:
+                self.attributes.setdefault(u'name', self.attributes[u'identity'])
+
         super(EntityAdapter, self).validate(**kwargs)
 
     def _identifier(self):
@@ -211,16 +218,24 @@ class EntityAdapter(SchemaEntity):
 
     def delete(self, request):
         """Handle delete request from client"""
-        self._agent.remove(self)
         self._delete()
+        self._agent.remove(self)
         return (NO_CONTENT, {})
 
     def _delete(self):
         """Subclasses implement delete logic here"""
         pass
 
+    def __str__(self):
+        keys = sorted(self.attributes.keys())
+        # If the attribute is hidden the attribute value will show up as stars ('*******').
+        return "Entity(%s)" % ", ".join("%s=%s" % (k, '*******' if self.entity_type.attribute(k).hidden else self.attributes[k]) for k in keys)
+
 
 class ContainerEntity(EntityAdapter):
+    """
+    The ContainerEntity has been deprecated. Use the the RouterEntity instead
+    """
 
     def create(self):
         self._qd.qd_dispatch_configure_container(self._dispatch, self)
@@ -228,6 +243,9 @@ class ContainerEntity(EntityAdapter):
     def _identifier(self):
         self.attributes.setdefault("containerName", "00000000-0000-0000-0000-000000000000")
         return self.attributes["containerName"]
+
+    def __str__(self):
+        return super(ContainerEntity, self).__str__().replace("Entity(", "ContainerEntity(")
 
 
 class RouterEntity(EntityAdapter):
@@ -238,10 +256,19 @@ class RouterEntity(EntityAdapter):
         self._add_implementation(
             CImplementation(agent.qd, entity_type, self._dispatch))
 
-    def _identifier(self): return self.attributes.get('routerId')
+    def _identifier(self): return self.attributes.get('id')
 
     def create(self):
+        try:
+            if self.routerId:
+                self._agent.log(LOG_WARNING, "routerId is deprecated, use id instead")
+        except:
+            pass
+
         self._qd.qd_dispatch_configure_router(self._dispatch, self)
+
+    def __str__(self):
+        return super(RouterEntity, self).__str__().replace("Entity(", "RouterEntity(")
 
 
 class LogEntity(EntityAdapter):
@@ -265,45 +292,130 @@ class LogEntity(EntityAdapter):
         """Can't actually delete a log source but return it to the default state"""
         self._qd.qd_log_source_reset(self.attributes['module'])
 
-def _addr_port_identifier(entity):
-    for attr in ['addr', 'port']: # Set default values if need be
+    def __str__(self):
+        return super(LogEntity, self).__str__().replace("Entity(", "LogEntity(")
+
+
+class PolicyEntity(EntityAdapter):
+    def __init__(self, agent, entity_type, attributes=None):
+        super(PolicyEntity, self).__init__(agent, entity_type, attributes, validate=False)
+        # Policy is a mix of configuration and operational entity.
+        # The statistics attributes are operational not configured.
+        self._add_implementation(
+            CImplementation(agent.qd, entity_type, self._dispatch))
+
+    def create(self):
+        self._qd.qd_dispatch_configure_policy(self._dispatch, self)
+        self._qd.qd_dispatch_register_policy_manager(self._dispatch, self._policy)
+
+    def _identifier(self):
+        return self.attributes.get('module')
+
+
+class PolicyRulesetEntity(EntityAdapter):
+    def create(self):
+        self._policy.create_ruleset(self.attributes)
+
+    def _identifier(self):
+        return self.attributes.get('applicationName')
+
+
+class PolicyStatsEntity(EntityAdapter):
+    def _identifier(self):
+        return self.attributes.get('applicationName')
+
+
+def _host_port_name_identifier(entity):
+    for attr in ['host', 'port', 'name']: # Set default values if need be
         entity.attributes.setdefault(
             attr, entity.entity_type.attribute(attr).missing_value())
-    return "%s:%s" % (entity.attributes['addr'], entity.attributes['port'])
+
+    if entity.attributes.get('name'):
+        return "%s:%s:%s" % (entity.attributes['host'], entity.attributes['port'], entity.attributes['name'])
+    else:
+        return "%s:%s" % (entity.attributes['host'], entity.attributes['port'])
 
 
 class ListenerEntity(EntityAdapter):
     def create(self):
-        self._qd.qd_dispatch_configure_listener(self._dispatch, self)
+        config_listener = self._qd.qd_dispatch_configure_listener(self._dispatch, self)
         self._qd.qd_connection_manager_start(self._dispatch)
+        return config_listener
 
-    def _identifier(self): return _addr_port_identifier(self)
+    def _identifier(self):
+        return _host_port_name_identifier(self)
 
+    def __str__(self):
+        return super(ListenerEntity, self).__str__().replace("Entity(", "ListenerEntity(")
+
+    def _delete(self):
+        self._qd.qd_connection_manager_delete_listener(self._dispatch, self._implementations[0].key)
 
 class ConnectorEntity(EntityAdapter):
     def create(self):
-        self._qd.qd_dispatch_configure_connector(self._dispatch, self)
+        config_connector = self._qd.qd_dispatch_configure_connector(self._dispatch, self)
         self._qd.qd_connection_manager_start(self._dispatch)
+        return config_connector
 
-    def _identifier(self): return _addr_port_identifier(self)
+    def _delete(self):
+        self._qd.qd_connection_manager_delete_connector(self._dispatch, self._implementations[0].key)
+
+    def _identifier(self):
+        return _host_port_name_identifier(self)
+
+    def __str__(self):
+        return super(ConnectorEntity, self).__str__().replace("Entity(", "ConnectorEntity(")
 
 class FixedAddressEntity(EntityAdapter):
     def create(self):
-        self._qd.qd_dispatch_configure_address(self._dispatch, self)
+        self._qd.qd_dispatch_configure_fixed_address(self._dispatch, self)
+
+    def __str__(self):
+        return super(FixedAddressEntity, self).__str__().replace("Entity(", "FixedAddressEntity(")
 
 
 class WaypointEntity(EntityAdapter):
     def create(self):
         self._qd.qd_dispatch_configure_waypoint(self._dispatch, self)
-        self._qd.qd_waypoint_activate_all(self._dispatch)
+        #self._qd.qd_waypoint_activate_all(self._dispatch)
+
+    def __str__(self):
+        return super(WaypointEntity, self).__str__().replace("Entity(", "WaypointEntity(")
 
 class LinkRoutePatternEntity(EntityAdapter):
     def create(self):
         self._qd.qd_dispatch_configure_lrp(self._dispatch, self)
 
-class ConsoleEntity(EntityAdapter):
+    def __str__(self):
+        return super(LinkRoutePatternEntity, self).__str__().replace("Entity(", "LinkRoutePatternEntity(")
+
+class AddressEntity(EntityAdapter):
     def create(self):
-        # if a named listener is present, use its addr:port 
+        self._qd.qd_dispatch_configure_address(self._dispatch, self)
+
+    def __str__(self):
+        return super(AddressEntity, self).__str__().replace("Entity(", "AddressEntity(")
+
+class LinkRouteEntity(EntityAdapter):
+    def create(self):
+        self._qd.qd_dispatch_configure_link_route(self._dispatch, self)
+
+    def __str__(self):
+        return super(LinkRouteEntity, self).__str__().replace("Entity(", "LinkRouteEntity(")
+
+class AutoLinkEntity(EntityAdapter):
+    def create(self):
+        self._qd.qd_dispatch_configure_auto_link(self._dispatch, self)
+
+    def __str__(self):
+        return super(AutoLinkEntity, self).__str__().replace("Entity(", "AutoLinkEntity(")
+
+class ConsoleEntity(EntityAdapter):
+    def __str__(self):
+        return super(ConsoleEntity, self).__str__().replace("Entity(", "ConsoleEntity(")
+
+    def create(self):
+        # if a named listener is present, use its host:port
         name = self.attributes.get('listener')
         if name:
             listeners = self._agent.find_entity_by_type("listener")
@@ -311,22 +423,25 @@ class ConsoleEntity(EntityAdapter):
                 if listener.name == name:
                     try:
                         #required
-                        host   = listener.attributes['addr']
+                        host   = listener.attributes['host']
                         port   = listener.attributes['port']
-                        wsport = self.attributes['wsport']
                         #optional
+                        wsport = self.attributes.get('wsport')
                         home   = self.attributes.get('home')
                         args   = self.attributes.get('args')
 
                         pargs = []
                         pargs.append(self.attributes['proxy'])
-                        pargs.append(str(self.attributes['wsport']))
-                        pargs.append("%s:%s" % (host, port))
-                        if home:
-                            pargs.append("--web")
-                            pargs.append(self.attributes['home'])
                         if args:
-                            pargs.append(args)
+                            # Replace any $port|$host|$wsport|$home
+                            dargs = {'$port': port, '$host': host}
+                            if wsport:
+                                dargs['$wsport'] = wsport
+                            if home:
+                                dargs['$home'] = home
+                            for k,v in dargs.iteritems():
+                                args = args.replace(k,str(v))
+                            pargs += args.split()
 
                         #run the external program
                         Popen(pargs)
@@ -339,27 +454,41 @@ class DummyEntity(EntityAdapter):
         return (OK, dict(**request.properties))
 
 
-class RouterLinkEntity(EntityAdapter): pass
+class RouterLinkEntity(EntityAdapter):
+    def __str__(self):
+        return super(RouterLinkEntity, self).__str__().replace("Entity(", "RouterLinkEntity(")
 
 
 class RouterNodeEntity(EntityAdapter):
     def _identifier(self):
-        return self.attributes.get('routerId')
+        return self.attributes.get('id')
+
+    def __str__(self):
+        return super(RouterNodeEntity, self).__str__().replace("Entity(", "RouterNodeEntity(")
 
 
 class RouterAddressEntity(EntityAdapter):
     def _identifier(self):
         return self.attributes.get('key')
 
+    def __str__(self):
+        return super(RouterAddressEntity, self).__str__().replace("Entity(", "RouterAddressEntity(")
+
 
 class ConnectionEntity(EntityAdapter):
     def _identifier(self):
-        return self.attributes.get('host')
+        return self.attributes.get('host') + ":" + str(self.attributes.get('identity'))
+
+    def __str__(self):
+        return super(ConnectionEntity, self).__str__().replace("Entity(", "ConnectionEntity(")
 
 
 class AllocatorEntity(EntityAdapter):
     def _identifier(self):
         return self.attributes.get('typeName')
+
+    def __str__(self):
+        return super(AllocatorEntity, self).__str__().replace("Entity(", "AllocatorEntity(")
 
 
 class EntityCache(object):
@@ -395,16 +524,18 @@ class EntityCache(object):
         self.schema.validate_full(chain(iter([entity]), iter(self.entities)))
         self.entities.append(entity)
 
-    def _add_implementation(self, implementation):
+    def _add_implementation(self, implementation, adapter=None):
         """Create an adapter to wrap the implementation object and add it"""
         cls = self.agent.entity_class(implementation.entity_type)
-        adapter = cls(self.agent, implementation.entity_type, validate=False)
+        if not adapter:
+            adapter = cls(self.agent, implementation.entity_type, validate=False)
         self.implementations[implementation.key] = adapter
         adapter._add_implementation(implementation)
         adapter._refresh()
         self.add(adapter)
 
-    def add_implementation(self, implementation): self._add_implementation(implementation)
+    def add_implementation(self, implementation, adapter=None):
+        self._add_implementation(implementation, adapter=adapter)
 
     def _remove(self, entity):
         try:
@@ -533,7 +664,7 @@ class ManagementEntity(EntityAdapter):
         router = self._agent.entities.map_type(None, 'router')[0]
         area = router.attributes['area']
         def node_address(node):
-            return str(Address.topological(node.attributes['routerId'], "$management", area))
+            return str(Address.topological(node.attributes['id'], "$management", area))
         return (OK, self._agent.entities.map_type(node_address, 'router.node'))
 
     def get_schema(self, request):
@@ -592,6 +723,7 @@ class Agent(object):
         self.entities = EntityCache(self)
         self.request_lock = Lock()
         self.log_adapter = LogAdapter("AGENT")
+        self.policy = PolicyManager(self)
         self.management = self.create_entity({"type": "management"})
         self.add_entity(self.management)
 
@@ -603,8 +735,7 @@ class Agent(object):
         """Register the management address to receive management requests"""
         self.entities.refresh_from_c()
         self.log(LOG_INFO, "Activating management agent on %s" % address)
-        self.io = [IoAdapter(self.receive, address),
-                   IoAdapter(self.receive, address, True)] # Global
+        self.io = IoAdapter(self.receive, address, 'L', '0', TREATMENT_ANYCAST_CLOSEST)
 
     def entity_class(self, entity_type):
         """Return the class that implements entity_type"""
@@ -636,21 +767,26 @@ class Agent(object):
             body=body)
         self.log(LOG_DEBUG, "Agent response:\n  %s\n  Responding to: \n  %s"%(response, request))
         try:
-            self.io[0].send(response)
+            self.io.send(response)
         except:
             self.log(LOG_ERROR, "Can't respond to %s: %s"%(request, format_exc()))
 
-    def receive(self, request, link_id):
+    def receive(self, request, unused_link_id, unused_cost):
         """Called when a management request is received."""
         def error(e, trace):
             """Raise an error"""
             self.log(LOG_ERROR, "Error dispatching %s: %s\n%s"%(request, e, trace))
             self.respond(request, e.status, e.description)
+
+        # If there's no reply_to, don't bother to process the request.
+        if not request.reply_to:
+            return
+
         # Coarse locking, handle one request at a time.
         with self.request_lock:
             try:
                 self.entities.refresh_from_c()
-                self.log(LOG_DEBUG, "Agent request %s on link %s"%(request, link_id))
+                self.log(LOG_DEBUG, "Agent request %s"% request)
                 status, body = self.handle(request)
                 self.respond(request, status=status, body=body)
             except ManagementError, e:
@@ -687,8 +823,12 @@ class Agent(object):
     def _create(self, attributes):
         """Create an entity, called externally or from configuration file."""
         entity = self.create_entity(attributes)
-        self.add_entity(entity)
-        entity.create()
+        pointer = entity.create()
+        if pointer:
+            cimplementation = CImplementation(self.qd, entity.entity_type, pointer)
+            self.entities.add_implementation(cimplementation, entity)
+        else:
+            self.add_entity(entity)
         return entity
 
     def create(self, request):
