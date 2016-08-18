@@ -35,6 +35,7 @@ if(BUILD_DOCS)
   else()
     set (OPTIONAL OPTIONAL)
     add_custom_target(doc)
+    add_custom_target(docs DEPENDS doc) # some projects say "make doc" others "make docs" allow both.
   endif()
   macro(install_doc)
     install(${ARGN} ${OPTIONAL})
@@ -73,6 +74,12 @@ if(BUILD_DOCS)
   file(GLOB_RECURSE RST_SRC RELATIVE ${src} *.rst)
   foreach(file ${RST_SRC})
     configure_file(${src}/${file} ${bin}/${file} COPYONLY)
+  endforeach()
+
+  # Copy the images. Don't use configure_file since it truncates .png files at 1st ^Z character
+  file(GLOB_RECURSE PNG_SRC RELATIVE ${src} *.png)
+  foreach(file ${PNG_SRC})
+    EXECUTE_PROCESS(COMMAND ${CMAKE_COMMAND} -E copy_if_different ${src}/${file} ${bin}/${file})
   endforeach()
 
   # Generate files from management schema
@@ -130,12 +137,19 @@ if(BUILD_DOCS)
       COMMAND ${SPHINX_BUILD} -d ${bin}/doctrees -b html ${bin} ${bin}/dochtml
       # man/ contains Unix man pages.
       COMMAND ${SPHINX_BUILD} -d ${bin}/doctrees -b man  ${bin} ${bin}/man
-      DEPENDS ${RST_SRC} ${HELP_GEN} ${SCHEMA_GEN} 
+      # singlehtml is a single HTML page
+      COMMAND ${SPHINX_BUILD} -d ${bin}/doctrees -b singlehtml ${bin} ${bin}/singlehtml
+      DEPENDS ${RST_SRC} ${HELP_GEN} ${SCHEMA_GEN}
       )
     add_custom_target(doc-sphinx DEPENDS ${SPHINX_OUTPUT})
     add_dependencies(doc doc-sphinx)
 
     install_doc(DIRECTORY ${bin}/dochtml/  DESTINATION ${QD_DOC_INSTALL_DIR}/html)
+
+    set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES
+      ${bin}/html
+      ${bin}/singlehtml
+      ${bin}/dochtml)
   endif(USE_SPHINX)
 
   # Install rst documentation as baseline in case we have no generator
@@ -143,5 +157,3 @@ if(BUILD_DOCS)
 
 
 endif(BUILD_DOCS)
-
-

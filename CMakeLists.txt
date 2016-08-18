@@ -46,7 +46,7 @@ if (NOT PYTHONLIBS_FOUND)
      message(FATAL_ERROR "Python Development Libraries are needed.")
 endif (NOT PYTHONLIBS_FOUND)
 
-set (SO_VERSION_MAJOR 1)
+set (SO_VERSION_MAJOR 2)
 set (SO_VERSION_MINOR 0)
 set (SO_VERSION "${SO_VERSION_MAJOR}.${SO_VERSION_MINOR}")
 
@@ -86,7 +86,7 @@ set(QPID_DISPATCH_CONFDIR ${SYSCONF_INSTALL_DIR}/qpid-dispatch)
 find_library(pthread_lib pthread)
 find_library(dl_lib dl)
 find_library(rt_lib rt)
-find_package(Proton 0.10 REQUIRED)
+find_package(Proton 0.12 REQUIRED)
 
 ##
 ## Find Valgrind
@@ -114,9 +114,11 @@ endif (NOT COMMAND add_compile_options)
 
 add_compile_options(-pthread)
 add_compile_options(-Wall)
+if (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
 add_compile_options(-Werror)
+endif (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
 add_compile_options(-std=gnu99)
-set(CATCH_UNDEFINED "-Wl,--no-undefined")
+set(CATCH_UNDEFINED "-Wl,-z,defs")
 
 ##
 ## Header file installation

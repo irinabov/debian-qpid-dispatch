@@ -91,31 +91,35 @@ enum {
 
 /** @name Message Annotation Headers */
 /// @{
-const char * const QD_MA_INGRESS;  ///< Ingress Router
-const char * const QD_MA_TRACE;    ///< Trace
-const char * const QD_MA_TO;       ///< To-Override
-const char * const QD_MA_CLASS;    ///< Message-Class
+extern const char * const QD_MA_INGRESS;  ///< Ingress Router
+extern const char * const QD_MA_TRACE;    ///< Trace
+extern const char * const QD_MA_TO;       ///< To-Override
+extern const char * const QD_MA_PHASE;    ///< Phase for override address
+extern const char * const QD_MA_CLASS;    ///< Message-Class
 /// @}
 
 /** @name Container Capabilities */
 /// @{
-const char * const QD_CAPABILITY_ANONYMOUS_RELAY;
+extern const char * const QD_CAPABILITY_ANONYMOUS_RELAY;
 /// @}
 
 /** @name Link Terminus Capabilities */
 /// @{
-const char * const QD_CAPABILITY_ROUTER;
+extern const char * const QD_CAPABILITY_ROUTER_CONTROL;
+extern const char * const QD_CAPABILITY_ROUTER_DATA;
 /// @}
 
 /** @name Dynamic Node Properties */
 /// @{
-const char * const QD_DYNAMIC_NODE_PROPERTY_ADDRESS;  ///< Address for routing dynamic sources
+extern const char * const QD_DYNAMIC_NODE_PROPERTY_ADDRESS;  ///< Address for routing dynamic sources
 /// @}
 
-/** @name Miscellaneous Strings */
+/** @name Connection Properties */
 /// @{
-const char * const QD_INTERNODE_LINK_NAME_1;
-const char * const QD_INTERNODE_LINK_NAME_2;
+extern const char * const QD_CONNECTION_PROPERTY_PRODUCT_KEY;
+extern const char * const QD_CONNECTION_PROPERTY_PRODUCT_VALUE;
+extern const char * const QD_CONNECTION_PROPERTY_VERSION_KEY;
+extern const char * const QD_CONNECTION_PROPERTY_COST_KEY;
 /// @}
 
 /** @name AMQP error codes. */
@@ -123,6 +127,9 @@ const char * const QD_INTERNODE_LINK_NAME_2;
 /** An AMQP error status code and string description  */
 typedef struct qd_amqp_error_t { int status; const char* description; } qd_amqp_error_t;
 extern const qd_amqp_error_t QD_AMQP_OK;
+extern const qd_amqp_error_t QD_AMQP_CREATED;
+extern const qd_amqp_error_t QD_AMQP_NO_CONTENT;
+extern const qd_amqp_error_t QD_AMQP_FORBIDDEN;
 extern const qd_amqp_error_t QD_AMQP_BAD_REQUEST;
 extern const qd_amqp_error_t QD_AMQP_NOT_FOUND;
 extern const qd_amqp_error_t QD_AMQP_NOT_IMPLEMENTED;

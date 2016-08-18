@@ -35,18 +35,14 @@
 void qd_server_timer_pending_LH(qd_timer_t *timer);
 void qd_server_timer_cancel_LH(qd_timer_t *timer);
 
-
-typedef enum {
-    CONN_STATE_CONNECTING = 0,
-    CONN_STATE_OPENING,
-    CONN_STATE_OPERATIONAL,
-    CONN_STATE_FAILED,
-    CONN_STATE_USER
-} conn_state_t;
-ENUM_DECLARE(conn_state);
-
 #define CONTEXT_NO_OWNER -1
 #define CONTEXT_UNSPECIFIED_OWNER -2
+
+typedef enum {
+    QD_BIND_SUCCESSFUL, // Bind to socket was attempted and the bind succeeded
+    QD_BIND_FAILED,     // Bind to socket was attempted and bind failed
+    QD_BIND_NONE,    // Bind to socket not attempted yet
+} qd_bind_state_t;
 
 typedef enum {
     CXTR_STATE_CONNECTING = 0,
@@ -93,23 +89,33 @@ DEQ_DECLARE(qd_deferred_call_t, qd_deferred_call_list_t);
  */
 struct qd_connection_t {
     DEQ_LINKS(qd_connection_t);
-    qd_server_t      *server;
-    conn_state_t      state;
-    int               owner_thread;
-    int               enqueued;
-    qdpn_connector_t *pn_cxtr;
-    pn_connection_t  *pn_conn;
-    pn_collector_t   *collector;
-    pn_ssl_t         *ssl;
-    qd_listener_t    *listener;
-    qd_connector_t   *connector;
-    void             *context; // Copy of context from listener or connector
-    void             *user_context;
-    void             *link_context; // Context shared by this connection's links
-    qd_user_fd_t     *ufd;
-
-    qd_deferred_call_list_t  deferred_calls;
-    sys_mutex_t             *deferred_call_lock;
+    qd_server_t              *server;
+    bool                      opened; // An open callback was invoked for this connection
+    bool                      closed;
+    int                       owner_thread;
+    int                       enqueued;
+    qdpn_connector_t         *pn_cxtr;
+    pn_connection_t          *pn_conn;
+    pn_collector_t           *collector;
+    pn_ssl_t                 *ssl;
+    qd_listener_t            *listener;
+    qd_connector_t           *connector;
+    void                     *context; // Copy of context from listener or connector
+    void                     *user_context;
+    void                     *link_context; // Context shared by this connection's links
+    qd_user_fd_t             *ufd;
+    uint64_t                  connection_id; // A unique identifier for the qd_connection_t. The underlying pn_connection already has one but it is long and clunky.
+    const char               *user_id; // A unique identifier for the user on the connection. This is currently populated  from the client ssl cert. See ssl_uid_format in server.h for more info
+    bool                      free_user_id;
+    qd_policy_settings_t     *policy_settings;
+    int                       n_sessions;
+    int                       n_senders;
+    int                       n_receivers;
+    void                     *open_container;
+    qd_deferred_call_list_t   deferred_calls;
+    sys_mutex_t              *deferred_call_lock;
+    bool                      event_stall;
+    bool                      policy_counted;
 };
 
 DEQ_DECLARE(qd_connection_t, qd_connection_list_t);
@@ -170,6 +176,8 @@ struct qd_server_t {
     void                     *signal_context;
     int                       pending_signal;
     qd_connection_list_t      connections;
+    qd_timer_t               *heartbeat_timer;
+    uint64_t                 next_connection_id;
 };
 
 ALLOC_DECLARE(qd_work_item_t);

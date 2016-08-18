@@ -142,12 +142,16 @@ void qdpn_driver_free(qdpn_driver_t *driver);
  * @param[in] driver driver that will 'own' this listener
  * @param[in] host local host address to listen on
  * @param[in] port local port to listen on
+ * @param[in] protocol family to use (IPv4 or IPv6 or 0). If 0 (zero) is passed in the protocol family will be automatically determined from the address
  * @param[in] context application-supplied, can be accessed via
  *                    qdpn_listener_context()
  * @return a new listener on the given host:port, NULL if error
  */
-qdpn_listener_t *qdpn_listener(qdpn_driver_t *driver, const char *host,
-                               const char *port, void* context);
+qdpn_listener_t *qdpn_listener(qdpn_driver_t *driver,
+                               const char *host,
+                               const char *port,
+                               const char *protocol_family,
+                               void* context);
 
 /** Access the head listener for a driver.
  *
@@ -174,9 +178,17 @@ void qdpn_listener_trace(qdpn_listener_t *listener, pn_trace_t trace);
 /** Accept a connection that is pending on the listener.
  *
  * @param[in] listener the listener to accept the connection on
+ * @param[in] policy policy that holds absolute connection limits
+ * @param[in] policy_fn function that accepts remote host name and returns
+ *            decision to allow or deny this connection
+ * @param[out] counted pointer to a bool set to true when the connection was
+ *             counted against absolute connection limits
  * @return a new connector for the remote, or NULL on error
  */
-qdpn_connector_t *qdpn_listener_accept(qdpn_listener_t *listener);
+qdpn_connector_t *qdpn_listener_accept(qdpn_listener_t *listener,
+                                       void *policy,
+                                       bool (*policy_fn)(void *, const char *),
+                                       bool *counted);
 
 /** Access the application context that is associated with the listener.
  *
@@ -213,12 +225,16 @@ void qdpn_listener_free(qdpn_listener_t *listener);
  * @param[in] driver owner of this connection.
  * @param[in] host remote host to connect to.
  * @param[in] port remote port to connect to.
+ * @param[in] protocol family to use (IPv4 or IPv6 or 0). If 0 (zero) is passed in the protocol family will be automatically determined from the address
  * @param[in] context application supplied, can be accessed via
  *                    qdpn_connector_context() @return a new connector
  *                    to the given remote, or NULL on error.
  */
-qdpn_connector_t *qdpn_connector(qdpn_driver_t *driver, const char *host,
-                                 const char *port, void* context);
+qdpn_connector_t *qdpn_connector(qdpn_driver_t *driver,
+                                 const char *host,
+                                 const char *port,
+                                 const char *protocol_family,
+                                 void* context);
 
 /** Access the head connector for a driver.
  *
@@ -306,10 +322,17 @@ void qdpn_connector_set_context(qdpn_connector_t *connector, void *context);
 
 /** Access the name of the connector
  *
- * @param[in] connector the connector which will hole the name
+ * @param[in] connector the connector of interest
  * @return the name of the connector in the form of a null-terminated character string.
  */
 const char *qdpn_connector_name(const qdpn_connector_t *connector);
+
+/** Access the numeric host ip of the connector
+ *
+ * @param[in] connector the connector of interest
+ * @return the numeric host ip address of the connector in the form of a null-terminated character string.
+ */
+const char *qdpn_connector_hostip(const qdpn_connector_t *connector);
 
 /** Access the transport used by this connector.
  *
@@ -351,6 +374,10 @@ void qdpn_connector_free(qdpn_connector_t *connector);
  * @param[in] criteria  The criteria that must be met prior to activating the connector
  */
 void qdpn_connector_activate(qdpn_connector_t *connector, qdpn_activate_criteria_t criteria);
+
+/** Activate all of the open file descriptors
+ */
+void qdpn_activate_all(qdpn_driver_t *driver);
 
 /** Return the activation status of the connector for a criteria
  *

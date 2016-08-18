@@ -18,7 +18,7 @@
 #
 
 from data import MessageHELLO
-from qpid_dispatch_internal.dispatch import LOG_INFO, LOG_TRACE
+from qpid_dispatch_internal.dispatch import LOG_INFO, LOG_TRACE, LOG_CRITICAL
 
 class HelloProtocol(object):
     """
@@ -32,6 +32,7 @@ class HelloProtocol(object):
         self.hello_interval  = container.config.helloInterval
         self.hello_max_age   = container.config.helloMaxAge
         self.hellos          = {}
+        self.dup_reported    = False
 
 
     def tick(self, now):
@@ -43,12 +44,15 @@ class HelloProtocol(object):
             self.container.log_hello(LOG_TRACE, "SENT: %r" % msg)
 
 
-    def handle_hello(self, msg, now, link_id):
+    def handle_hello(self, msg, now, link_id, cost):
         if msg.id == self.id:
+            if not self.dup_reported and (msg.instance != self.container.instance):
+                self.dup_reported = True
+                self.container.log_hello(LOG_CRITICAL, "Detected Neighbor Router with a Duplicate ID - %s" % msg.id)
             return
         self.hellos[msg.id] = now
         if msg.is_seen(self.id):
-            self.node_tracker.neighbor_refresh(msg.id, msg.instance, link_id, now)
+            self.node_tracker.neighbor_refresh(msg.id, msg.instance, link_id, cost, now)
 
 
     def _expire_hellos(self, now):
@@ -59,5 +63,5 @@ class HelloProtocol(object):
         for key, last_seen in self.hellos.items():
             if now - last_seen > self.hello_max_age:
                 self.hellos.pop(key)
-                self.container.log_hello(LOG_INFO, "HELLO peer expired: %s" % key)
+                self.container.log_hello(LOG_TRACE, "HELLO peer expired: %s" % key)
 
