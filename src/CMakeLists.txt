@@ -53,26 +53,40 @@ set(qpid_dispatch_SOURCES
   dispatch.c
   entity.c
   entity_cache.c
-  lrp.c
   hash.c
   iovec.c
   iterator.c
   log.c
   message.c
   parse.c
+  policy.c
   posix/driver.c
   posix/threading.c
   python_embedded.c
   router_agent.c
   router_config.c
-  router_delivery.c
+  router_core/agent.c
+  router_core/agent_address.c
+  router_core/agent_config_address.c
+  router_core/agent_config_auto_link.c
+  router_core/agent_config_link_route.c
+  router_core/agent_link.c
+  router_core/connections.c
+  router_core/error.c
+  router_core/forwarder.c
+  router_core/route_control.c
+  router_core/router_core.c
+  router_core/router_core_thread.c
+  router_core/route_tables.c
+  router_core/management_agent.c
+  router_core/terminus.c
+  router_core/transfer.c
   router_node.c
-  router_forwarders.c
   router_pynode.c
   schema_enum.c
   server.c
   timer.c
-  waypoint.c
+  trace_mask.c
   )
 
 if(USE_MEMORY_POOL)
@@ -87,14 +101,11 @@ set_property(
 add_library(qpid-dispatch SHARED ${qpid_dispatch_SOURCES})
 target_link_libraries(qpid-dispatch ${Proton_LIBRARIES} ${pthread_lib} ${rt_lib} ${dl_lib} ${PYTHON_LIBRARIES})
 set_target_properties(qpid-dispatch PROPERTIES
-  VERSION "${SO_VERSION}"
-  SOVERSION "${SO_VERSION_MAJOR}"
   LINK_FLAGS "${CATCH_UNDEFINED}"
   )
 install(TARGETS qpid-dispatch
-  LIBRARY DESTINATION ${LIB_INSTALL_DIR})
+  LIBRARY DESTINATION ${QPID_DISPATCH_HOME})
 
-# Set in parent scope for calling cmake file.
-set (QPID_DISPATCH_LIB "libqpid-dispatch.so.${SO_VERSION_MAJOR}" PARENT_SCOPE)
+set (QPID_DISPATCH_LIB "libqpid-dispatch.so")
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/config.h.in ${CMAKE_CURRENT_BINARY_DIR}/config.h)

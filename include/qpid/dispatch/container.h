@@ -74,7 +74,7 @@ typedef void (*qd_container_delivery_handler_t)    (void *node_context, qd_link_
 typedef int  (*qd_container_link_handler_t)        (void *node_context, qd_link_t *link);
 typedef int  (*qd_container_link_detach_handler_t) (void *node_context, qd_link_t *link, qd_detach_type_t dt);
 typedef void (*qd_container_node_handler_t)        (void *type_context, qd_node_t *node);
-typedef void (*qd_container_conn_handler_t)        (void *type_context, qd_connection_t *conn, void *context);
+typedef int  (*qd_container_conn_handler_t)        (void *type_context, qd_connection_t *conn, void *context);
 
 /**
  * A set  of Node handlers for deliveries, links and container events.
@@ -100,12 +100,8 @@ typedef struct {
     /** Invoked when an attach for a new outgoing link is received. */
     qd_container_link_handler_t outgoing_handler;
 
-    /**
-     * Invoked when an outgoing link is available for sending either deliveries
-     * or disposition changes.  The handler must check the link's credit to
-     * determine whether (and how many) message deliveries may be sent.
-     */
-    qd_container_link_handler_t writable_handler;
+    /** Invoked when an activated connection is available for writing. */
+    qd_container_conn_handler_t writable_handler;
 
     /** Invoked when a link is detached. */
     qd_container_link_detach_handler_t link_detach_handler;
@@ -127,11 +123,14 @@ typedef struct {
     /** Invoked when an instance of the node type is destroyed. */
     qd_container_node_handler_t  node_destroyed_handler;
 
-    /** Invoked when an incoming connection (via listener) is established. */
-    qd_container_conn_handler_t  inbound_conn_open_handler;
+    /** Invoked when an incoming connection (via listener) is opened. */
+    qd_container_conn_handler_t  inbound_conn_opened_handler;
 
-    /** Invoked when an outgoing connection (via connector) is established. */
-    qd_container_conn_handler_t  outbound_conn_open_handler;
+    /** Invoked when an outgoing connection (via connector) is opened. */
+    qd_container_conn_handler_t  outbound_conn_opened_handler;
+
+    /** Invoked when a connection is closed. */
+    qd_container_conn_handler_t  conn_closed_handler;
 } qd_node_type_t;
 
 
@@ -170,6 +169,9 @@ void *qd_link_get_context(qd_link_t *link);
 void qd_link_set_conn_context(qd_link_t *link, void *link_context);
 void *qd_link_get_conn_context(qd_link_t *link);
 
+void policy_notify_opened(void *container, qd_connection_t *conn, void *context);
+qd_direction_t qd_link_direction(const qd_link_t *link);
+pn_snd_settle_mode_t qd_link_remote_snd_settle_mode(const qd_link_t *link);
 qd_connection_t *qd_link_connection(qd_link_t *link);
 pn_link_t *qd_link_pn(qd_link_t *link);
 pn_session_t *qd_link_pn_session(qd_link_t *link);
@@ -180,7 +182,7 @@ pn_terminus_t *qd_link_remote_target(qd_link_t *link);
 void qd_link_activate(qd_link_t *link);
 void qd_link_close(qd_link_t *link);
 bool qd_link_drain_changed(qd_link_t *link, bool *mode);
-void qd_link_free_LH(qd_link_t *link);
+void qd_link_free(qd_link_t *link);
 
 ///@}
 #endif

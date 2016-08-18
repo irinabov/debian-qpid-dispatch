@@ -9,17 +9,29 @@
             "description": "Attributes for internet address and port.",
             "attributes": {
                 "addr": {
-                    "description":"IP address: ipv4 or ipv6 literal or a host name.",
+                    "description":"(DEPRECATED)IP address: ipv4 or ipv6 literal or a host name. This attribute has been deprecated. Use host instead",
                     "type": "string",
                     "default": "127.0.0.1",
                     "create": true
                 },
+                "host": {
+                    "description":"IP address: ipv4 or ipv6 literal or a host name",
+                    "type": "string",
+                    "default": "127.0.0.1",
+                    "create": true
+                },                
                 "port": {
                     "description": "Port number or symbolic service name.",
                     "type": "string",
                     "default": "amqp",
                     "create": true
 
+                },
+                "protocolFamily": {
+                    "type": ["IPv4", "IPv6"],
+                    "required": false,
+                    "description": "['IPv4', 'IPv6'] IPv4: Internet Protocol version 4; IPv6: Internet Protocol version 6.  If not specified, the protocol family will be automatically determined from the address.",
+                    "create": true
                 }
             }
         },
@@ -31,17 +43,26 @@
                     "type": [
                         "normal",
                         "inter-router",
+                        "route-container",
                         "on-demand"
                     ],
                     "default": "normal",
-                    "description": "The role of an established connection. In the normal role, the connection is assumed to be used for AMQP clients that are doing normal message delivery over the connection.  In the inter-router role, the connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections.",
+                    "description": "The role of an established connection. In the normal role, the connection is assumed to be used for AMQP clients that are doing normal message delivery over the connection.  In the inter-router role, the connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections. route-container role can be used for router-container connections, for example, a router-broker connection. on-demand role has been deprecated.",
                     "create": true
+                },
+                "cost": {
+                    "type": "integer",
+                    "default": "1",
+                    "required": false,
+                    "create": true,
+                    "description": "For the 'inter-router' role only.  This value assigns a cost metric to the inter-router connection.  The default (and minimum) value is one.  Higher values represent higher costs.  The cost is used to influence the routing algorithm as it attempts to use the path with the lowest total cost from ingress to egress."
                 }
             }
         },
 
         "sslProfile": {
             "description":"Attributes for setting TLS/SSL configuration for connections.",
+            "referential": true,
             "attributes": {
                 "certDb": {
                     "type": "path",
@@ -71,7 +92,22 @@
                     "description": "An alternative to storing the password in a file referenced by passwordFile is to supply the password right here in the configuration file.  This option can be used by supplying the password in the 'password' option.  Don't use both password and passwordFile in the same profile.",
                     "create": true
 
-                }
+                },
+                "uidFormat": {
+                    "type": "string",
+                    "description": "A list of x509 client certificate fields that will be used to build a string that will uniquely identify the client certificate owner. For e.g. a value of 'cou' indicates that the uid will consist of c - common name concatenated with o - organization-company name concatenated with u - organization unit; or a value of 'o2' indicates that the uid will consist of o (organization name) concatenated with 2 (the sha256 fingerprint of the entire certificate) . Allowed values can be any combination of comma separated 'c'( ISO3166 two character country code), 's'(state or province), 'l'(Locality; generally - city), 'o'(Organization - Company Name), 'u'(Organization Unit - typically certificate type or brand), 'n'(CommonName - typically a user name for client certificates) and '1'(sha1 certificate fingerprint, as displayed in the fingerprints section when looking at a certificate with say a web browser is the hash of the entire certificate) and 2 (sha256 certificate fingerprint) and 5 (sha512 certificate fingerprint). ",
+                    "create": true
+                },
+                "displayNameFile": {
+                    "type": "string",
+                    "description": "The path to the file containing the unique id to dispay name mapping",
+                    "create": true
+                },
+                "sslProfileName": {
+                    "type": "string",
+                    "description": "The name of the ssl profile",
+                    "create": false
+                }                
             }
         }
     },
@@ -95,7 +131,6 @@
                 "type": {
                     "type": "string",
                     "required": true,
-                    "value": "$$entityType",
                     "description": "Management entity type.",
                     "create": true
                 }
@@ -443,11 +478,12 @@
         },
 
         "container": {
-            "description":"Attributes related to the AMQP container.",
+            "description":"(DEPRECATED)Attributes related to the AMQP container. This entity has been deprecated. Use the router entity instead.",
             "extends": "configurationEntity",
 
             "singleton": true,
             "attributes": {
+            
                 "containerName": {
                     "type": "string",
                     "description": "The  name of the AMQP container.  If not specified, the container name will be set to a value of the container's choosing.  The automatically assigned container name is not guaranteed to be persistent across restarts of the container.",
@@ -456,7 +492,7 @@
                 },
                 "workerThreads": {
                     "type": "integer",
-                    "default": 1,
+                    "default": 4,
                     "description": "The number of threads that will be created to process message traffic and other application work (timers, non-amqp file descriptors, etc.) .",
                     "create": true
 
@@ -477,7 +513,6 @@
                     "type": "string",
                     "description": "Name of the SASL configuration.  This string + '.conf' is the name of the configuration file.",
                     "required": false,
-                    "default": "qdrouterd",
                     "create": true
                 }
             }
@@ -489,19 +524,24 @@
             "singleton": true,
             "attributes": {
                 "routerId": {
-                    "description":"Router's unique identity.",
+                    "description":"(DEPRECATED) Router's unique identity. This attribute has been deprecated. Use id instead",
                     "type": "string",
+                    "required": false,
+                    "create": true
+                },
+                "id": {
+                    "description":"Router's unique identity. One of id or routerId is required. The router will fail to start without id or routerId",
+                    "type": "string",
+                    "required": false,
                     "create": true
                 },
                 "mode": {
                     "type": [
                         "standalone",
-                        "interior",
-                        "edge",
-                        "endpoint"
+                        "interior"
                     ],
                     "default": "standalone",
-                    "description": "In standalone mode, the router operates as a single component.  It does not participate in the routing protocol and therefore will not cooperate with other routers. In interior mode, the router operates in cooperation with other interior routers in an interconnected network.  In edge mode, the router operates with an up link into an interior router network. Edge routers are typically used as connection concentrators or as security firewalls for access into the interior network.",
+                    "description": "In standalone mode, the router operates as a single component.  It does not participate in the routing protocol and therefore will not cooperate with other routers. In interior mode, the router operates in cooperation with other interior routers in an interconnected network.",
                     "create": true
                 },
                 "area": {
@@ -542,7 +582,7 @@
                 "mobileAddrMaxAge": {
                     "type": "integer",
                     "default": 60,
-                    "description": "Deprecated - This value is no longer used in the router.",
+                    "description": "(DEPRECATED) This value is no longer used in the router.",
                     "create": true
                 },
 
@@ -560,6 +600,32 @@
                     "type": "integer",
                     "description":"Number of known peer router nodes.",
                     "graph": true
+                },
+                "workerThreads": {
+                    "type": "integer",
+                    "default": 4,
+                    "description": "The number of threads that will be created to process message traffic and other application work (timers, non-amqp file descriptors, etc.) .",
+                    "create": true
+
+                },
+                "debugDump": {
+                    "type": "path",
+                    "description": "A file to dump debugging information that can't be logged normally.",
+                    "create": true
+
+                },
+                "saslConfigPath": {
+                    "type": "path",
+                    "description": "Absolute path to the SASL configuration file.",
+                    "required": false,
+                    "create": true
+                },
+                "saslConfigName": {
+                    "type": "string",
+                    "description": "Name of the SASL configuration.  This string + '.conf' is the name of the configuration file.",
+                    "default": "qdrouterd",
+                    "required": false,
+                    "create": true
                 }
             }
         },
@@ -567,7 +633,7 @@
         "listener": {
             "description": "Listens for incoming connections to the router.",
             "extends": "configurationEntity",
-            "operations": ["CREATE"],
+            "operations": ["CREATE", "DELETE"],
             "annotations": [
                 "addrPort",
                 "connectionRole",
@@ -605,33 +671,50 @@
                 },
                 "maxFrameSize": {
                     "type": "integer",
-                    "default": 65536,
-                    "description": "Defaults to 65536.  If specified, it is the maximum frame size in octets that will be used in the connection-open negotiation with a connected peer.  The frame size is the largest contiguous set of uninterrupted data that can be sent for a message delivery over the connection. Interleaving of messages on different links is done at frame granularity.",
+                    "default": 16384,
+                    "description": "Defaults to 16384.  If specified, it is the maximum frame size in octets that will be used in the connection-open negotiation with a connected peer.  The frame size is the largest contiguous set of uninterrupted data that can be sent for a message delivery over the connection. Interleaving of messages on different links is done at frame granularity.",
                     "create": true
                 },
-
+                "idleTimeoutSeconds": {
+                    "type": "integer",
+                    "default": 16,
+                    "description": "The idle timeout, in seconds, for connections through this listener.  If no frames are received on the connection for this time interval, the connection shall be closed.",
+                    "create": true
+                },
                 "requirePeerAuth": {
                     "type": "boolean",
                     "create": true,
-                    "description": "Deprecated - This attribute is now controlled by the authenticatePeer attribute."
+                    "description": "(DEPRECATED) This attribute is now controlled by the authenticatePeer attribute."
                 },
                 "allowUnsecured": {
                     "type": "boolean",
                     "create": true,
-                    "description": "Deprecated - This attribute is now controlled by the requireEncryption attribute."
+                    "description": "(DEPRECATED) This attribute is now controlled by the requireEncryption attribute."
                 },
                 "allowNoSasl": {
                     "type": "boolean",
                     "create": true,
-                    "description": "Deprecated - This attribute is now controlled by the authenticatePeer attribute."
+                    "description": "(DEPRECATED) This attribute is now controlled by the authenticatePeer attribute."
+                },
+                "stripAnnotations": {
+                    "type": ["in", "out", "both", "no"],
+                    "default": "both",
+                    "description": "['in', 'out', 'both', 'no'] in: Strip the dispatch router specific annotations only on ingress; out: Strip the dispatch router specific annotations only on egress; both: Strip the dispatch router specific annotations on both ingress and egress; no - do not strip dispatch router specific annotations",
+                    "create": true
+                },
+                "linkCapacity": {
+                    "type": "integer",
+                    "create": true,
+                    "required": false,
+                    "description": "The capacity of links within this connection, in terms of message deliveries.  The capacity is the number of messages that can be in-flight concurrently for each link."
                 }
             }
         },
 
         "connector": {
-            "description": "Establishes an outgoing connections from the router.",
+            "description": "Establishes an outgoing connection from the router.",
             "extends": "configurationEntity",
-            "operations": ["CREATE"],
+            "operations": ["CREATE", "DELETE"],
             "annotations": [
                 "addrPort",
                 "connectionRole",
@@ -655,7 +738,44 @@
                     "default": 65536,
                     "description": "Maximum frame size in octets that will be used in the connection-open negotiation with a connected peer.  The frame size is the largest contiguous set of uninterrupted data that can be sent for a message delivery over the connection. Interleaving of messages on different links is done at frame granularity.",
                     "create": true
-                }
+                },
+                "idleTimeoutSeconds": {
+                    "type": "integer",
+                    "default": 16,
+                    "description": "The idle timeout, in seconds, for connections through this connector.  If no frames are received on the connection for this time interval, the connection shall be closed.",
+                    "create": true
+                },
+                "stripAnnotations": {
+                    "type": ["in", "out", "both", "no"],
+                    "default": "both",
+                    "description": "['in', 'out', 'both', 'no'] in: Strip the dispatch router specific annotations only on ingress; out: Strip the dispatch router specific annotations only on egress; both: Strip the dispatch router specific annotations on both ingress and egress; no - do not strip dispatch router specific annotations",
+                    "create": true
+                },
+                "linkCapacity": {
+                    "type": "integer",
+                    "create": true,
+                    "required": false,
+                    "description": "The capacity of links within this connection, in terms of message deliveries.  The capacity is the number of messages that can be in-flight concurrently for each link."
+                },
+                "verifyHostName": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "yes: Ensures that when initiating a connection (as a client) the host name in the URL to which this connector connects to matches the host name in the digital certificate that the peer sends back as part of the SSL connection; no: Does not perform host name verification",
+                    "create": true
+                },                
+                "saslUsername": {
+                    "type": "string",
+                    "required": false,
+                    "description": "The user name that the connector is using to connect to a peer.",
+                    "create": true
+                },
+                "saslPassword": {
+                    "type": "string",
+                    "required": false,
+                    "description": "The password that the connector is using to connect to a peer.",
+                    "create": true,
+                    "hidden": true
+                }                                
             }
         },
 
@@ -667,6 +787,7 @@
                 "module": {
                     "type":[
                         "ROUTER",
+                        "ROUTER_CORE",
                         "ROUTER_HELLO",
                         "ROUTER_LS",
                         "ROUTER_MA",
@@ -677,10 +798,12 @@
                         "CONFIG",
                         "ERROR",
                         "DISPATCH",
+                        "POLICY",
                         "DEFAULT"
                     ],
                     "required": true,
-                    "description": "Module to configure. The special module 'DEFAULT' specifies defaults for all modules."
+                    "description": "Module to configure. The special module 'DEFAULT' specifies defaults for all modules.",
+                    "update": true
                 },
                 "enable": {
                     "type": "string",
@@ -708,7 +831,7 @@
         },
 
         "fixedAddress": {
-            "description":"Establishes semantics for addresses starting with a prefix.",
+            "description":"(DEPRECATED) Establishes treatment for addresses starting with a prefix. This entity has been deprecated. Use address instead",
             "extends": "configurationEntity",
             "operations": ["CREATE"],
             "attributes": {
@@ -745,9 +868,9 @@
         },
 
         "waypoint": {
-            "description":"A remote node that messages for an address pass through.",
+            "description":"(DEPRECATED) A remote node that messages for an address pass through. This entity has been deprecated. Use autoLink instead",
             "extends": "configurationEntity",
-            "operations": ["CREATE"],
+            "operations": ["CREATE", "DELETE"],
             "attributes": {
                 "address": {
                     "description":"The AMQP address of the waypoint.",
@@ -777,14 +900,21 @@
         },
 
         "linkRoutePattern": {
-            "description":"An address pattern to match against link sources and targets to cause the router to link-route the attach across the network to a remote node.",
+            "description":"(DEPRECATED) An address pattern to match against link sources and targets to cause the router to link-route the attach across the network to a remote node. This entity has been deprecated. Use linkRoute instead",
             "extends": "configurationEntity",
             "operations": ["CREATE"],
             "attributes": {
                 "prefix": {
-                    "description":"An address prefix to match against target and source addresses.  For Dispatch 0.4, this pattern must be of the form '<text>.' and matches any address that contains that prefix.  Note that the prefix *must* end with a period (.) and *must not* contain any other periods.",
+                    "description":"An address prefix to match against target and source addresses.  This pattern must be of the form '<text>.<text1>.<textN>' or '<text>' or '<text>.' and matches any address that contains that prefix.  For example, if the prefix is set to org.apache (or org.apache.), any address that has the prefix 'org.apache'  (like org.apache.dev) will match. Note that a prefix must not start with a (.), can end in a (.) and can contain zero or more dots (.).  Any characters between the dots are simply treated as part of the address",
                     "type": "string",
                     "required": true,
+                    "create": true
+                },
+                "dir": {
+                    "description":"Link direction for match: 'in' matches only links inbound to the client; 'out' matches only links outbound from the client; 'both' matches any link.",
+                    "type": ["in", "out", "both"],
+                    "required": false,
+                    "default": "both",
                     "create": true
                 },
                 "connector": {
@@ -797,17 +927,195 @@
             }
         },
 
+        "router.config.address": {
+            "description": "Entity type for address configuration.  This is used to configure the treatment of message-routed deliveries within a particular address-space.  The configuration controls distribution and address phasing.",
+            "extends": "configurationEntity",
+            "operations": ["CREATE", "DELETE"],
+            "attributes": {
+                "prefix": {
+                    "type": "string",
+                    "description": "The address prefix for the configured settings",
+                    "create": true,
+                    "required": true
+                },
+                "distribution": {
+                    "type": ["multicast", "closest", "balanced"],
+                    "description": "Treatment of traffic associated with the address",
+                    "create": true,
+                    "required": false,
+                    "default": "balanced"
+                },
+                "waypoint": {
+                    "type": "boolean",
+                    "description": "Designates this address space as being used for waypoints.  This will cause the proper address-phasing to be used.",
+                    "create": true,
+                    "required": false,
+                    "default": false
+                },
+                "ingressPhase": {
+                    "type": "integer",
+                    "description": "Advanced - Override the ingress phase for this address",
+                    "create": true,
+                    "required": false
+                },
+                "egressPhase": {
+                    "type": "integer",
+                    "description": "Advanced - Override the egress phase for this address",
+                    "create": true,
+                    "required": false
+                }
+            }
+        },
+
+        "router.config.linkRoute": {
+            "description": "Entity type for link-route configuration.  This is used to identify remote containers that shall be destinations for routed link-attaches.  The link-routing configuration applies to an addressing space defined by a prefix.",
+            "extends": "configurationEntity",
+            "operations": ["CREATE", "DELETE"],
+            "attributes": {
+                "prefix": {
+                    "type": "string",
+                    "description": "The address prefix for the configured settings",
+                    "create": true,
+                    "required": true
+                },
+                "containerId": {
+                    "type": "string",
+                    "description": "ContainerID for the target container",
+                    "create": true,
+                    "required": false
+                },
+                "connection": {
+                    "type": "string",
+                    "description": "The name from a connector or listener",
+                    "create": true,
+                    "required": false
+                },
+                "distribution": {
+                    "type": ["linkBalanced"],
+                    "description": "Treatment of traffic associated with the address",
+                    "create": true,
+                    "required": false,
+                    "default": "linkBalanced"
+                },
+                "dir": {
+                    "type": ["in", "out"],
+                    "description": "The permitted direction of links: 'in' means client senders; 'out' means client receivers",
+                    "create": true,
+                    "required": true
+                },
+                "operStatus": {
+                    "type": ["inactive", "active"],
+                    "description": "The operational status of this linkRoute: inactive - The remote container is not connected; active - the remote container is connected and ready to accept link routed attachments.",
+                    "create": false
+                }
+            }
+        },
+
+        "router.config.autoLink": {
+            "description": "Entity type for configuring auto-links.  Auto-links are links whose lifecycle is managed by the router.  These are typically used to attach to waypoints on remote containers (brokers, etc.).",
+            "extends": "configurationEntity",
+            "operations": ["CREATE", "DELETE"],
+            "attributes": {
+                "addr": {
+                    "type": "string",
+                    "description": "The address of the provisioned object",
+                    "create": true,
+                    "required": true
+                },
+                "dir": {
+                    "type": ["in", "out"],
+                    "description": "The direction of the link to be created.  In means into the router, out means out of the router.",
+                    "create": true,
+                    "required": true
+                },
+                "phase": {
+                    "type": "integer",
+                    "description": "The address phase for this link.  Defaults to '0' for 'out' links and '1' for 'in' links.",
+                    "create": true,
+                    "required": false
+                },
+                "containerId": {
+                    "type": "string",
+                    "description": "ContainerID for the target container",
+                    "create": true,
+                    "required": false
+                },
+                "connection": {
+                    "type": "string",
+                    "description": "The name from a connector or listener",
+                    "create": true,
+                    "required": false
+                },
+                "linkRef": {
+                    "type": "string",
+                    "description": "Reference to the org.apache.qpid.dispatch.router.link if the link exists",
+                    "create": false
+                },
+                "operStatus": {
+                    "type": ["inactive", "attaching", "failed", "active", "quiescing", "idle"],
+                    "description": "The operational status of this autoLink: inactive - The remote container is not connected; attaching - the link is attaching to the remote node; failed - the link attach failed; active - the link is attached and operational; quiescing - the link is transitioning to idle state; idle - the link is attached but there are no deliveries flowing and no unsettled deliveries.",
+                    "create": false
+                },
+                "lastError": {
+                    "type": "string",
+                    "description": "The error description from the last attach failure",
+                    "create": false
+                }
+            }
+        },
+
         "router.link": {
             "description": "Link to another AMQP endpoint: router node, client or other AMQP process.",
             "extends": "operationalEntity",
+            "operations": ["UPDATE"],
             "attributes": {
-                "linkName": {"type": "string"},
-                "linkType": {"type": ["endpoint", "waypoint", "inter-router", "inter-area"]},
-                "linkDir": {"type": ["in", "out"]},
-                "owningAddr": {"type": "string"},
-                "eventFifoDepth": {"type": "integer", "graph": true},
-                "msgFifoDepth": {"type": "integer", "graph": true},
-                "remoteContainer": {"type": "string"}
+                "adminStatus": {
+                    "type": ["enabled", "disabled"],
+                    "default": "enabled",
+                    "update": true
+                },
+                "operStatus": {
+                    "type": ["up", "down", "quiescing", "idle"]
+                },
+                "linkName": {
+                    "type": "string",
+                    "description": "Name assigned to the link in the Attach."
+                },
+                "linkType": {
+                    "type": ["endpoint", "router-control", "inter-router"],
+                    "description": "Type of link: endpoint: a link to a normally connected endpoint; inter-router: a link to another router in the network."
+                },
+                "linkDir": {
+                    "type": ["in", "out"],
+                    "description": "Direction of delivery flow over the link, inbound or outbound to or from the router."
+                },
+                "owningAddr": {
+                    "type": "string",
+                    "description": "Address assigned to this link during attach: The target for inbound links or the source for outbound links."
+                },
+                "capacity": {
+                    "type": "integer",
+                    "description": "The capacity, in deliveries, for the link.  The number of undelivered plus unsettled deliveries shall not exceed the capacity.  This is enforced by link flow control."
+                },
+                "peer": {
+                    "type": "string",
+                    "description": "Identifier of the paired link if this is an attach-routed link."
+                },
+                "undeliveredCount": {
+                    "type": "integer",
+                    "graph": true,
+                    "description": "The number of undelivered messages pending for the link."
+                },
+                "unsettledCount": {
+                    "type": "integer",
+                    "graph": true,
+                    "description": "The number of unsettled deliveries awaiting settlement on the link"
+                },
+                "deliveryCount": {
+                    "type": "integer",
+                    "graph": true,
+                    "description": "The total number of deliveries that have traversed this link."
+                }
             }
         },
 
@@ -815,17 +1123,69 @@
             "description": "AMQP address managed by the router.",
             "extends": "operationalEntity",
             "attributes": {
-                "inProcess": {"type": "boolean"},
-                "subscriberCount": {"type": "integer", "graph": true},
-                "remoteCount": {"type": "integer", "graph": true},
-                "deliveriesIngress": {"type": "integer", "graph": true},
-                "deliveriesEgress": {"type": "integer", "graph": true},
-                "deliveriesTransit": {"type": "integer", "graph": true},
-                "deliveriesToContainer": {"type": "integer", "graph": true},
-                "deliveriesFromContainer": {"type": "integer", "graph": true},
+                "distribution": {
+                    "type": ["flood", "multicast", "closest", "balanced", "linkBalanced"],
+                    "description": "Forwarding treatment for the address: flood - messages delivered to all subscribers along all available paths (this will cause duplicate deliveries if there are redundant paths); multi - one copy of each message delivered to all subscribers; anyClosest - messages delivered to only the closest subscriber; anyBalanced - messages delivered to one subscriber with load balanced across subscribers; linkBalanced - for link-routing, link attaches balanced across destinations."
+                },
+                "inProcess": {
+                    "type": "integer",
+                    "description": "The number of in-process subscribers for this address"
+                },
+                "subscriberCount": {
+                    "type": "integer",
+                    "description": "The number of local subscribers for this address (i.e. attached to this router)",
+                    "graph": true
+                },
+                "remoteCount": {
+                    "type": "integer",
+                    "description": "The number of remote routers that have at least one subscriber to this address",
+                    "graph": true
+                },
+                "containerCount": {
+                    "type": "integer",
+                    "description": "The number of attached containers that serve this route address",
+                    "graph": true
+                },
+                "deliveriesIngress": {
+                    "type": "integer",
+                    "description": "The number of deliveries to this address that entered the router network on this router",
+                    "graph": true
+                },
+                "deliveriesEgress": {
+                    "type": "integer",
+                    "description": "The number of deliveries to this address that exited the router network on this router",
+                    "graph": true
+                },
+                "deliveriesTransit": {
+                    "type": "integer",
+                    "description": "The number of deliveries to this address that transited this router to another router",
+                    "graph": true
+                },
+                "deliveriesToContainer": {
+                    "type": "integer",
+                    "description": "The number of deliveries to this address that were given to an in-process subscriber",
+                    "graph": true
+                },
+                "deliveriesFromContainer": {
+                    "type": "integer",
+                    "description": "The number of deliveries to this address that were originated from an in-process entity",
+                    "graph": true
+                },
                 "key": {
                     "description": "Internal unique (to this router) key to identify the address",
                     "type": "string"
+                },
+                "remoteHostRouters": {
+                    "type": "list",
+                    "description": "List of remote routers on which there is a destination for this address."
+                },
+                "transitOutstanding": {
+                    "type": "list",
+                    "description": "List of numbers of outstanding deliveries across a transit (inter-router) link for this address.  This is for balanced distribution only."
+                },
+                "trackedDeliveries": {
+                    "type": "integer",
+                    "description": "Number of transit deliveries being tracked for this address (for balanced distribution)."
                 }
             }
         },
@@ -834,10 +1194,10 @@
             "description": "Remote router node connected to this router.",
             "extends": "operationalEntity",
             "attributes": {
-                "routerId": {
+                "id": {
                     "description": "Remote node identifier.",
                     "type": "string"
-                },
+                },                
                 "instance": {
                     "description": "Remote node boot number.",
                     "type": "integer"
@@ -851,7 +1211,7 @@
                     "type": "string"
                 },
                 "validOrigins": {
-                    "description": "List of valid origin nodes for messages arriving via the remote node, used for duplicate elimination in redundant networks.",
+                    "description": "List of valid origin nodes for messages arriving via the re mote node, used for duplicate elimination in redundant networks.",
                     "type": "list"
                 },
                 "address": {
@@ -861,6 +1221,10 @@
                 "routerLink": {
                     "description": "Local link to remote node",
                     "type": "entityId"
+                },
+                "cost": {
+                    "description": "Reachability cost",
+                    "type": "integer"
                 }
             }
         },
@@ -873,14 +1237,10 @@
                     "description": "The container for this connection",
                     "type": "string"
                 } ,
-                "state": {
-                    "type": [
-                    "connecting",
-                    "opening",
-                    "operational",
-                    "failed",
-                    "user"
-                ]},
+                "opened": {
+                    "type": "boolean",
+                    "description": "The connection has been opened (i.e. AMQP OPEN)"
+                },
                 "host": {
                     "description": "IP address and port number in the form addr:port.",
                     "type": "string"
@@ -957,6 +1317,143 @@
                 "home": {"type": "string", "description": "The full path to the html/css/js files for the console."},
                 "args": {"type": "string", "description": "Optional args to pass the proxy program for logging, authentication, etc."}  
 
+            }
+        },
+
+        "policy": {
+            "description": "Defines global connection limit",
+            "extends": "configurationEntity",
+            "singleton": true,
+            "attributes": {
+                "maximumConnections": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Global maximum number of concurrent client connections allowed. Zero implies no limit. This limit is always enforced even if no other policy settings have been defined.",
+                    "required": false,
+                    "create": true
+                },
+                "enableAccessRules": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable user rule set processing and connection denial.",
+                    "required": false,
+                    "create": true
+                },
+                "policyFolder": {
+                    "type": "path",
+                    "default": "",
+                    "description": "The path to a folder that holds policyRuleset definition .json files. For a small system the rulesets may all be defined in this file. At a larger scale it is better to have the policy files in their own folder and to have none of the rulesets defined here. All rulesets in all .json files in this folder are processed.",
+                    "required": false,
+                    "create": true
+                },
+                "defaultApplication": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Application policyRuleset to use for connections with no open.hostname or a hostname that does not match any existing policy. For users that don't wish to use open.hostname or any multi-tennancy feature, this default policy can be the only policy in effect for the network.",
+                    "required": false,
+                    "create": true
+                },
+                "defaultApplicationEnabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable defaultApplication policy fallback logic.",
+                    "required": false,
+                    "create": true
+                },
+                "connectionsProcessed": {"type": "integer", "graph": true},
+                "connectionsDenied": {"type": "integer", "graph": true},
+                "connectionsCurrent": {"type": "integer", "graph": true}
+            }
+        },
+
+        "policyRuleset": {
+            "description": "Per application definition of the locations from which users may connect and the groups to which users belong.",
+            "extends": "configurationEntity",
+            "operations": ["CREATE"],
+            "attributes": {
+                "applicationName": {
+                    "type": "string",
+                    "description": "The application name.",
+                    "required": true
+                },
+                "maxConnections": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Maximum number of concurrent client connections allowed. Zero implies no limit.",
+                    "required": false,
+                    "create": true
+                },
+                "maxConnPerUser": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Maximum number of concurrent client connections allowed for any single user. Zero implies no limit.",
+                    "required": false,
+                    "create": true
+                },
+                "maxConnPerHost": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Maximum number of concurrent client connections allowed for any remote host. Zero implies no limit.",
+                    "required": false,
+                    "create": true
+                },
+                "userGroups": {
+                    "type": "map",
+                    "description": "A map where each key is a user group name and the corresponding value is a CSV string naming the users in that group. Users who are assigned to one or more groups are deemed 'restricted'. Restricted users are subject to connection ingress policy and are assigned policy settings based on the assigned user groups. Unrestricted users may be allowed or denied. If unrestricted users are allowed to connect then they are assigned to user group default.",
+                    "required": false,
+                    "create": true
+                },
+                "ingressHostGroups": {
+                    "type": "map",
+                    "description": "A map where each key is an ingress host group name and the corresponding value is a CSV string naming the IP addresses or address ranges in that group. IP addresses may be FQDN strings or numeric IPv4 or IPv6 host addresses. A host range is two host addresses of the same address family separated with a hyphen.  The wildcard host address '*' represents any host address.",
+                    "required": false,
+                    "create": true
+                },
+                "ingressPolicies": {
+                    "type": "map",
+                    "description": "A map where each key is a user group name and the corresponding value is a CSV string naming the ingress host group names that restrict the ingress host for the user group. Users who are members of the user group are allowed to connect only from a host in one of the named ingress host groups.",
+                    "required": false,
+                    "create": true
+                },
+                "connectionAllowDefault": {
+                    "type": "boolean",
+                    "description": "Unrestricted users, those who are not members of a defined user group, are allowed to connect to this application. Unrestricted users are assigned to the 'default' user group and receive 'default' settings.",
+                    "default": false,
+                    "required": false,
+                    "create": true
+                },
+                "settings": {
+                    "type": "map",
+                    "description": "A map where each key is a user group name and the value is a map of the corresponding settings for that group.",
+                    "required": false,
+                    "create": true
+                }
+            }
+        },
+
+        "policyStats": {
+            "description": "Per application connection and access statistics.",
+            "extends": "operationalEntity",
+            "attributes": {
+                "applicationName": {
+                    "type": "string",
+                    "description": "The application name."
+                },
+                "connectionsApproved": {"type": "integer", "graph": true},
+                "connectionsDenied": {"type": "integer", "graph": true},
+                "connectionsCurrent": {"type": "integer", "graph": true},
+                "perUserState": {
+                    "type": "map",
+                    "description": "A map where the key is the authenticated user name and the value is a list of the user's connections."
+                },
+                "perHostState": {
+                    "type": "map",
+                    "description": "A map where the key is the host name and the value is a list of the host's connections."
+                },
+
+                "sessionDenied": {"type": "integer", "graph": true},
+                "senderDenied": {"type": "integer", "graph": true},
+                "receiverDenied": {"type": "integer", "graph": true}
             }
         },
 
