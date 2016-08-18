@@ -1,0 +1,5 @@
+# see debian/missing-sources:
+qpid-dispatch source: source-is-missing console/stand-alone/plugin/data/places1.json *
+qpid-dispatch source: source-is-missing console/stand-alone/plugin/data/world-110m.json *
+qpid-dispatch source: source-is-missing console/stand-alone/plugin/lib/rhea-min.js *
+qpid-dispatch source: source-is-missing console/hawtio/src/main/webapp/plugin/lib/rhea-min.js *
