@@ -1,5 +1,5 @@
 etc/qpid-dispatch/qdrouterd.conf
-etc/qpid-dispatch/sasl2/qdrouterd.conf
+etc/sasl2/qdrouterd.conf
 usr/sbin/qdrouterd
 usr/share/man/man5/qdrouterd.conf.5
 usr/share/man/man8/qdrouterd.8
