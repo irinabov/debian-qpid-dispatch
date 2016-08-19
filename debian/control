@@ -21,6 +21,7 @@ Depends: libqpid-proton7,
          adduser,
          ${shlibs:Depends}, ${misc:Depends}
 Pre-Depends: ${misc:Pre-Depends}
+Replaces:    libqpid-dispatch1, libqpid-dispatch1-dev
 Multi-Arch:  same
 Description: Qpid Dispatch Router executable
  The Dispatch router is an AMQP router that provides advanced interconnect

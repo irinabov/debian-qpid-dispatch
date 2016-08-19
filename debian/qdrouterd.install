@@ -4,7 +4,15 @@ usr/sbin/qdrouterd
 usr/share/man/man5/qdrouterd.conf.5
 usr/share/man/man8/qdrouterd.8
 usr/lib/*/libqpid-dispatch.so
-usr/lib/qpid-dispatch/python/**/*.py
+usr/lib/qpid-dispatch/python/*.py
+usr/lib/qpid-dispatch/python/qpid_dispatch_internal/*.py
+usr/lib/qpid-dispatch/python/qpid_dispatch_internal/compat/*.py
+usr/lib/qpid-dispatch/python/qpid_dispatch_internal/management/*.py
+usr/lib/qpid-dispatch/python/qpid_dispatch_internal/tools/*.py
+usr/lib/qpid-dispatch/python/qpid_dispatch_internal/display_name/*.py
+usr/lib/qpid-dispatch/python/qpid_dispatch_internal/policy/*.py
+usr/lib/qpid-dispatch/python/qpid_dispatch_internal/proton_future/*.py
+usr/lib/qpid-dispatch/python/qpid_dispatch_internal/router/*.py
 usr/lib/python2.7/dist-packages/qpid_dispatch
 usr/lib/python2.7/dist-packages/qpid_dispatch_site.py
 usr/lib/python2.7/dist-packages/qpid_dispatch*egg-info
