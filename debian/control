@@ -45,7 +45,7 @@ Package: qdstat
 Architecture: all
 Depends: python-qpid-proton (>= 0.13.0),
          python,
-         libqpid-dispatch1 (>= ${binary:Version}),
+         qdrouterd (>= ${binary:Version}),
          ${misc:Depends}
 Description: Qpid Dispatch stat tool
  The Dispatch router is an AMQP router that provides advanced interconnect
@@ -70,7 +70,7 @@ Package: qdmanage
 Architecture: all
 Depends: python-qpid-proton (>= 0.13.0),
          python,
-         libqpid-dispatch1 (>= ${binary:Version}),
+         qdrouterd (>= ${binary:Version}),
          ${misc:Depends}
 Description: Qpid Dispatch manage tool
  The Dispatch router is an AMQP router that provides advanced interconnect
