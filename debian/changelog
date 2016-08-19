@@ -1,3 +1,9 @@
+qpid-dispatch (0.6.1-2qpid+trusty1) trusty; urgency=medium
+
+  * Add python files
+
+ -- Irina Boverman <iboverma@redhat.com>  Fri, 19 Aug 2016 13:44:05 -0400
+
 qpid-dispatch (0.6.1-1qpid+trusty1) trusty; urgency=medium
 
   * Rebuilt against proton 0.13.1.
