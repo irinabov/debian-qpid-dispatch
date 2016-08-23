@@ -1,8 +1,8 @@
-qpid-dispatch (0.6.1-2qpid+trusty1) trusty; urgency=medium
+qpid-dispatch (0.6.1-2qpid+xenial1) xenial; urgency=medium
 
-  * Add python files
+  * Built for xenial
 
- -- Irina Boverman <iboverma@redhat.com>  Fri, 19 Aug 2016 13:44:05 -0400
+ -- Irina Boverman <iboverma@redhat.com>  Tue, 23 Aug 2016 16:06:12 -0400
 
 qpid-dispatch (0.6.1-1qpid+trusty1) trusty; urgency=medium
 
