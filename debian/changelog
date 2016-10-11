@@ -1,6 +1,7 @@
-qpid-dispatch (0.6.1-23qpid+xenial1) xenial; urgency=medium
+qpid-dispatch (0.6.1-3qpid+xenial1) xenial; urgency=medium
 
   * Added qdrouter.json
+  * Rebuilt against qpid-proton 0.14.0
 
  -- Irina Boverman <iboverma@redhat.com>  Tue, 11 Oct 2016 10:44:18 -0400
 
