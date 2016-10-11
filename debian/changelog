@@ -1,3 +1,9 @@
+qpid-dispatch (0.6.1-23qpid+xenial1) xenial; urgency=medium
+
+  * Added qdrouter.json
+
+ -- Irina Boverman <iboverma@redhat.com>  Tue, 11 Oct 2016 10:44:18 -0400
+
 qpid-dispatch (0.6.1-2qpid+xenial1) xenial; urgency=medium
 
   * Built for xenial
