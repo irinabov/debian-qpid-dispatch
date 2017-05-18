@@ -191,6 +191,16 @@ int qdr_connection_process(qdr_connection_t *conn)
             if (link->incremental_credit > 0) {
                 core->flow_handler(core->user_context, link, link->incremental_credit);
                 link->incremental_credit = 0;
+
+                //
+                // Note:  This unprotected read of a CT-only value is safe in this case.
+                // If there is pending credit on the link that needs to be pushed down to
+                // Proton, we need to give the core a kick to make sure it is sent.  It is
+                // possible that no more credit will be issued to cause the movement of CT
+                // credit to Proton credit (see DISPATCH-458).
+                //
+                if (link->incremental_credit_CT > 0)
+                    qdr_link_check_credit(core, link);
             }
             if (link->drain_mode_changed) {
                 core->drain_handler(core->user_context, link, link->drain_mode);
@@ -363,7 +373,10 @@ void qdr_connection_handlers(qdr_core_t                *core,
 
 void qdr_connection_activate_CT(qdr_core_t *core, qdr_connection_t *conn)
 {
-    core->activate_handler(core->user_context, conn);
+    if (!conn->in_activate_list) {
+        DEQ_INSERT_TAIL_N(ACTIVATE, core->connections_to_activate, conn);
+        conn->in_activate_list = true;
+    }
 }
 
 
@@ -437,6 +450,15 @@ static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_li
         link->connected_link->connected_link = 0;
         link->connected_link = 0;
     }
+
+    //
+    // If this link is involved in inter-router communication, remove its reference
+    // from the core mask-bit tables
+    //
+    if (link->link_type == QD_LINK_CONTROL)
+        core->control_links_by_mask_bit[conn->mask_bit] = 0;
+    if (link->link_type == QD_LINK_ROUTER)
+        core->data_links_by_mask_bit[conn->mask_bit] = 0;
 
     //
     // Clean up the lists of deliveries on this link
@@ -871,6 +893,8 @@ static void qdr_connection_opened_CT(qdr_core_t *core, qdr_action_t *action, boo
             //
             // No action needed for NORMAL connections
             //
+            qdr_field_free(action->args.connection.connection_label);
+            qdr_field_free(action->args.connection.container_id);
             return;
         }
 
@@ -884,6 +908,8 @@ static void qdr_connection_opened_CT(qdr_core_t *core, qdr_action_t *action, boo
             else {
                 qd_log(core->log, QD_LOG_CRITICAL, "Exceeded maximum inter-router connection count");
                 conn->role = QDR_ROLE_NORMAL;
+                qdr_field_free(action->args.connection.connection_label);
+                qdr_field_free(action->args.connection.container_id);
                 return;
             }
 
@@ -967,6 +993,14 @@ static void qdr_connection_closed_CT(qdr_core_t *core, qdr_action_t *action, boo
         qdr_error_free(work->error);
         free_qdr_connection_work_t(work);
         work = DEQ_HEAD(conn->work_list);
+    }
+
+    //
+    // If this connection is on the activation list, remove it from the list
+    //
+    if (conn->in_activate_list) {
+        conn->in_activate_list = false;
+        DEQ_REMOVE_N(ACTIVATE, core->connections_to_activate, conn);
     }
 
     DEQ_REMOVE(core->open_connections, conn);
@@ -1214,6 +1248,7 @@ static void qdr_link_inbound_second_attach_CT(qdr_core_t *core, qdr_action_t *ac
                         const char *key = (const char*) qd_hash_key_by_handle(link->auto_link->addr->hash_handle);
                         if (key && *key == 'M')
                             qdr_post_mobile_added_CT(core, key);
+                        qdr_addr_start_inlinks_CT(core, link->auto_link->addr);
                     }
                 }
             }
@@ -1258,6 +1293,15 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
     //
     if (link->connected_link) {
         qdr_link_outbound_detach_CT(core, link->connected_link, error, QDR_CONDITION_NONE);
+
+        //
+        // If the link is completely detached, release its resources
+        //
+        if (link->detach_count == 2) {
+            qdr_link_cleanup_CT(core, conn, link);
+            free_qdr_link_t(link);
+        }
+
         return;
     }
 

@@ -129,12 +129,6 @@ static void setup_outgoing_link(qd_container_t *container, pn_link_t *pn_link)
     link->drain_mode             = pn_link_get_drain(pn_link);
     link->close_sess_with_link   = false;
 
-    //
-    // Keep the borrowed references
-    //
-    pn_incref(pn_link);
-    pn_incref(link->pn_sess);
-
     pn_link_set_context(pn_link, link);
     node->ntype->outgoing_handler(node->context, link);
 }
@@ -183,12 +177,6 @@ static void setup_incoming_link(qd_container_t *container, pn_link_t *pn_link)
     link->drain_mode = pn_link_get_drain(pn_link);
     link->remote_snd_settle_mode = pn_link_remote_snd_settle_mode(pn_link);
     link->close_sess_with_link = false;
-
-    //
-    // Keep the borrowed references
-    //
-    pn_incref(pn_link);
-    pn_incref(link->pn_sess);
 
     pn_link_set_context(pn_link, link);
     node->ntype->incoming_handler(node->context, link);
@@ -309,21 +297,14 @@ static int close_handler(qd_container_t *container, void* conn_context, pn_conne
     pn_link_t *pn_link = pn_link_head(conn, 0);
     while (pn_link) {
         qd_link_t *link = (qd_link_t*) pn_link_get_context(pn_link);
+        pn_link_t *next = pn_link_next(pn_link, 0);
         if (link) {
             qd_node_t *node = link->node;
             if (node) {
                 node->ntype->link_detach_handler(node->context, link, QD_LOST);
             }
         }
-        pn_link_close(pn_link);
-        pn_link = pn_link_next(pn_link, 0);
-    }
-
-    // teardown all sessions
-    pn_session_t *ssn = pn_session_head(conn, 0);
-    while (ssn) {
-        pn_session_close(ssn);
-        ssn = pn_session_next(ssn, 0);
+        pn_link = next;
     }
 
     // close the connection
@@ -405,7 +386,12 @@ int pn_event_handler(void *handler_context, void *conn_context, pn_event_t *even
             }
         }
         break;
-
+    case PN_SESSION_LOCAL_CLOSE :
+        ssn = pn_event_session(event);
+        if (pn_session_state(ssn) == (PN_LOCAL_CLOSED | PN_REMOTE_CLOSED)) {
+            pn_session_free(ssn);
+        }
+        break;
     case PN_SESSION_REMOTE_CLOSE :
         if (!(pn_connection_state(conn) & PN_LOCAL_CLOSED)) {
             ssn = pn_event_session(event);
@@ -442,6 +428,9 @@ int pn_event_handler(void *handler_context, void *conn_context, pn_event_t *even
                 }
                 pn_session_close(ssn);
             }
+            else if (pn_session_state(ssn) == (PN_LOCAL_CLOSED | PN_REMOTE_CLOSED)) {
+                pn_session_free(ssn);
+            }
         }
         break;
 
@@ -477,6 +466,7 @@ int pn_event_handler(void *handler_context, void *conn_context, pn_event_t *even
             pn_link = pn_event_link(event);
             qd_link = (qd_link_t*) pn_link_get_context(pn_link);
             if (qd_link) {
+                pn_session_t *sess = qd_link->pn_sess;
                 qd_node_t *node = qd_link->node;
                 qd_detach_type_t dt = pn_event_type(event) == PN_LINK_REMOTE_CLOSE ? QD_CLOSED : QD_DETACHED;
                 if (node)
@@ -499,12 +489,25 @@ int pn_event_handler(void *handler_context, void *conn_context, pn_event_t *even
                         assert (qd_conn->n_senders >= 0);
                     }
                 }
-                if (qd_link->close_sess_with_link && qd_link->pn_sess &&
-                    pn_link_state(pn_link) == (PN_LOCAL_CLOSED | PN_REMOTE_CLOSED))
-                    pn_session_close(qd_link->pn_sess);
+
+                if (pn_link_state(pn_link) == (PN_LOCAL_CLOSED | PN_REMOTE_CLOSED)) {
+                    if (qd_link->close_sess_with_link && sess) {
+                        pn_session_close(sess);
+                    }
+                    pn_link_free(pn_link);
+                }
             }
         }
         break;
+
+    case PN_LINK_LOCAL_DETACH:
+    case PN_LINK_LOCAL_CLOSE:
+        pn_link = pn_event_link(event);
+        if (pn_link_state(pn_link) == (PN_LOCAL_CLOSED | PN_REMOTE_CLOSED)) {
+            pn_link_free(pn_link);
+        }
+        break;
+
 
     case PN_LINK_FLOW :
         pn_link = pn_event_link(event);
@@ -537,12 +540,9 @@ int pn_event_handler(void *handler_context, void *conn_context, pn_event_t *even
     case PN_CONNECTION_FINAL :
     case PN_SESSION_INIT :
     case PN_SESSION_LOCAL_OPEN :
-    case PN_SESSION_LOCAL_CLOSE :
     case PN_SESSION_FINAL :
     case PN_LINK_INIT :
     case PN_LINK_LOCAL_OPEN :
-    case PN_LINK_LOCAL_CLOSE :
-    case PN_LINK_LOCAL_DETACH :
     case PN_LINK_FINAL :
     case PN_TRANSPORT :
     case PN_TRANSPORT_ERROR :
@@ -786,12 +786,6 @@ qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, c
     link->remote_snd_settle_mode = pn_link_remote_snd_settle_mode(link->pn_link);
     link->close_sess_with_link = true;
 
-    //
-    // Keep the borrowed references
-    //
-    pn_incref(link->pn_link);
-    pn_incref(link->pn_sess);
-
     pn_link_set_context(link->pn_link, link);
 
     pn_session_open(link->pn_sess);
@@ -803,8 +797,6 @@ qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, c
 void qd_link_free(qd_link_t *link)
 {
     if (!link) return;
-    if (link->pn_link) pn_decref(link->pn_link);
-    if (link->pn_sess) pn_decref(link->pn_sess);
     link->pn_link = 0;
     link->pn_sess = 0;
     free_qd_link_t(link);
@@ -940,7 +932,7 @@ void qd_link_activate(qd_link_t *link)
     if (!ctx)
         return;
 
-    qd_server_activate(ctx);
+    qd_server_activate(ctx, true);
 }
 
 
@@ -948,6 +940,7 @@ void qd_link_close(qd_link_t *link)
 {
     if (link->pn_link)
         pn_link_close(link->pn_link);
+
 
     if (link->close_sess_with_link && link->pn_sess &&
         pn_link_state(link->pn_link) == (PN_LOCAL_CLOSED | PN_REMOTE_CLOSED)) {

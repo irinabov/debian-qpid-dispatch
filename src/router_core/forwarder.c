@@ -104,10 +104,11 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
     uint64_t       *tag = (uint64_t*) dlv->tag;
 
     ZERO(dlv);
-    dlv->link    = link;
-    dlv->msg     = qd_message_copy(msg);
-    dlv->settled = !in_dlv || in_dlv->settled;
-    *tag         = core->next_tag++;
+    dlv->link       = link;
+    dlv->msg        = qd_message_copy(msg);
+    dlv->settled    = !in_dlv || in_dlv->settled;
+    dlv->presettled = dlv->settled;
+    *tag            = core->next_tag++;
     dlv->tag_length = 8;
 
     //
@@ -118,7 +119,7 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
             dlv->peer = in_dlv;
             in_dlv->peer = dlv;
 
-            dlv->ref_count = 1;
+            sys_atomic_init(&dlv->ref_count, 1);
             qdr_delivery_incref(in_dlv);
         }
     }
@@ -127,12 +128,42 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
 }
 
 
+//
+// Drop all pre-settled deliveries pending on the link's
+// undelivered list.
+//
+static void qdr_forward_drop_presettled_CT_LH(qdr_link_t *link)
+{
+    qdr_delivery_t *dlv = DEQ_HEAD(link->undelivered);
+    qdr_delivery_t *next;
+
+    while (dlv) {
+        next = DEQ_NEXT(dlv);
+        if (dlv->settled) {
+            DEQ_REMOVE(link->undelivered, dlv);
+            dlv->where = QDR_DELIVERY_NOWHERE;
+            qdr_delivery_decref_LH(dlv);
+        }
+        dlv = next;
+    }
+}
+
+
 void qdr_forward_deliver_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery_t *dlv)
 {
     sys_mutex_lock(link->conn->work_lock);
+
+    //
+    // If the delivery is pre-settled and the outbound link is at or above capacity,
+    // discard all pre-settled deliveries on the undelivered list prior to enqueuing
+    // the new delivery.
+    //
+    if (dlv->settled && link->capacity > 0 && DEQ_SIZE(link->undelivered) >= link->capacity)
+        qdr_forward_drop_presettled_CT_LH(link);
+
     DEQ_INSERT_TAIL(link->undelivered, dlv);
     dlv->where = QDR_DELIVERY_IN_UNDELIVERED;
-    dlv->ref_count++; // We have the lock, don't use the incref function
+    sys_atomic_inc(&dlv->ref_count);
 
     //
     // If the link isn't already on the links_with_deliveries list, put it there.
@@ -253,7 +284,7 @@ int qdr_forward_multicast_CT(qdr_core_t      *core,
             else
                 next_node = rnode;
 
-            dest_link = control ? next_node->peer_control_link : next_node->peer_data_link;
+            dest_link = control ? PEER_CONTROL_LINK(core, next_node) : PEER_DATA_LINK(core, next_node);
             if (dest_link && qd_bitmask_value(rnode->valid_origins, origin))
                 qd_bitmask_set_bit(link_set, dest_link->conn->mask_bit);
         }
@@ -399,7 +430,7 @@ int qdr_forward_closest_CT(qdr_core_t      *core,
             else
                 next_node = rnode;
 
-            out_link = control ? next_node->peer_control_link : next_node->peer_data_link;
+            out_link = control ? PEER_CONTROL_LINK(core, next_node) : PEER_DATA_LINK(core, next_node);
             if (out_link) {
                 out_delivery = qdr_forward_new_delivery_CT(core, in_delivery, out_link, msg);
                 qdr_forward_deliver_CT(core, out_link, out_delivery);
@@ -501,7 +532,7 @@ int qdr_forward_balanced_CT(qdr_core_t      *core,
         for (QD_BITMASK_EACH(addr->rnodes, node_bit, c)) {
             qdr_node_t *rnode     = core->routers_by_mask_bit[node_bit];
             qdr_node_t *next_node = rnode->next_hop ? rnode->next_hop : rnode;
-            qdr_link_t *link      = next_node->peer_data_link;
+            qdr_link_t *link      = PEER_DATA_LINK(core, next_node);
             if (!link) continue;
             int         link_bit  = link->conn->mask_bit;
             int         value     = addr->outstanding_deliveries[link_bit];
@@ -628,8 +659,8 @@ bool qdr_forward_link_balanced_CT(qdr_core_t     *core,
                 else
                     next_node = rnode;
 
-                if (next_node && next_node->peer_data_link)
-                    conn = next_node->peer_data_link->conn;
+                if (next_node && PEER_DATA_LINK(core, next_node))
+                    conn = PEER_DATA_LINK(core, next_node)->conn;
             }
         }
     }

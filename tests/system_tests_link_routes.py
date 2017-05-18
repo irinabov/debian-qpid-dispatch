@@ -32,11 +32,11 @@ from system_tests_drain_support import DrainMessagesHandler, DrainOneMessageHand
 
 from qpid_dispatch.management.client import Node
 
-class LinkRoutePatternTest(TestCase):
+class LinkRouteTest(TestCase):
     """
-    Tests the linkRoutePattern property of the dispatch router.
+    Tests the linkRoute property of the dispatch router.
 
-    Sets up 3 routers (one of which is acting as a broker(QDR.A)). 2 routers have linkRoutePattern set to 'org.apache.'
+    Sets up 3 routers (one of which is acting as a broker(QDR.A)). 2 routers have linkRoute set to 'org.apache.'
     (please see configs in the setUpClass method to get a sense of how the routers and their connections are configured)
     The tests in this class send and receive messages across this network of routers to link routable addresses.
     Uses the Python Blocking API to send/receive messages. The blocking api plays neatly into the synchronous nature
@@ -57,17 +57,12 @@ class LinkRoutePatternTest(TestCase):
     @classmethod
     def setUpClass(cls):
         """Start three routers"""
-        super(LinkRoutePatternTest, cls).setUpClass()
+        super(LinkRouteTest, cls).setUpClass()
 
         def router(name, connection):
 
             config = [
                 ('router', {'mode': 'interior', 'id': 'QDR.%s'%name}),
-                ('fixedAddress', {'prefix': '/closest/', 'fanout': 'single', 'bias': 'closest'}),
-                ('fixedAddress', {'prefix': '/spread/', 'fanout': 'single', 'bias': 'spread'}),
-                ('fixedAddress', {'prefix': '/multicast/', 'fanout': 'multiple'}),
-                ('fixedAddress', {'prefix': '/', 'fanout': 'multiple'}),
-
             ] + connection
 
             config = Qdrouterd.Config(config)
@@ -92,8 +87,11 @@ class LinkRoutePatternTest(TestCase):
                    ('connector', {'name': 'broker', 'role': 'route-container', 'host': '0.0.0.0', 'port': a_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
                    # Only inter router communication must happen on 'inter-router' connectors. This connector makes
                    # a connection from the router B's ephemeral port to c_listener_port
-                   ('connector', {'role': 'inter-router', 'host': '0.0.0.0', 'port': c_listener_port}),
-                   ('linkRoutePattern', {'prefix': 'org.apache', 'connector': 'broker'}),
+                   ('connector', {'name': 'routerC', 'role': 'inter-router', 'host': '0.0.0.0', 'port': c_listener_port}),
+
+                   ('linkRoute', {'prefix': 'org.apache', 'connection': 'broker', 'dir': 'in'}),
+                   ('linkRoute', {'prefix': 'org.apache', 'connection': 'broker', 'dir': 'out'}),
+
                    ('linkRoute', {'prefix': 'pulp.task', 'connection': 'test-tag', 'dir': 'in'}),
                    ('linkRoute', {'prefix': 'pulp.task', 'connection': 'test-tag', 'dir': 'out'})
                 ]
@@ -103,9 +101,11 @@ class LinkRoutePatternTest(TestCase):
                    # The client will exclusively use the following listener to connect to QDR.C
                    ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.tester.get_port(), 'saslMechanisms': 'ANONYMOUS'}),
                    ('listener', {'host': '0.0.0.0', 'role': 'inter-router', 'port': c_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
-                   # Note here that the linkRoutePattern is set to org.apache. which makes it backward compatible.
                    # The dot(.) at the end is ignored by the address hashing scheme.
-                   ('linkRoutePattern', {'prefix': 'org.apache.'}),
+
+                   ('linkRoute', {'prefix': 'org.apache.', 'dir': 'in'}),
+                   ('linkRoute', {'prefix': 'org.apache.', 'dir': 'out'}),
+
                    ('linkRoute', {'prefix': 'pulp.task', 'dir': 'in'}),
                    ('linkRoute', {'prefix': 'pulp.task', 'dir': 'out'})
                 ]
@@ -161,6 +161,44 @@ class LinkRoutePatternTest(TestCase):
         self.assertTrue('"dir": "out"' in out)
         self.assertTrue('"connection": "broker"' in out)
 
+        identity = out[out.find("identity") + 12: out.find("identity") + 13]
+        cmd = 'READ --type=linkRoute --identity=' + identity
+        out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
+        self.assertTrue(identity in out)
+
+        exception_occurred = False
+        try:
+            # This identity should not be found
+            cmd = 'READ --type=linkRoute --identity=9999'
+            out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
+        except Exception, e:
+            exception_occurred = True
+            self.assertTrue("NotFoundStatus: Not Found" in e.message)
+
+        self.assertTrue(exception_occurred)
+
+        exception_occurred = False
+        try:
+            # There is no identity specified, this is a bad request
+            cmd = 'READ --type=linkRoute'
+            out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
+        except Exception, e:
+            exception_occurred = True
+            self.assertTrue("BadRequestStatus: No name or identity provided" in e.message)
+
+        self.assertTrue(exception_occurred)
+
+        cmd = 'CREATE --type=autoLink addr=127.0.0.1 dir=in connection=routerC'
+        out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
+
+        identity = out[out.find("identity") + 12: out.find("identity") + 14]
+        cmd = 'READ --type=autoLink --identity=' + identity
+        out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
+        self.assertTrue(identity in out)
+
+
+
+
     def test_bbb_qdstat_link_routes_routerB(self):
         """
         Runs qdstat on router B to make sure that router B has two link routes, one 'in' and one 'out'
@@ -184,11 +222,11 @@ class LinkRoutePatternTest(TestCase):
 
     def test_ddd_partial_link_route_match(self):
         """
-        The linkRoutePattern on Routers C and B is set to org.apache.
+        The linkRoute on Routers C and B is set to org.apache.
         Creates a receiver listening on the address 'org.apache.dev' and a sender that sends to address 'org.apache.dev'.
         Sends a message to org.apache.dev via router QDR.C and makes sure that the message was successfully
         routed (using partial address matching) and received using pre-created links that were created as a
-        result of specifying addresses in the linkRoutePattern attribute('org.apache.').
+        result of specifying addresses in the linkRoute attribute('org.apache.').
         """
         hello_world_1 = "Hello World_1!"
 
@@ -271,11 +309,11 @@ class LinkRoutePatternTest(TestCase):
 
     def test_full_link_route_match(self):
         """
-        The linkRoutePattern on Routers C and B is set to org.apache.
+        The linkRoute on Routers C and B is set to org.apache.
         Creates a receiver listening on the address 'org.apache' and a sender that sends to address 'org.apache'.
         Sends a message to org.apache via router QDR.C and makes sure that the message was successfully
         routed (using full address matching) and received using pre-created links that were created as a
-        result of specifying addresses in the linkRoutePattern attribute('org.apache.').
+        result of specifying addresses in the linkRoute attribute('org.apache.').
         """
         hello_world_3 = "Hello World_3!"
         # Connects to listener #2 on QDR.C
@@ -394,6 +432,7 @@ class LinkRoutePatternTest(TestCase):
         identity_2 = result_list[1][1]
         identity_3 = result_list[2][1]
         identity_4 = result_list[3][1]
+        identity_4 = result_list[3][1]
 
         cmd = 'DELETE --type=linkRoute --identity=' + identity_1
         self.run_qdmanage(cmd=cmd, address=addr)
@@ -437,9 +476,7 @@ class LinkRoutePatternTest(TestCase):
         qdstat_address = self.routers[2].addresses[0]
         test = DeliveryTagsTest(sender_address, listening_address, qdstat_address)
         test.run()
-        self.assertTrue(test.wait_completed)
-        self.assertTrue(test.message_received)
-        self.assertTrue(test.delivery_tag_verified)
+        self.assertEqual(None, test.error)
 
     def test_close_with_unsettled(self):
         test = CloseWithUnsettledTest(self.routers[1].addresses[0], self.routers[1].addresses[1])
@@ -472,25 +509,42 @@ class LinkRoutePatternTest(TestCase):
         self.assertEqual(None, test.error)
 
 
+class Timeout(object):
+    def __init__(self, parent):
+        self.parent = parent
+
+    def on_timer_task(self, event):
+        self.parent.timeout()
+
+
 class DeliveryTagsTest(MessagingHandler):
     def __init__(self, sender_address, listening_address, qdstat_address):
         super(DeliveryTagsTest, self).__init__()
         self.sender_address = sender_address
         self.listening_address = listening_address
         self.sender = None
-        self.wait_completed = False
-        self.message_received = False
         self.receiver_connection = None
         self.sender_connection = None
         self.qdstat_address = qdstat_address
         self.id = '1235'
         self.times = 1
+        self.sent = 0
+        self.rcvd = 0
         self.delivery_tag_verified = False
         # The delivery tag we are going to send in the transfer frame
         # We will later make sure that the same delivery tag shows up on the receiving end in the link routed case.
         self.delivery_tag = '92319'
+        self.error = None
+
+    def timeout(self):
+        self.error = "Timeout expired: sent=%d rcvd=%d" % (self.sent, self.rcvd)
+        if self.receiver_connection:
+            self.receiver_connection.close()
+        if self.sender_connection:
+            self.sender_connection.close()
 
     def on_start(self, event):
+        self.timer               = event.reactor.schedule(5, Timeout(self))
         self.receiver_connection = event.container.connect(self.listening_address)
 
     def on_connection_remote_open(self, event):
@@ -513,10 +567,10 @@ class DeliveryTagsTest(MessagingHandler):
                 out = local_node.read(type='org.apache.qpid.dispatch.router.address', name='Dpulp.task').remoteCount
                 if out == 1:
                     continue_loop = False
-                i+=1
-                sleep(0.25)
+                else:
+                    i += 1
+                    sleep(0.25)
 
-            self.wait_completed = True
             self.sender_connection = event.container.connect(self.sender_address)
             self.sender = event.container.create_sender(self.sender_connection, "pulp.task", options=AtMostOnce())
 
@@ -524,29 +578,23 @@ class DeliveryTagsTest(MessagingHandler):
         if self.times == 1:
             msg = Message(body="Hello World")
             self.sender.send(msg, tag=self.delivery_tag)
-            self.sender_connection.close()
-            self.times +=1
+            self.times += 1
+            self.sent += 1
 
     def on_message(self, event):
         if "Hello World" == event.message.body:
-            self.message_received = True
+            self.rcvd += 1
 
         # If the tag on the delivery is the same as the tag we sent with the initial transfer, it means
         # that the router has propagated the delivery tag successfully because of link routing.
-        if self.delivery_tag == event.delivery.tag:
-            self.delivery_tag_verified = True
+        if self.delivery_tag != event.delivery.tag:
+            self.error = "Delivery-tag: expected:%r got:%r" % (self.delivery_tag, event.delivery.tag)
         self.receiver_connection.close()
+        self.sender_connection.close()
+        self.timer.cancel()
 
     def run(self):
         Container(self).run()
-
-
-class Timeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.timeout()
 
 
 class CloseWithUnsettledTest(MessagingHandler):

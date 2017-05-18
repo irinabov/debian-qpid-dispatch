@@ -28,6 +28,7 @@ project(qpid-dispatch C)
 
 # Build time switch to turn off memory pooling.
 option(USE_MEMORY_POOL "Use per-thread memory pools" ON)
+option(QD_MEMORY_STATS "Track memory pool usage statistics" ON)
 
 file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION.txt" QPID_DISPATCH_VERSION)
 
@@ -86,7 +87,7 @@ set(QPID_DISPATCH_CONFDIR ${SYSCONF_INSTALL_DIR}/qpid-dispatch)
 find_library(pthread_lib pthread)
 find_library(dl_lib dl)
 find_library(rt_lib rt)
-find_package(Proton 0.12 REQUIRED)
+find_package(Proton 0.13 REQUIRED)
 
 ##
 ## Find Valgrind
@@ -155,6 +156,7 @@ add_subdirectory(tests)
 add_subdirectory(python)
 add_subdirectory(router)
 add_subdirectory(doc)
+add_subdirectory(console)
 
 # reconfigure.in is a workaround to force cmake re-configuration. For example,
 # we use GLOB to collect .h files for install and apidoc, so if you _remove_ a

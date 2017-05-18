@@ -44,9 +44,10 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     core->router_id   = id;
 
     //
-    // Set up the logging source for the router core
+    // Set up the logging sources for the router core
     //
-    core->log = qd_log_source("ROUTER_CORE");
+    core->log       = qd_log_source("ROUTER_CORE");
+    core->agent_log = qd_log_source("AGENT");
 
     //
     // Set up the threading support
@@ -143,6 +144,9 @@ qdr_field_t *qdr_field(const char *text)
 
 qdr_field_t *qdr_field_from_iter(qd_field_iterator_t *iter)
 {
+    if (!iter)
+        return 0;
+
     qdr_field_t *field = new_qdr_field_t();
     qd_buffer_t *buf;
     int          remaining;
@@ -164,6 +168,14 @@ qdr_field_t *qdr_field_from_iter(qd_field_iterator_t *iter)
     field->iterator = qd_field_iterator_buffer(DEQ_HEAD(field->buffers), 0, length);
 
     return field;
+}
+
+qd_field_iterator_t *qdr_field_iterator(qdr_field_t *field)
+{
+    if (!field)
+        return 0;
+
+    return field->iterator;
 }
 
 
@@ -278,31 +290,6 @@ void qdr_del_connection_ref(qdr_connection_ref_list_t *ref_list, qdr_connection_
         if (ref->conn == conn) {
             DEQ_REMOVE(*ref_list, ref);
             free_qdr_connection_ref_t(ref);
-            break;
-        }
-        ref = DEQ_NEXT(ref);
-    }
-}
-
-
-void qdr_add_node_ref(qdr_router_ref_list_t *ref_list, qdr_node_t *rnode)
-{
-    qdr_router_ref_t *ref = new_qdr_router_ref_t();
-    DEQ_ITEM_INIT(ref);
-    ref->router = rnode;
-    rnode->ref_count++;
-    DEQ_INSERT_TAIL(*ref_list, ref);
-}
-
-
-void qdr_del_node_ref(qdr_router_ref_list_t *ref_list, qdr_node_t *rnode)
-{
-    qdr_router_ref_t *ref = DEQ_HEAD(*ref_list);
-    while (ref) {
-        if (ref->router == rnode) {
-            DEQ_REMOVE(*ref_list, ref);
-            free_qdr_router_ref_t(ref);
-            rnode->ref_count--;
             break;
         }
         ref = DEQ_NEXT(ref);

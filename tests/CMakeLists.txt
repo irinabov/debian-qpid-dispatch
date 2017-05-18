@@ -65,13 +65,14 @@ add_test(unit_tests            ${TEST_WRAP} --vg unit_tests ${CMAKE_CURRENT_SOUR
 
 # Unit test python modules
 add_test(router_engine_test    ${TEST_WRAP} -m unittest -v router_engine_test)
-add_test(managemet_test        ${TEST_WRAP} -m unittest -v management)
+add_test(management_test       ${TEST_WRAP} -m unittest -v management)
 add_test(router_policy_test    ${TEST_WRAP} -m unittest -v router_policy_test)
 
 # System test python modules
 foreach(py_test_module
 #   system_tests_broker
     system_tests_link_routes
+    system_tests_autolinks
     system_tests_drain
     system_tests_management
     system_tests_one_router
@@ -81,6 +82,7 @@ foreach(py_test_module
     system_tests_qdstat
     system_tests_sasl_plain
     system_tests_user_id
+    system_tests_user_id_proxy
     system_tests_deprecated
     system_tests_two_routers)
 
@@ -109,6 +111,7 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-1/policy-boardwalk.json   DESTINATI
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-1/policy-safari.json      DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-1/)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-2/policy-photoserver-sasl.sasldb  DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-2)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-3/test-sender-receiver-limits.json DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-3)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-4/management-access.json  DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-4/)
 
 # following install() functions will be called only if you do a make "install"
 install(FILES ${SYSTEM_TEST_FILES}

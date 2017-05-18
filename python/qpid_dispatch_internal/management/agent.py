@@ -52,6 +52,7 @@ getting current information from the implementation object.
 
 ## Threading:
 
+
 The agent is locked to be thread safe, called in the following threads:
 - Reading configuration file in initialization thread (no contention).
 - Management requests arriving in multiple, concurrent connection threads.
@@ -75,7 +76,7 @@ from ctypes import c_void_p, py_object, c_long
 from subprocess import Popen
 from ..dispatch import IoAdapter, LogAdapter, LOG_INFO, LOG_WARNING, LOG_DEBUG, LOG_ERROR, TREATMENT_ANYCAST_CLOSEST
 from qpid_dispatch.management.error import ManagementError, OK, CREATED, NO_CONTENT, STATUS_TEXT, \
-    BadRequestStatus, InternalServerErrorStatus, NotImplementedStatus, NotFoundStatus
+    BadRequestStatus, InternalServerErrorStatus, NotImplementedStatus, NotFoundStatus, ForbiddenStatus
 from qpid_dispatch.management.entity import camelcase
 from .schema import ValidationError, SchemaEntity, EntityType
 from .qdrouter import QdSchema
@@ -311,18 +312,32 @@ class PolicyEntity(EntityAdapter):
     def _identifier(self):
         return self.attributes.get('module')
 
+    def __str__(self):
+        return super(PolicyEntity, self).__str__().replace("Entity(", "PolicyEntity(")
 
-class PolicyRulesetEntity(EntityAdapter):
+class VhostEntity(EntityAdapter):
     def create(self):
         self._policy.create_ruleset(self.attributes)
 
     def _identifier(self):
-        return self.attributes.get('applicationName')
+        return self.attributes.get('id')
+
+    def __str__(self):
+        return super(VhostEntity, self).__str__().replace("Entity(", "VhostEntity(")
+
+    def _delete(self):
+        self._policy.delete_ruleset(self.id)
+
+    def _update(self):
+        self._policy.update_ruleset(self.attributes)
 
 
-class PolicyStatsEntity(EntityAdapter):
+class VhostStatsEntity(EntityAdapter):
     def _identifier(self):
-        return self.attributes.get('applicationName')
+        return self.attributes.get('id')
+
+    def __str__(self):
+        return super(VhostStatsEntity, self).__str__().replace("Entity(", "VhostStatsEntity(")
 
 
 def _host_port_name_identifier(entity):
@@ -335,6 +350,23 @@ def _host_port_name_identifier(entity):
     else:
         return "%s:%s" % (entity.attributes['host'], entity.attributes['port'])
 
+
+class SslProfileEntity(EntityAdapter):
+    def create(self):
+        return self._qd.qd_dispatch_configure_ssl_profile(self._dispatch, self)
+
+    def _delete(self):
+        deleted = self._qd.qd_connection_manager_delete_ssl_profile(self._dispatch, self._implementations[0].key)
+        # SSL Profiles cannot be deleted if they are referenced by a connector/listener.
+        if not deleted:
+            raise ForbiddenStatus("SSL Profile is referenced by other listeners/connectors. Delete the associated "
+                                  "listeners/connectors before deleting the SSL Profile")
+
+    def _identifier(self):
+        return self.name
+
+    def __str__(self):
+        return super(SslProfileEntity, self).__str__().replace("Entity(", "SslProfileEntity(")
 
 class ListenerEntity(EntityAdapter):
     def create(self):
@@ -644,9 +676,10 @@ class ManagementEntity(EntityAdapter):
                          for t in self._schema.by_type(type)))
 
     def get_annotations(self, request):
-        type = self.requested_type(request)
-        return (OK, dict((t.name, [a.name for a in t.annotations])
-                         for t in self._schema.by_type(type)))
+        """
+        We are not supporting any annotations at the moment.
+        """
+        return (OK, {})
 
     def get_operations(self, request):
         type = self.requested_type(request)
@@ -775,7 +808,7 @@ class Agent(object):
         """Called when a management request is received."""
         def error(e, trace):
             """Raise an error"""
-            self.log(LOG_ERROR, "Error dispatching %s: %s\n%s"%(request, e, trace))
+            self.log(LOG_ERROR, "Error performing %s: %s"%(request.properties.get('operation'), e.message))
             self.respond(request, e.status, e.description)
 
         # If there's no reply_to, don't bother to process the request.
@@ -889,7 +922,7 @@ class Agent(object):
             if not requested_type or self.management.entity_type.is_a(requested_type):
                 return self.management
             else:
-                raise BadRequestStatus("No name or identity provided")
+                raise BadRequestStatus("%s: No name or identity provided" % requested_type)
 
         def attrvals():
             """String form of the id attribute values for error messages"""

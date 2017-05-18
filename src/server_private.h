@@ -116,6 +116,7 @@ struct qd_connection_t {
     sys_mutex_t              *deferred_call_lock;
     bool                      event_stall;
     bool                      policy_counted;
+    char                     *role;  //The specified role of the connection, e.g. "normal", "inter-router", "route-container" etc.
 };
 
 DEQ_DECLARE(qd_connection_t, qd_connection_list_t);
@@ -173,11 +174,14 @@ struct qd_server_t {
     int                       pause_next_sequence;
     int                       pause_now_serving;
     qd_signal_handler_cb_t    signal_handler;
+    bool                      signal_handler_running;
     void                     *signal_context;
     int                       pending_signal;
     qd_connection_list_t      connections;
     qd_timer_t               *heartbeat_timer;
     uint64_t                 next_connection_id;
+    void                     *py_displayname_module;
+    void                     *py_displayname_obj;
 };
 
 ALLOC_DECLARE(qd_work_item_t);
