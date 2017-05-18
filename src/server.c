@@ -17,11 +17,13 @@
  * under the License.
  */
 
+#include <Python.h>
 #include <qpid/dispatch/ctools.h>
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/log.h>
 #include <qpid/dispatch/amqp.h>
 #include <qpid/dispatch/server.h>
+#include "qpid/dispatch/python_embedded.h"
 #include "entity.h"
 #include "entity_cache.h"
 #include "dispatch_private.h"
@@ -34,6 +36,7 @@
 #include <time.h>
 #include <string.h>
 #include <errno.h>
+#include <inttypes.h>
 
 static __thread qd_server_t *thread_server = 0;
 
@@ -101,6 +104,8 @@ static void free_qd_connection(qd_connection_t *ctx)
     if (ctx->free_user_id)
         free((char*)ctx->user_id);
 
+    free(ctx->role);
+
     free_qd_connection_t(ctx);
 }
 
@@ -113,7 +118,7 @@ static void qd_transport_tracer(pn_transport_t *transport, const char *message)
 {
     qd_connection_t *ctx = (qd_connection_t*) pn_transport_get_context(transport);
     if (ctx)
-        qd_log(ctx->server->log_source, QD_LOG_TRACE, "[%d]:%s", ctx->connection_id, message);
+        qd_log(ctx->server->log_source, QD_LOG_TRACE, "[%"PRIu64"]:%s", ctx->connection_id, message);
 }
 
 static qd_error_t connection_entity_update_host(qd_entity_t* entity, qd_connection_t *conn)
@@ -128,6 +133,19 @@ static qd_error_t connection_entity_update_host(qd_entity_t* entity, qd_connecti
     else
         return qd_entity_set_string(entity, "host", qdpn_connector_name(conn->pn_cxtr));
 }
+
+
+/**
+ * Save displayNameService object instance and ImportModule address
+ * Called with qd_python_lock held
+ */
+qd_error_t qd_register_display_name_service(qd_dispatch_t *qd, void *displaynameservice)
+{
+    qd->server->py_displayname_obj    = displaynameservice;
+    qd->server->py_displayname_module = PyImport_ImportModule("qpid_dispatch_internal.display_name.display_name");
+    return qd->server->py_displayname_module ? QD_ERROR_NONE : qd_error(QD_ERROR_RUNTIME, "Fail importing DisplayNameService module");
+}
+
 
 /**
  * Returns a char pointer to a user id which is constructed from components specified in the config->ssl_uid_format.
@@ -306,6 +324,32 @@ static const char *qd_transport_get_user(qd_connection_t *conn, pn_transport_t *
                     }
                 }
             }
+            if (config->ssl_display_name_file) {
+                // Translate extracted id into display name
+                qd_python_lock_state_t lock_state = qd_python_lock();
+                PyObject *module = (PyObject*)conn->server->py_displayname_module;
+                PyObject *query = PyObject_GetAttrString(module, "display_name_local_query");
+                if (query) {
+                    PyObject *result = PyObject_CallFunction(query, "(Oss)",
+                                                            (PyObject *)conn->server->py_displayname_obj,
+                                                            config->ssl_profile, user_id);
+                    if (result) {
+                        const char *res_string = PyString_AsString(result);
+                        free(user_id);
+                        user_id = malloc(strlen(res_string) + 1);
+                        user_id[0] = '\0';
+                        strcat(user_id, res_string);
+                        Py_XDECREF(result);
+                    } else {
+                        qd_log(conn->server->log_source, QD_LOG_DEBUG, "Internal: failed to read displaynameservice query result");
+                    }
+                    Py_XDECREF(query);
+                } else {
+                    qd_log(conn->server->log_source, QD_LOG_DEBUG, "Internal: failed to locate query function");
+                }
+                Py_XDECREF(module);
+                qd_python_unlock(lock_state);
+            }
             qd_log(conn->server->log_source, QD_LOG_DEBUG, "User id is '%s' ", user_id);
             return user_id;
         }
@@ -314,6 +358,21 @@ static const char *qd_transport_get_user(qd_connection_t *conn, pn_transport_t *
         return pn_transport_get_user(tport);
 
     return 0;
+}
+
+
+/**
+ * Allocate a new qd_connection
+ *  with DEQ items initialized, call lock allocated, and all other fields cleared.
+ */
+qd_connection_t *qd_connection_allocate()
+{
+    qd_connection_t *ctx = new_qd_connection_t();
+    ZERO(ctx);
+    DEQ_ITEM_INIT(ctx);
+    DEQ_INIT(ctx->deferred_calls);
+    ctx->deferred_call_lock = sys_mutex();
+    return ctx;
 }
 
 
@@ -335,11 +394,79 @@ void qd_connection_set_user(qd_connection_t *conn)
         conn->user_id = DEFAULT_USER_ID;
 }
 
+
+static void qd_get_next_pn_data(pn_data_t *data, const char **d, int *d1)
+{
+    if (pn_data_next(data)) {
+        switch (pn_data_type(data)) {
+            case PN_STRING:
+                *d = pn_data_get_string(data).start;
+                break;
+            case PN_SYMBOL:
+                *d = pn_data_get_symbol(data).start;
+                break;
+            case PN_INT:
+                *d1 = pn_data_get_int(data);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+
+/**
+ * Obtains the remote connection properties and sets it as a map on the passed in entity.
+ * @param
+ */
+static qd_error_t qd_set_connection_properties(qd_entity_t* entity, qd_connection_t *conn)
+{
+    // Get the connection properties and stick it into the entity as a map
+    pn_data_t *data = pn_connection_remote_properties(conn->pn_conn);
+    const char *props = "properties";
+    if (data) {
+        size_t count = pn_data_get_map(data);
+        pn_data_enter(data);
+
+        // Create a new map.
+        qd_error_t error_t = qd_entity_set_map(entity, props);
+
+        if (error_t != QD_ERROR_NONE)
+            return error_t;
+
+        for (size_t i = 0; i < count/2; i++) {
+            const char *key   = 0;
+            // We are assuming for now that all keys are strings
+            qd_get_next_pn_data(data, &key, 0);
+            const char *value_string = 0;
+            int value_int = 0;
+            // We are assuming for now that all values are either strings or integers
+            qd_get_next_pn_data(data, &value_string, &value_int);
+
+            if (value_string)
+                error_t = qd_entity_set_map_key_value_string(entity, props, key, value_string);
+            else if (value_int)
+                error_t = qd_entity_set_map_key_value_int(entity, props, key, value_int);
+
+            if (error_t != QD_ERROR_NONE)
+                return error_t;
+        }
+        pn_data_exit(data);
+    }
+
+    return QD_ERROR_NONE;
+}
+
+
+qd_error_t qd_entity_refresh_sslProfile(qd_entity_t* entity, void *impl)
+{
+    return QD_ERROR_NONE;
+}
+
+
 qd_error_t qd_entity_refresh_connection(qd_entity_t* entity, void *impl)
 {
     qd_connection_t *conn = (qd_connection_t*)impl;
-    const qd_server_config_t *config =
-        conn->connector ? conn->connector->config : conn->listener->config;
     pn_transport_t *tport = 0;
     pn_sasl_t      *sasl  = 0;
     pn_ssl_t       *ssl   = 0;
@@ -365,9 +492,10 @@ qd_error_t qd_entity_refresh_connection(qd_entity_t* entity, void *impl)
                              conn->pn_conn ? pn_connection_remote_container(conn->pn_conn) : 0) == 0 &&
         connection_entity_update_host(entity, conn) == 0 &&
         qd_entity_set_string(entity, "sasl", mech) == 0 &&
-        qd_entity_set_string(entity, "role", config->role) == 0 &&
+        qd_entity_set_string(entity, "role", conn->role) == 0 &&
         qd_entity_set_string(entity, "dir", conn->connector ? "out" : "in") == 0 &&
         qd_entity_set_string(entity, "user", user) == 0 &&
+        qd_set_connection_properties(entity, conn) == 0 &&
         qd_entity_set_long(entity, "identity", conn->connection_id) == 0 &&
         qd_entity_set_bool(entity, "isAuthenticated", tport && pn_transport_is_authenticated(tport)) == 0 &&
         qd_entity_set_bool(entity, "isEncrypted", tport && pn_transport_is_encrypted(tport)) == 0 &&
@@ -513,33 +641,19 @@ static void thread_process_listeners_LH(qd_server_t *qd_server)
         qd_log(qd_server->log_source, QD_LOG_DEBUG, "Accepting %s",
                log_incoming(logbuf, sizeof(logbuf), cxtr));
         
-        ctx = new_qd_connection_t();
-        DEQ_ITEM_INIT(ctx);
+        ctx = qd_connection_allocate();
         ctx->server        = qd_server;
-        ctx->opened        = false;
-        ctx->closed        = false;
         ctx->owner_thread  = CONTEXT_UNSPECIFIED_OWNER;
-        ctx->enqueued      = 0;
         ctx->pn_cxtr       = cxtr;
-        ctx->collector     = 0;
-        ctx->ssl           = 0;
         ctx->listener      = qdpn_listener_context(listener);
-        ctx->connector     = 0;
         ctx->context       = ctx->listener->context;
-        ctx->user_context  = 0;
-        ctx->link_context  = 0;
-        ctx->ufd           = 0;
-        ctx->user_id       = 0;
-        ctx->free_user_id  = false;
         ctx->connection_id = qd_server->next_connection_id++; // Increment the connection id so the next connection can use it
-        ctx->policy_settings = 0;
-        ctx->n_senders       = 0;
-        ctx->n_receivers     = 0;
-        ctx->open_container  = 0;
-        DEQ_INIT(ctx->deferred_calls);
-        ctx->deferred_call_lock = sys_mutex();
-        ctx->event_stall  = false;
         ctx->policy_counted = policy_counted;
+
+        // Copy the role from the listener config
+        int role_length    = strlen(ctx->listener->config->role) + 1;
+        ctx->role          = (char*) malloc(role_length);
+        strcpy(ctx->role, ctx->listener->config->role);
 
         pn_connection_t *conn = pn_connection();
         ctx->collector = pn_collector();
@@ -579,7 +693,7 @@ static void thread_process_listeners_LH(qd_server_t *qd_server)
         }
 
         // Set up SSL if configured
-        if (config->ssl_enabled) {
+        if (config->ssl_profile) {
             qd_log(qd_server->log_source, QD_LOG_TRACE, "Configuring SSL on %s",
                    log_incoming(logbuf, sizeof(logbuf), cxtr));
             if (listener_setup_ssl(ctx, config, tport) != QD_ERROR_NONE) {
@@ -610,13 +724,15 @@ static void handle_signals_LH(qd_server_t *qd_server)
 {
     int signum = qd_server->pending_signal;
 
-    if (signum) {
+    if (signum && !qd_server->signal_handler_running) {
+        qd_server->signal_handler_running = true;
         qd_server->pending_signal = 0;
         if (qd_server->signal_handler) {
             sys_mutex_unlock(qd_server->lock);
             qd_server->signal_handler(qd_server->signal_context, signum);
             sys_mutex_lock(qd_server->lock);
         }
+        qd_server->signal_handler_running = false;
     }
 }
 
@@ -722,7 +838,7 @@ static int process_connector(qd_server_t *qd_server, qdpn_connector_t *cxtr)
 
                     if (ctx->connector) {
                         ce = QD_CONN_EVENT_CONNECTOR_OPEN;
-                        ctx->connector->delay = 0;
+                        ctx->connector->delay = 2000;  // Delay on re-connect in case there is a recurring error
                     } else
                         assert(ctx->listener);
 
@@ -1061,33 +1177,18 @@ static void cxtr_try_open(void *context)
     if (ct->state != CXTR_STATE_CONNECTING)
         return;
 
-    qd_connection_t *ctx = new_qd_connection_t();
-    DEQ_ITEM_INIT(ctx);
+    qd_connection_t *ctx = qd_connection_allocate();
     ctx->server       = ct->server;
-    ctx->opened       = false;
-    ctx->closed       = false;
     ctx->owner_thread = CONTEXT_UNSPECIFIED_OWNER;
-    ctx->enqueued     = 0;
     ctx->pn_conn      = pn_connection();
     ctx->collector    = pn_collector();
-    ctx->ssl          = 0;
-    ctx->listener     = 0;
     ctx->connector    = ct;
     ctx->context      = ct->context;
-    ctx->user_context = 0;
-    ctx->link_context = 0;
-    ctx->ufd          = 0;
-    ctx->user_id      = 0;
-    ctx->free_user_id = false;
-    ctx->policy_settings = 0;
-    ctx->n_senders       = 0;
-    ctx->n_receivers     = 0;
-    ctx->open_container  = 0;
 
-    DEQ_INIT(ctx->deferred_calls);
-    ctx->deferred_call_lock = sys_mutex();
-    ctx->event_stall  = false;
-    ctx->policy_counted = false;
+    // Copy the role from the connector config
+    int role_length    = strlen(ctx->connector->config->role) + 1;
+    ctx->role          = (char*) malloc(role_length);
+    strcpy(ctx->role, ctx->connector->config->role);
 
     qd_log(ct->server->log_source, QD_LOG_TRACE, "Connecting to %s:%s", ct->config->host, ct->config->port);
 
@@ -1161,7 +1262,7 @@ static void cxtr_try_open(void *context)
     //
     // Set up SSL if appropriate
     //
-    if (config->ssl_enabled) {
+    if (config->ssl_profile) {
         pn_ssl_domain_t *domain = pn_ssl_domain(PN_SSL_MODE_CLIENT);
 
         if (!domain) {
@@ -1280,15 +1381,18 @@ qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *containe
 
     DEQ_INIT(qd_server->work_queue);
     DEQ_INIT(qd_server->pending_timers);
-    qd_server->a_thread_is_waiting = false;
-    qd_server->threads_active      = 0;
-    qd_server->pause_requests      = 0;
-    qd_server->threads_paused      = 0;
-    qd_server->pause_next_sequence = 0;
-    qd_server->pause_now_serving   = 0;
-    qd_server->pending_signal      = 0;
-    qd_server->heartbeat_timer     = 0;
-    qd_server->next_connection_id  = 1;
+    qd_server->a_thread_is_waiting    = false;
+    qd_server->threads_active         = 0;
+    qd_server->pause_requests         = 0;
+    qd_server->threads_paused         = 0;
+    qd_server->pause_next_sequence    = 0;
+    qd_server->pause_now_serving      = 0;
+    qd_server->pending_signal         = 0;
+    qd_server->signal_handler_running = false;
+    qd_server->heartbeat_timer        = 0;
+    qd_server->next_connection_id     = 1;
+    qd_server->py_displayname_module  = 0;
+    qd_server->py_displayname_obj     = 0;
 
     qd_log(qd_server->log_source, QD_LOG_INFO, "Container Name: %s", qd_server->container_name);
 
@@ -1476,7 +1580,7 @@ void qd_server_resume(qd_dispatch_t *qd)
 }
 
 
-void qd_server_activate(qd_connection_t *ctx)
+void qd_server_activate(qd_connection_t *ctx, bool awaken)
 {
     if (!ctx)
         return;
@@ -1487,7 +1591,8 @@ void qd_server_activate(qd_connection_t *ctx)
 
     if (!qdpn_connector_closed(ctor)) {
         qdpn_connector_activate(ctor, QDPN_CONNECTOR_WRITABLE);
-        qdpn_driver_wakeup(ctx->server->driver);
+        if (awaken)
+            qdpn_driver_wakeup(ctx->server->driver);
     }
 }
 
@@ -1564,7 +1669,7 @@ void qd_connection_invoke_deferred(qd_connection_t *conn, qd_deferred_t call, vo
     DEQ_INSERT_TAIL(conn->deferred_calls, dc);
     sys_mutex_unlock(conn->deferred_call_lock);
 
-    qd_server_activate(conn);
+    qd_server_activate(conn, true);
 }
 
 
@@ -1572,7 +1677,7 @@ void qd_connection_set_event_stall(qd_connection_t *conn, bool stall)
 {
     conn->event_stall = stall;
      if (!stall)
-         qd_server_activate(conn);
+         qd_server_activate(conn, true);
 }
 
 
@@ -1663,32 +1768,17 @@ qd_user_fd_t *qd_user_fd(qd_dispatch_t *qd, int fd, void *context)
     if (!ufd)
         return 0;
 
-    qd_connection_t *ctx = new_qd_connection_t();
-    DEQ_ITEM_INIT(ctx);
+    qd_connection_t *ctx = qd_connection_allocate();
     ctx->server       = qd_server;
-    ctx->opened       = false;
-    ctx->closed       = false;
     ctx->owner_thread = CONTEXT_NO_OWNER;
-    ctx->enqueued     = 0;
-    ctx->pn_conn      = 0;
-    ctx->collector    = 0;
-    ctx->ssl          = 0;
-    ctx->listener     = 0;
-    ctx->connector    = 0;
-    ctx->context      = 0;
-    ctx->user_context = 0;
-    ctx->link_context = 0;
     ctx->ufd          = ufd;
-    ctx->user_id       = 0;
-    ctx->free_user_id  = false;
-    ctx->policy_settings = 0;
-    ctx->n_senders       = 0;
-    ctx->n_receivers     = 0;
-    ctx->open_container  = 0;
-    DEQ_INIT(ctx->deferred_calls);
-    ctx->deferred_call_lock = sys_mutex();
-    ctx->event_stall  = false;
-    ctx->policy_counted = false;
+
+    // Copy the role from the connector config
+    if (ctx->connector && ctx->connector->config) {
+        int role_length    = strlen(ctx->connector->config->role) + 1;
+        ctx->role          = (char*) malloc(role_length);
+        strcpy(ctx->role, ctx->connector->config->role);
+    }
 
     ufd->context = context;
     ufd->server  = qd_server;

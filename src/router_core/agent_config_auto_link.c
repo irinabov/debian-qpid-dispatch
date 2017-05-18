@@ -49,6 +49,7 @@ const char *qdr_config_auto_link_columns[] =
      "lastError",
      0};
 
+const char *CONFIG_AUTOLINK_TYPE = "org.apache.qpid.dispatch.router.config.autoLink";
 
 static void qdr_config_auto_link_insert_column_CT(qdr_auto_link_t *al, int col, qd_composed_field_t *body, bool as_map)
 {
@@ -73,7 +74,7 @@ static void qdr_config_auto_link_insert_column_CT(qdr_auto_link_t *al, int col, 
         break;
 
     case QDR_CONFIG_AUTO_LINK_TYPE:
-        qd_compose_insert_string(body, "org.apache.qpid.dispatch.router.config.autoLink");
+        qd_compose_insert_string(body, CONFIG_AUTOLINK_TYPE);
         break;
 
     case QDR_CONFIG_AUTO_LINK_ADDR:
@@ -297,8 +298,11 @@ void qdra_config_auto_link_delete_CT(qdr_core_t          *core,
 {
     qdr_auto_link_t *al = 0;
 
-    if (!name && !identity)
+    if (!name && !identity) {
         query->status = QD_AMQP_BAD_REQUEST;
+        query->status.description = "No name or identity provided";
+        qd_log(core->agent_log, QD_LOG_ERROR, "Error performing DELETE of %s: %s", CONFIG_AUTOLINK_TYPE, query->status.description);
+    }
     else {
         if (identity)
             al = qdr_auto_link_config_find_by_identity_CT(core, identity);
@@ -337,11 +341,14 @@ void qdra_config_auto_link_create_CT(qdr_core_t          *core,
         if (!!al) {
             query->status = QD_AMQP_BAD_REQUEST;
             query->status.description = "Name conflicts with an existing entity";
+            qd_log(core->agent_log, QD_LOG_ERROR, "Error performing CREATE of %s: %s", CONFIG_AUTOLINK_TYPE, query->status.description);
             break;
         }
 
         if (!qd_parse_is_map(in_body)) {
             query->status = QD_AMQP_BAD_REQUEST;
+            query->status.description = "Body of request must be a map";
+            qd_log(core->agent_log, QD_LOG_ERROR, "Error performing CREATE of %s: %s", CONFIG_AUTOLINK_TYPE, query->status.description);
             break;
         }
 
@@ -359,6 +366,8 @@ void qdra_config_auto_link_create_CT(qdr_core_t          *core,
         //
         if (!addr_field || !dir_field) {
             query->status = QD_AMQP_BAD_REQUEST;
+            query->status.description = "addr and dir fields are mandatory";
+            qd_log(core->agent_log, QD_LOG_ERROR, "Error performing CREATE of %s: %s", CONFIG_AUTOLINK_TYPE, query->status.description);
             break;
         }
 
@@ -367,6 +376,7 @@ void qdra_config_auto_link_create_CT(qdr_core_t          *core,
         if (error) {
             query->status = QD_AMQP_BAD_REQUEST;
             query->status.description = error;
+            qd_log(core->agent_log, QD_LOG_ERROR, "Error performing CREATE of %s: %s", CONFIG_AUTOLINK_TYPE, query->status.description);
             break;
         }
 
@@ -382,6 +392,7 @@ void qdra_config_auto_link_create_CT(qdr_core_t          *core,
         if (phase < 0 || phase > 9) {
             query->status = QD_AMQP_BAD_REQUEST;
             query->status.description = "autoLink phase must be between 0 and 9";
+            qd_log(core->agent_log, QD_LOG_ERROR, "Error performing CREATE of %s: %s", CONFIG_AUTOLINK_TYPE, query->status.description);
             break;
         }
 
@@ -423,4 +434,60 @@ void qdra_config_auto_link_create_CT(qdr_core_t          *core,
             qd_log(core->log, QD_LOG_ERROR, "Error configuring linkRoute: %s", query->status.description);
         qdr_query_free(query);
     }
+}
+
+
+static void qdr_manage_write_config_auto_link_map_CT(qdr_core_t          *core,
+                                                     qdr_auto_link_t     *al,
+                                                     qd_composed_field_t *body,
+                                                     const char          *qdr_config_auto_link_columns[])
+{
+    qd_compose_start_map(body);
+
+    for(int i = 0; i < QDR_CONFIG_AUTO_LINK_COLUMN_COUNT; i++) {
+        qd_compose_insert_string(body, qdr_config_auto_link_columns[i]);
+        qdr_config_auto_link_insert_column_CT(al, i, body, false);
+    }
+
+    qd_compose_end_map(body);
+}
+
+
+void qdra_config_auto_link_get_CT(qdr_core_t        *core,
+                                qd_field_iterator_t *name,
+                                qd_field_iterator_t *identity,
+                                qdr_query_t         *query,
+                                const char          *qdr_config_auto_link_columns[])
+{
+    qdr_auto_link_t *al = 0;
+
+    if (!name && !identity) {
+        query->status = QD_AMQP_BAD_REQUEST;
+        query->status.description = "No name or identity provided";
+        qd_log(core->agent_log, QD_LOG_ERROR, "Error performing READ of %s: %s", CONFIG_AUTOLINK_TYPE, query->status.description);
+    }
+    else {
+        if (identity) //If there is identity, ignore the name
+            al = qdr_auto_link_config_find_by_identity_CT(core, identity);
+        else if (name)
+            al = qdr_auto_link_config_find_by_name_CT(core, name);
+
+        if (al == 0) {
+            // Send back a 404
+            query->status = QD_AMQP_NOT_FOUND;
+        }
+        else {
+            //
+            // Write the columns of the address entity into the response body.
+            //
+            qdr_manage_write_config_auto_link_map_CT(core, al, query->body, qdr_config_auto_link_columns);
+            query->status = QD_AMQP_OK;
+        }
+    }
+
+    //
+    // Enqueue the response.
+    //
+    qdr_agent_enqueue_response_CT(core, query);
+
 }

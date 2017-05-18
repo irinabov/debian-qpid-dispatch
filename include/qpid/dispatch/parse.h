@@ -50,6 +50,14 @@ qd_parsed_field_t *qd_parse(qd_field_iterator_t *iter);
 void qd_parse_free(qd_parsed_field_t *field);
 
 /**
+ * Create a duplicate parsed field, referring to the same base data.
+ *
+ * @param field A field pointer returned by qd_parse.
+ * @return A separate field that is a duplicate of the supplied field.
+ */
+qd_parsed_field_t *qd_parse_dup(const qd_parsed_field_t *field);
+
+/**
  * Check to see if the field parse was successful (i.e. the field was
  * well-formed).
  *
@@ -90,6 +98,18 @@ uint8_t qd_parse_tag(qd_parsed_field_t *field);
  * @return A field iterator that describes the field's raw content.
  */
 qd_field_iterator_t *qd_parse_raw(qd_parsed_field_t *field);
+
+
+/**
+ * Return an iterator for the typed content of the field. Contains the type followed by the raw content.
+ *
+ * IMPORTANT: The returned iterator is owned by the field and *must not* be
+ * freed by the caller of this function.
+ *
+ * @param field The field pointer returned by qd_parse.
+ * @return A field iterator that describes the field's typed content.
+ */
+qd_field_iterator_t *qd_parse_typed(qd_parsed_field_t *field);
 
 /**
  * Return the raw content as an unsigned integer up to 32-bits.  This is

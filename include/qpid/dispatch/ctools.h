@@ -25,6 +25,7 @@
 
 #include <stdlib.h>
 #include <assert.h>
+#include <memory.h>
 
 #define CT_ASSERT(exp) { assert(exp); }
 
@@ -32,7 +33,21 @@
 #define NEW_ARRAY(t,n)     (t*)  malloc(sizeof(t)*(n))
 #define NEW_PTR_ARRAY(t,n) (t**) malloc(sizeof(t*)*(n))
 
-#define ZERO(p)            memset(p, 0, sizeof(*p))
+//
+// If available, use aligned_alloc for cache-line-aligned allocations.  Otherwise
+// fall back to plain malloc.
+//
+#define NEW_CACHE_ALIGNED(t,p) \
+do { \
+    if (posix_memalign((void*) &(p), 64, (sizeof(t) + (sizeof(t) % 64 ? 64 - (sizeof(t) % 64) : 0))) != 0) (p) = 0; \
+} while (0)
+
+#define ALLOC_CACHE_ALIGNED(s,p) \
+do { \
+    if (posix_memalign((void*) &(p), 64, (s + (s % 64 ? 64 - (s % 64) : 0))) != 0) (p) = 0; \
+} while (0)
+
+#define ZERO(p) memset(p, 0, sizeof(*p))
 
 #define DEQ_DECLARE(i,d) typedef struct { \
     i      *head;       \

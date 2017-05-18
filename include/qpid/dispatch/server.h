@@ -286,11 +286,6 @@ typedef struct qd_server_config_t {
     int sasl_maxssf;
 
     /**
-     * SSL is enabled for this connection iff true.
-     */
-    bool ssl_enabled;
-
-    /**
      * Iff true, SSL/TLS must be used on the connection.
      */
     bool ssl_required;
@@ -363,6 +358,11 @@ typedef struct qd_server_config_t {
      * '5'(sha512 certificate fingerprint)
      */
     char *ssl_uid_format;
+
+    /**
+     * The name of the related ssl profile.
+     */
+    char *ssl_profile;
 
     /**
      * Full path to the file that contains the uid to display name mapping.
@@ -538,8 +538,9 @@ void qd_connection_set_user(qd_connection_t *conn);
  * internal work list and be invoked for processing by a worker thread.
  *
  * @param conn The connection over which the application wishes to send data
+ * @param awaken Iff true, wakeup the driver poll after the activation
  */
-void qd_server_activate(qd_connection_t *conn);
+void qd_server_activate(qd_connection_t *conn, bool awaken);
 
 
 /**
@@ -658,6 +659,16 @@ qd_connector_t *qd_server_connect(qd_dispatch_t *qd, const qd_server_config_t *c
  * @param ct A connector pointer returned by qd_connect.
  */
 void qd_server_connector_free(qd_connector_t* ct);
+
+
+
+/**
+ * Store address of display name service py object for C code use
+ *
+ * @param qd The dispatch handle returned by qd_dispatch.
+ * @param display_name_service address of python object
+ */
+qd_error_t qd_register_display_name_service(qd_dispatch_t *qd, void *display_name_service);
 
 /**
  * @}

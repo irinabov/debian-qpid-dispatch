@@ -30,7 +30,8 @@ import  qpid_dispatch_site
 from qpid_dispatch.management.client import Url, Node, Entity
 from qpid_dispatch_internal.management.qdrouter import QdSchema
 from qpid_dispatch_internal.tools import Display, Header, Sorter, YN, Commas, TimeLong
-from qpid_dispatch_internal.tools.command import connection_options, main, OptionParser, opts_ssl_domain, opts_url
+from qpid_dispatch_internal.tools.command import connection_options, main, OptionParser, opts_ssl_domain, opts_sasl, \
+        opts_url
 
 def parse_args(argv):
     """ Set global variables for options, return arguments """
@@ -68,8 +69,10 @@ class BusManager(Node):
     def __init__(self, opts):
         self.opts = opts
         super(BusManager, self).__init__(
-            Node.connection(opts_url(opts), opts.router, timeout=opts.timeout,
-                            ssl_domain=opts_ssl_domain(opts)))
+            Node.connection(opts_url(opts), opts.router,
+                            timeout=opts.timeout,
+                            ssl_domain=opts_ssl_domain(opts),
+                            sasl=opts_sasl(self.opts)))
 
     def query(self, entity_type):
         return super(BusManager, self).query(entity_type).get_entities()
@@ -205,9 +208,6 @@ class BusManager(Node):
         rows.append(('Mode',          router.mode))
         rows.append(('Area',          router.area))
         rows.append(('Router Id',     self._identity_clean(router.identity, router.routerId)))
-        rows.append(('Address Count', router.addrCount))
-        rows.append(('Link Count',    router.linkCount))
-        rows.append(('Node Count',    router.nodeCount))
 
         title = "Router Statistics"
         dispRows = rows
@@ -226,8 +226,13 @@ class BusManager(Node):
         heads.append(Header("phs"))
         heads.append(Header("cap"))
         heads.append(Header("undel"))
-        heads.append(Header("unsettled"))
-        heads.append(Header("deliveries"))
+        heads.append(Header("unsett"))
+        heads.append(Header("del"))
+        heads.append(Header("presett"))
+        heads.append(Header("acc"))
+        heads.append(Header("rej"))
+        heads.append(Header("rel"))
+        heads.append(Header("mod"))
         heads.append(Header("admin"))
         heads.append(Header("oper"))
         if self.opts.verbose:
@@ -250,6 +255,11 @@ class BusManager(Node):
             row.append(link.undeliveredCount)
             row.append(link.unsettledCount)
             row.append(link.deliveryCount)
+            row.append(link.presettledCount)
+            row.append(link.acceptedCount)
+            row.append(link.rejectedCount)
+            row.append(link.releasedCount)
+            row.append(link.modifiedCount)
             row.append(link.adminStatus)
             row.append(link.operStatus)
             if self.opts.verbose:

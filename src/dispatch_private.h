@@ -59,8 +59,6 @@ struct qd_dispatch_t {
     char  *router_area;
     char  *router_id;
     qd_router_mode_t  router_mode;
-
-    qd_log_source_t *log_source;
 };
 
 /**
@@ -117,6 +115,11 @@ qd_error_t qd_dispatch_configure_policy(qd_dispatch_t *qd, qd_entity_t *entity);
  * Configure security policy manager, must be called after qd_dispatch_prepare
  */
 qd_error_t qd_dispatch_register_policy_manager(qd_dispatch_t *qd, qd_entity_t *entity);
+
+/**
+ * Configure display name service, must be called after qd_dispatch_prepare
+ */
+qd_error_t qd_dispatch_register_display_name_service(qd_dispatch_t *qd, void *object);
 
 /**
  * \brief Configure the logging module from the

@@ -18,6 +18,7 @@
 #
 
 import re, json, unittest, os
+from time import sleep
 from system_test import TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR, wait_port
 from subprocess import PIPE, STDOUT
 from qpid_dispatch_internal.compat import OrderedDict, dictify
@@ -39,14 +40,17 @@ class QdmanageTest(TestCase):
         cls.inter_router_port = cls.tester.get_port()
         config_1 = Qdrouterd.Config([
             ('router', {'mode': 'interior', 'id': 'R1'}),
-            ('ssl-profile', {'name': 'server-ssl',
-                             'cert-db': cls.ssl_file('ca-certificate.pem'),
-                             'cert-file': cls.ssl_file('server-certificate.pem'),
-                             'key-file': cls.ssl_file('server-private-key.pem'),
+            ('sslProfile', {'name': 'server-ssl',
+                             'certDb': cls.ssl_file('ca-certificate.pem'),
+                             'certFile': cls.ssl_file('server-certificate.pem'),
+                             'keyFile': cls.ssl_file('server-private-key.pem'),
                              'password': 'server-password'}),
             ('listener', {'port': cls.tester.get_port()}),
             ('connector', {'role': 'inter-router', 'port': cls.inter_router_port}),
-            ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl'})
+            ('address', {'name': 'test-address', 'prefix': 'abcd', 'distribution': 'multicast'}),
+            ('linkRoute', {'name': 'test-link-route', 'prefix': 'xyz', 'dir': 'in'}),
+            ('autoLink', {'name': 'test-auto-link', 'addr': 'mnop', 'dir': 'out'}),
+            ('listener', {'port': cls.tester.get_port(), 'sslProfile': 'server-ssl'})
         ])
 
         config_2 = Qdrouterd.Config([
@@ -165,6 +169,17 @@ class QdmanageTest(TestCase):
         actual = self.run_qdmanage("get-schema")
         self.assertEquals(schema, dictify(json.loads(actual)))
 
+    def test_get_annotations(self):
+        """
+        The qdmanage GET-ANNOTATIONS call must return an empty dict since we don't support annotations at the moment.
+        """
+        out = json.loads(self.run_qdmanage("get-annotations"))
+        self.assertTrue(len(out) == 0)
+
+    def test_get_types(self):
+        out = json.loads(self.run_qdmanage("get-types"))
+        self.assertEqual(len(out), 27)
+
     def test_get_log(self):
         log = json.loads(self.run_qdmanage("get-log limit=1"))[0]
         self.assertEquals(['AGENT', 'trace'], log[0:2])
@@ -198,6 +213,30 @@ class QdmanageTest(TestCase):
         connector = json.loads(self.run_qdmanage(create_command))
         return connector
 
+    def test_check_address_name(self):
+        long_type = 'org.apache.qpid.dispatch.router.config.address'
+        query_command = 'QUERY --type=' + long_type
+        output = json.loads(self.run_qdmanage(query_command))
+        self.assertEqual(output[0]['name'], "test-address")
+        self.assertEqual(output[0]['distribution'], "multicast")
+        self.assertEqual(output[0]['prefix'], "abcd")
+
+    def test_check_link_route_name(self):
+        long_type = 'org.apache.qpid.dispatch.router.config.linkRoute'
+        query_command = 'QUERY --type=' + long_type
+        output = json.loads(self.run_qdmanage(query_command))
+        self.assertEqual(output[0]['name'], "test-link-route")
+        self.assertEqual(output[0]['dir'], "in")
+        self.assertEqual(output[0]['prefix'], "xyz")
+
+    def test_check_auto_link_name(self):
+        long_type = 'org.apache.qpid.dispatch.router.config.autoLink'
+        query_command = 'QUERY --type=' + long_type
+        output = json.loads(self.run_qdmanage(query_command))
+        self.assertEqual(output[0]['name'], "test-auto-link")
+        self.assertEqual(output[0]['dir'], "out")
+        self.assertEqual(output[0]['addr'], "mnop")
+
     def test_create_delete_connector(self):
         long_type = 'org.apache.qpid.dispatch.connector'
         query_command = 'QUERY --type=' + long_type
@@ -218,7 +257,8 @@ class QdmanageTest(TestCase):
         created = False
         for result in results:
             name = result['name']
-            if 'connection/0.0.0.0:%s:' % QdmanageTest.inter_router_port in name:
+            conn_name = 'connection/0.0.0.0:%s:' % QdmanageTest.inter_router_port
+            if conn_name in name:
                 created = True
         self.assertTrue(created)
 
@@ -309,6 +349,113 @@ class QdmanageTest(TestCase):
             exception_occurred = True
 
         self.assertTrue(exception_occurred)
+
+class QdmanageTestSsl(QdmanageTest):
+
+    @classmethod
+    def setUpClass(cls):
+        super(QdmanageTestSsl, cls).setUpClass()
+
+    def address(self):
+        return self.router_1.addresses[1]
+
+    def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
+        p = self.popen(
+            ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address(),
+                                             '--indent=-1',
+                                             '--ssl-trustfile=' + self.ssl_file('ca-certificate.pem'),
+                                             '--ssl-certificate=' + self.ssl_file('client-certificate.pem'),
+                                             '--ssl-key=' + self.ssl_file('client-private-key.pem'),
+                                             '--ssl-password=client-password',
+                                             '--timeout', str(TIMEOUT),
+                                             '--ssl-disable-peer-name-verify'],
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect)
+        out = p.communicate(input)[0]
+        try:
+            p.teardown()
+        except Exception, e:
+            raise Exception("%s\n%s" % (e, out))
+        return out
+
+    def test_create_delete_connector(self):
+        long_type = 'org.apache.qpid.dispatch.connector'
+        query_command = 'QUERY --type=' + long_type
+        output = json.loads(self.run_qdmanage(query_command))
+        name = output[0]['name']
+
+        # Delete an existing connector
+        delete_command = 'DELETE --type=' + long_type + ' --name=' + name
+        self.run_qdmanage(delete_command)
+        output = json.loads(self.run_qdmanage(query_command))
+        self.assertEqual(output, [])
+
+        # Re-create the connector and then try wait_connectors
+        self.create(long_type, name, str(QdmanageTestSsl.inter_router_port))
+
+        results = json.loads(self.run_qdmanage('QUERY --type=org.apache.qpid.dispatch.connection'))
+
+        created = False
+        for result in results:
+            name = result['name']
+            conn_name = 'connection/0.0.0.0:%s:' % QdmanageTestSsl.inter_router_port
+            if conn_name in name:
+                created = True
+        self.assertTrue(created)
+
+    def test_create_delete_ssl_profile(self):
+        long_type = 'org.apache.qpid.dispatch.sslProfile'
+        ssl_profile_name = 'ssl-profile-test'
+        ssl_create_command = 'CREATE --type=' + long_type + ' certFile=' + self.ssl_file('server-certificate.pem') + \
+                         ' keyFile=' + self.ssl_file('server-private-key.pem') + ' password=server-password' + \
+                         ' name=' + ssl_profile_name + ' certDb=' + self.ssl_file('ca-certificate.pem')
+
+        output = json.loads(self.run_qdmanage(ssl_create_command))
+        name = output['name']
+        self.assertEqual(name, ssl_profile_name)
+
+        long_type = 'org.apache.qpid.dispatch.listener'
+        listener_name = 'sslListener'
+        port = self.get_port()
+        listener_create_command = 'CREATE --type=' + long_type + ' --name=sslListener host=127.0.0.1 port=' + str(port) + \
+                                  ' saslMechanisms=EXTERNAL sslProfile=' + ssl_profile_name + \
+                                  ' requireSsl=yes authenticatePeer=yes'
+        output = json.loads(self.run_qdmanage(listener_create_command))
+        name = output['name']
+        self.assertEqual(name, listener_name)
+
+        sleep(1)
+        query_command = 'QUERY --type=listener'
+
+        # Query on the port that was created by the preceding listener create
+        output = json.loads(self.run_qdmanage(query_command, address="127.0.0.1:"+str(port)))
+
+        ssl_listener_present = False
+
+        for out in output:
+            if out['name'] == 'sslListener':
+                ssl_listener_present = True
+                self.assertEqual(out['sslProfile'], 'ssl-profile-test')
+
+        self.assertEqual(len(output), 3)
+        self.assertTrue(ssl_listener_present)
+
+        # Delete the SSL Profile. This will fail because there is a listener referencing the SSL profile.
+        delete_command = 'DELETE --type=sslProfile --name=' + ssl_profile_name
+        cannot_delete = False
+        try:
+            json.loads(self.run_qdmanage(delete_command))
+        except Exception as e:
+            cannot_delete = True
+            self.assertTrue('ForbiddenStatus: SSL Profile is referenced by other listeners/connectors' in e.message)
+
+        self.assertTrue(cannot_delete)
+
+        # Deleting the listener first and then the SSL profile must work.
+        delete_command = 'DELETE --type=listener --name=' + listener_name
+        self.run_qdmanage(delete_command)
+
+        delete_command = 'DELETE --type=sslProfile --name=' + ssl_profile_name
+        self.run_qdmanage(delete_command)
 
 if __name__ == '__main__':
     unittest.main(main_module())

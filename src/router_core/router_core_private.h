@@ -22,6 +22,7 @@
 #include "dispatch_private.h"
 #include <qpid/dispatch/router_core.h>
 #include <qpid/dispatch/threading.h>
+#include <qpid/dispatch/atomic.h>
 #include <qpid/dispatch/log.h>
 #include <memory.h>
 
@@ -61,6 +62,7 @@ typedef struct {
 
 qdr_field_t *qdr_field(const char *string);
 qdr_field_t *qdr_field_from_iter(qd_field_iterator_t *iter);
+qd_field_iterator_t *qdr_field_iterator(qdr_field_t *field);
 void qdr_field_free(qdr_field_t *field);
 char *qdr_field_copy(qdr_field_t *field);
 
@@ -137,8 +139,8 @@ struct qdr_action_t {
         struct {
             qdr_query_t             *query;
             int                      offset;
-            qd_field_iterator_t     *identity;
-            qd_field_iterator_t     *name;
+            qdr_field_t             *identity;
+            qdr_field_t             *name;
             qd_parsed_field_t       *in_body;
         } agent;
 
@@ -172,8 +174,7 @@ struct qdr_node_t {
     qdr_address_t    *owning_addr;
     int               mask_bit;
     qdr_node_t       *next_hop;           ///< Next hop node _if_ this is not a neighbor node
-    qdr_link_t       *peer_control_link;  ///< Outgoing control link _if_ this is a neighbor node
-    qdr_link_t       *peer_data_link;     ///< Outgoing data link _if_ this is a neighbor node
+    int               link_mask_bit;      ///< Mask bit of inter-router connection if this is a neighbor node
     uint32_t          ref_count;
     qd_bitmask_t     *valid_origins;
     int               cost;
@@ -181,6 +182,9 @@ struct qdr_node_t {
 
 ALLOC_DECLARE(qdr_node_t);
 DEQ_DECLARE(qdr_node_t, qdr_node_list_t);
+
+#define PEER_CONTROL_LINK(c,n) ((n->link_mask_bit >= 0) ? (c)->control_links_by_mask_bit[n->link_mask_bit] : 0)
+#define PEER_DATA_LINK(c,n)    ((n->link_mask_bit >= 0) ? (c)->data_links_by_mask_bit[n->link_mask_bit] : 0)
 
 
 struct qdr_router_ref_t {
@@ -200,7 +204,7 @@ typedef enum {
 struct qdr_delivery_t {
     DEQ_LINKS(qdr_delivery_t);
     void                *context;
-    int                  ref_count;
+    sys_atomic_t         ref_count;
     qdr_link_t          *link;
     qdr_delivery_t      *peer;
     qd_message_t        *msg;
@@ -208,6 +212,7 @@ struct qdr_delivery_t {
     qd_field_iterator_t *origin;
     uint64_t             disposition;
     bool                 settled;
+    bool                 presettled;
     qdr_delivery_where_t where;
     uint8_t              tag[32];
     int                  tag_length;
@@ -270,7 +275,13 @@ struct qdr_link_t {
     bool                     drain_mode;
     bool                     drain_mode_changed;
     int                      credit_to_core; ///< Number of the available credits incrementally given to the core
-    uint64_t                 total_deliveries;
+
+    uint64_t total_deliveries;
+    uint64_t presettled_deliveries;
+    uint64_t accepted_deliveries;
+    uint64_t rejected_deliveries;
+    uint64_t released_deliveries;
+    uint64_t modified_deliveries;
 };
 
 ALLOC_DECLARE(qdr_link_t);
@@ -354,9 +365,6 @@ DEQ_DECLARE(qdr_address_t, qdr_address_list_t);
 qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment);
 qdr_address_t *qdr_add_local_address_CT(qdr_core_t *core, char aclass, const char *addr, qd_address_treatment_t treatment);
 
-void qdr_add_node_ref(qdr_router_ref_list_t *ref_list, qdr_node_t *rnode);
-void qdr_del_node_ref(qdr_router_ref_list_t *ref_list, qdr_node_t *rnode);
-
 struct qdr_address_config_t {
     DEQ_LINKS(qdr_address_config_t);
     qd_hash_handle_t       *hash_handle;
@@ -428,9 +436,11 @@ DEQ_DECLARE(qdr_connection_work_t, qdr_connection_work_list_t);
 
 struct qdr_connection_t {
     DEQ_LINKS(qdr_connection_t);
+    DEQ_LINKS_N(ACTIVATE, qdr_connection_t);
     qdr_core_t                 *core;
     void                       *user_context;
     bool                        incoming;
+    bool                        in_activate_list;
     qdr_connection_role_t       role;
     int                         inter_router_cost;
     qdr_conn_identifier_t      *conn_id;
@@ -506,6 +516,7 @@ ALLOC_DECLARE(qdr_conn_identifier_t);
 struct qdr_core_t {
     qd_dispatch_t     *qd;
     qd_log_source_t   *log;
+    qd_log_source_t   *agent_log;
     sys_thread_t      *thread;
     bool               running;
     qdr_action_list_t  action_list;
@@ -517,7 +528,9 @@ struct qdr_core_t {
     qd_timer_t              *work_timer;
 
     qdr_connection_list_t open_connections;
+    qdr_connection_list_t connections_to_activate;
     qdr_link_list_t       open_links;
+
     //
     // Agent section
     //
@@ -580,7 +593,6 @@ struct qdr_core_t {
     uint64_t              next_identifier;
     sys_mutex_t          *id_lock;
 
-
     qdr_forwarder_t      *forwarders[QD_TREATMENT_LINK_BALANCED + 1];
 };
 
@@ -598,6 +610,7 @@ void qdr_delivery_push_CT(qdr_core_t *core, qdr_delivery_t *dlv);
 void qdr_delivery_release_CT(qdr_core_t *core, qdr_delivery_t *delivery);
 void qdr_delivery_failed_CT(qdr_core_t *core, qdr_delivery_t *delivery);
 bool qdr_delivery_settled_CT(qdr_core_t *core, qdr_delivery_t *delivery);
+void qdr_delivery_decref_LH(qdr_delivery_t *delivery);
 void qdr_agent_enqueue_response_CT(qdr_core_t *core, qdr_query_t *query);
 
 void qdr_post_mobile_added_CT(qdr_core_t *core, const char *address_hash);
@@ -630,4 +643,11 @@ qdr_query_t *qdr_query(qdr_core_t              *core,
                        void                    *context,
                        qd_router_entity_type_t  type,
                        qd_composed_field_t     *body);
+
+//
+// Cause the core to check credit on an incoming link that might have CT credit but
+// no IO/Proton credit.
+//
+void qdr_link_check_credit(qdr_core_t *core, qdr_link_t *link);
+
 #endif
