@@ -10,14 +10,14 @@ Build-Depends: debhelper (>= 9),
                graphviz,
                python-sphinx, 
                doxygen,
-               libqpid-proton8-dev (>= 0.14.0),
+               libqpid-proton10-dev (>= 0.14.0),
                python-qpid-proton (>= 0.14.0)
 Standards-Version: 3.9.7
 Homepage: http://qpid.apache.org/components/dispatch-router
 
 Package: qdrouterd
 Architecture: any
-Depends: libqpid-proton8,
+Depends: libqpid-proton10,
          adduser,
          ${shlibs:Depends}, ${misc:Depends}
 Pre-Depends: ${misc:Pre-Depends}
