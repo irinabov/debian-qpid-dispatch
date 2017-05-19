@@ -10,14 +10,14 @@ Build-Depends: debhelper (>= 9),
                graphviz,
                python-sphinx, 
                doxygen,
-               libqpid-proton7-dev (>= 0.13.0),
-               python-qpid-proton (>= 0.13.0)
-Standards-Version: 3.9.5
+               libqpid-proton10-dev (>= 0.14.0),
+               python-qpid-proton (>= 0.14.0)
+Standards-Version: 3.9.7
 Homepage: http://qpid.apache.org/components/dispatch-router
 
 Package: qdrouterd
 Architecture: any
-Depends: libqpid-proton7,
+Depends: libqpid-proton10,
          adduser,
          ${shlibs:Depends}, ${misc:Depends}
 Pre-Depends: ${misc:Pre-Depends}
@@ -44,7 +44,7 @@ Description: Qpid Dispatch Router executable
 
 Package: qdstat
 Architecture: all
-Depends: python-qpid-proton (>= 0.13.0),
+Depends: python-qpid-proton (>= 0.14.0),
          python,
          qdrouterd (>= ${binary:Version}),
          ${misc:Depends}
@@ -69,7 +69,7 @@ Description: Qpid Dispatch stat tool
 
 Package: qdmanage
 Architecture: all
-Depends: python-qpid-proton (>= 0.13.0),
+Depends: python-qpid-proton (>= 0.14.0),
          python,
          qdrouterd (>= ${binary:Version}),
          ${misc:Depends}

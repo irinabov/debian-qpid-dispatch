@@ -17,9 +17,10 @@
 # under the License.
 #
 
-import unittest, os
+import unittest, os, json
+from subprocess import PIPE, STDOUT
 from proton import Message, PENDING, ACCEPTED, REJECTED, RELEASED, SSLDomain, SSLUnavailable, Timeout
-from system_test import TestCase, Qdrouterd, main_module, DIR
+from system_test import TestCase, Qdrouterd, main_module, DIR, TIMEOUT, Process
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, AtMostOnce, AtLeastOnce
 
@@ -31,6 +32,8 @@ except ImportError:
 
 
 class RouterTest(TestCase):
+
+    inter_router_port = None
 
     @staticmethod
     def ssl_config(client_server, connection):
@@ -72,10 +75,8 @@ class RouterTest(TestCase):
         router('A', 'server',
                ('listener', {'role': 'inter-router', 'port': inter_router_port}))
         router('B', 'client',
-               ('connector',
-                {'role': 'inter-router',
-                 'port': inter_router_port,
-                 'verifyHostName': 'no'}))
+               ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port,
+                              'verifyHostName': 'no'}))
 
         cls.routers[0].wait_router_connected('QDR.B')
         cls.routers[1].wait_router_connected('QDR.A')
@@ -415,7 +416,7 @@ class RouterTest(TestCase):
         ingress_message = Message()
         ingress_message.address = addr
         ingress_message.body = {'message': 'Hello World!'}
-        ingress_message_annotations = {}        
+        ingress_message_annotations = {'work': 'hard', 'stay': 'humble'}
         
         ingress_message.annotations = ingress_message_annotations
         
@@ -435,14 +436,17 @@ class RouterTest(TestCase):
         
         self.assertEqual(egress_message_annotations.__class__, dict)
         self.assertEqual(egress_message_annotations['x-opt-qd.ingress'], '0/QDR.A')
+        self.assertEqual(egress_message_annotations['work'], 'hard')
+        self.assertEqual(egress_message_annotations['stay'], 'humble')
         self.assertEqual(egress_message_annotations['x-opt-qd.trace'], ['0/QDR.A', '0/QDR.B'])
         
         M1.stop()
         M2.stop()
         
-    #This unit test is currently skipped because dispatch router do not pass thru custom message annotations. Once the feature is added the @unittest.skip decorator can be removed.
-    #The stripAnnotations property is set to 'no'
-    def notest_08a_test_strip_message_annotations_no_custom_not_implemented(self):
+    # This unit test is currently skipped because dispatch router do not pass thru custom message annotations.
+    # Once the feature is added the @unittest.skip decorator can be removed.
+    # The stripAnnotations property is set to 'no'
+    def test_08a_strip_message_annotations_custom(self):
         addr = "amqp:/message_annotations_strip_no_custom/1"
         
         M1 = self.messenger()
@@ -461,8 +465,7 @@ class RouterTest(TestCase):
         ingress_message.body = {'message': 'Hello World!'}
         ingress_message_annotations = {}
         ingress_message_annotations['custom-annotation'] = '1/Custom_Annotation'
-        
-        
+
         ingress_message.annotations = ingress_message_annotations
         
         M1.put(ingress_message)
@@ -473,10 +476,9 @@ class RouterTest(TestCase):
         egress_message = Message()
         M2.get(egress_message)
         
-        #Make sure 'Hello World!' is in the message body dict
+        # Make sure 'Hello World!' is in the message body dict
         self.assertEqual('Hello World!', egress_message.body['message'])
-        
-        
+
         egress_message_annotations = egress_message.annotations
         
         self.assertEqual(egress_message_annotations.__class__, dict)
@@ -536,9 +538,9 @@ class RouterTest(TestCase):
         M1.stop()
         M2.stop()
         
-    #Test to see if the dispatch router specific annotations were stripped.
-    #The stripAnnotations property is set to 'both'
-    #Send a message to the router with pre-existing ingress and trace annotations and make sure that nothing comes out.
+    # Test to see if the dispatch router specific annotations were stripped.
+    # The stripAnnotations property is set to 'both'
+    # Send a message to the router with pre-existing ingress and trace annotations and make sure that nothing comes out.
     def test_08a_test_strip_message_annotations_both_add_ingress_trace(self):
         addr = "amqp:/strip_message_annotations_both_add_ingress_trace/1"
         
@@ -558,10 +560,14 @@ class RouterTest(TestCase):
         ingress_message.body = {'message': 'Hello World!'}
         
         ##
-        ## Pre-existing ingress and trace. Intentionally populate the trace with the 0/QDR.A which is the trace of the first router.
-        ## If the inbound annotations were not stripped, the router would drop this message since it would consider this message as being looped.
-        ##
-        ingress_message_annotations = {'x-opt-qd.ingress': 'ingress-router', 'x-opt-qd.trace': ['0/QDR.A']}
+        # Pre-existing ingress and trace. Intentionally populate the trace with the 0/QDR.A which is the trace
+        # of the first router. If the inbound annotations were not stripped, the router would drop this message
+        # since it would consider this message as being looped.
+        #
+        ingress_message_annotations = {'x-opt-qd.ingress': 'ingress-router',
+                                       'x-opt-qd.trace': ['0/QDR.A'],
+                                       'work': 'hard',
+                                       'x-opt-qd': 'humble'}
         ingress_message.annotations = ingress_message_annotations
         
         #Put and send the message
@@ -572,15 +578,15 @@ class RouterTest(TestCase):
         M2.recv(1)
         egress_message = Message()
         M2.get(egress_message)
-        
-        self.assertEqual(egress_message.annotations, None)
+
+        # Router specific annotations (annotations with prefix "x-opt-qd.") will be stripped. User defined annotations will not be stripped.
+        self.assertEqual(egress_message.annotations, {'work': 'hard', 'x-opt-qd': 'humble'})
         
         M1.stop()
         M2.stop()
 
-
-    #Send in pre-existing trace and ingress and annotations and make sure that there are no outgoing annotations.
-    #stripAnnotations property is set to "in"
+    # Send in pre-existing trace and ingress and annotations and make sure that there are no outgoing annotations.
+    # stripAnnotations property is set to "in"
     def test_08a_test_strip_message_annotations_out(self):
         addr = "amqp:/strip_message_annotations_out/1"
         
@@ -615,6 +621,47 @@ class RouterTest(TestCase):
         
         self.assertEqual(egress_message.annotations, None)
         
+        M1.stop()
+        M2.stop()
+
+    # Send in pre-existing trace and ingress and annotations and make sure that there are no outgoing annotations.
+    # stripAnnotations property is set to "in"
+    def test_08a_test_strip_message_annotations_out_custom(self):
+        addr = "amqp:/strip_message_annotations_out/1"
+
+        M1 = self.messenger()
+        M2 = self.messenger()
+
+        M1.route("amqp:/*", self.routers[0].addresses[3]+"/$1")
+        M2.route("amqp:/*", self.routers[1].addresses[3]+"/$1")
+
+        M1.start()
+        M2.start()
+        M2.subscribe(addr)
+        self.routers[0].wait_address("strip_message_annotations_out/1", 0, 1)
+
+        ingress_message = Message()
+        ingress_message.address = addr
+        ingress_message.body = {'message': 'Hello World!'}
+
+        # Annotations with prefix "x-opt-qd." will be skipped
+        ingress_message_annotations = {'work': 'hard', "x-opt-qd": "custom", "x-opt-qd.": "custom"}
+        ingress_message.annotations = ingress_message_annotations
+
+        # Put and send the message
+        M1.put(ingress_message)
+        M1.send()
+
+        # Receive the message
+        egress_message = Message()
+        M2.recv(1)
+        M2.get(egress_message)
+
+        # Make sure 'Hello World!' is in the message body dict
+        self.assertEqual('Hello World!', egress_message.body['message'])
+
+        self.assertEqual(egress_message.annotations, {'work': 'hard', "x-opt-qd": "custom"})
+
         M1.stop()
         M2.stop()
     
@@ -1099,28 +1146,58 @@ class AttachOnInterRouterTest(MessagingHandler):
     def run(self):
         Container(self).run()
 
-
-
 try:
     SSLDomain(SSLDomain.MODE_CLIENT)
 
     class RouterTestSsl(RouterTest):
 
         @staticmethod
-        def ssl_config(client_server, connection):
-                connection[1]['ssl-profile'] = 'ssl-profile-name'
+        def ssl_file(name):
+            return os.path.join(DIR, 'ssl_certs', name)
 
-                def ssl_file(name):
-                    return os.path.join(DIR, 'ssl_certs', name)
+        def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
+            p = self.popen(
+                ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address(), '--indent=-1', '--timeout',
+                                                 str(TIMEOUT)], stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect)
+            out = p.communicate(input)[0]
+            try:
+                p.teardown()
+            except Exception, e:
+                raise Exception("%s\n%s" % (e, out))
+            return out
+
+        @staticmethod
+        def ssl_config(client_server, connection):
+                connection[1]['sslProfile'] = 'test-ssl'
+
                 return [
-                    ('ssl-profile', {
-                        'name': 'ssl-profile-name',
-                        'cert-db': ssl_file('ca-certificate.pem'),
-                        'cert-file': ssl_file(client_server+'-certificate.pem'),
-                        'key-file': ssl_file(client_server+'-private-key.pem'),
+                    ('sslProfile', {
+                        'name': 'test-ssl',
+                        'certDb': RouterTestSsl.ssl_file('ca-certificate.pem'),
+                        'certFile': RouterTestSsl.ssl_file(client_server+'-certificate.pem'),
+                        'keyFile': RouterTestSsl.ssl_file(client_server+'-private-key.pem'),
                         'password': client_server+'-password'})]
 
+        def test_zzz_delete_ssl_profile(self):
+            """
+            Delete an ssl profile before deleting the connector and make sure it fails.
+            """
+            delete_command = 'DELETE --type=sslProfile --name=test-ssl'
+            cannot_delete = False
+            try:
+                json.loads(self.run_qdmanage(delete_command, address=self.routers[1].addresses[0]))
+            except Exception as e:
+                cannot_delete = True
+                self.assertTrue('ForbiddenStatus: SSL Profile is referenced by other listeners/connectors' in e.message)
 
+            self.assertTrue(cannot_delete)
+
+            # Deleting the listener first and then the SSL profile must work.
+            delete_command = 'DELETE --type=connector --name=connectorToA'
+            self.run_qdmanage(delete_command, address=self.routers[1].addresses[0])
+
+            delete_command = 'DELETE --type=sslProfile --name=test-ssl'
+            self.run_qdmanage(delete_command, address=self.routers[1].addresses[0])
 
 except SSLUnavailable:
     class RouterTestSsl(TestCase):

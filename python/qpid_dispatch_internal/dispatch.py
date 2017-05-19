@@ -61,9 +61,11 @@ class QdDll(ctypes.PyDLL):
         self._prototype(self.qd_dispatch_prepare, None, [self.qd_dispatch_p])
         self._prototype(self.qd_dispatch_configure_listener, ctypes.c_void_p, [self.qd_dispatch_p, py_object])
         self._prototype(self.qd_dispatch_configure_connector, ctypes.c_void_p, [self.qd_dispatch_p, py_object])
+        self._prototype(self.qd_dispatch_configure_ssl_profile, ctypes.c_void_p, [self.qd_dispatch_p, py_object])
 
         self._prototype(self.qd_connection_manager_delete_listener, None, [self.qd_dispatch_p, ctypes.c_void_p])
         self._prototype(self.qd_connection_manager_delete_connector, None, [self.qd_dispatch_p, ctypes.c_void_p])
+        self._prototype(self.qd_connection_manager_delete_ssl_profile, ctypes.c_bool, [self.qd_dispatch_p, ctypes.c_void_p])
 
         self._prototype(self.qd_dispatch_configure_fixed_address, None, [self.qd_dispatch_p, py_object])
         self._prototype(self.qd_dispatch_configure_waypoint, None, [self.qd_dispatch_p, py_object])
@@ -77,6 +79,8 @@ class QdDll(ctypes.PyDLL):
         self._prototype(self.qd_dispatch_policy_c_counts_alloc, c_long, [], check=False)
         self._prototype(self.qd_dispatch_policy_c_counts_free, None, [c_long], check=False)
         self._prototype(self.qd_dispatch_policy_c_counts_refresh, None, [c_long, py_object])
+
+        self._prototype(self.qd_dispatch_register_display_name_service, None, [self.qd_dispatch_p, py_object])
 
         self._prototype(self.qd_dispatch_set_agent, None, [self.qd_dispatch_p, py_object])
 

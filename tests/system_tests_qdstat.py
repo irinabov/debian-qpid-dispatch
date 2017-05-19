@@ -39,6 +39,7 @@ class QdstatTest(system_test.TestCase):
         p = self.popen(
             ['qdstat', '--bus', str(address or self.router.addresses[0]), '--timeout', str(system_test.TIMEOUT) ] + args,
             name='qdstat-'+self.id(), stdout=PIPE, expect=None)
+
         out = p.communicate()[0]
         assert p.returncode == 0, \
             "qdstat exit status %s, output:\n%s" % (p.returncode, out)
@@ -99,33 +100,32 @@ try:
                             'saslConfigPath': os.getcwd(),
                             'workerThreads': 1,
                             'saslConfigName': 'tests-mech-EXTERNAL'}),
-                ('ssl-profile', {'name': 'server-ssl',
-                                 'cert-db': cls.ssl_file('ca-certificate.pem'),
-                                 'cert-file': cls.ssl_file('server-certificate.pem'),
-                                 'key-file': cls.ssl_file('server-private-key.pem'),
+                ('sslProfile', {'name': 'server-ssl',
+                                 'certDb': cls.ssl_file('ca-certificate.pem'),
+                                 'certFile': cls.ssl_file('server-certificate.pem'),
+                                 'keyFile': cls.ssl_file('server-private-key.pem'),
                                  'password': 'server-password'}),
                 ('listener', {'port': cls.tester.get_port()}),
-                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl', 'authenticatePeer': 'no', 'requireSsl': 'yes'}),
-                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl', 'authenticatePeer': 'no', 'requireSsl': 'no'}),
-                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl', 'authenticatePeer': 'yes', 'requireSsl': 'yes',
+                ('listener', {'port': cls.tester.get_port(), 'sslProfile': 'server-ssl', 'authenticatePeer': 'no', 'requireSsl': 'yes'}),
+                ('listener', {'port': cls.tester.get_port(), 'sslProfile': 'server-ssl', 'authenticatePeer': 'no', 'requireSsl': 'no'}),
+                ('listener', {'port': cls.tester.get_port(), 'sslProfile': 'server-ssl', 'authenticatePeer': 'yes', 'requireSsl': 'yes',
                               'saslMechanisms': 'EXTERNAL'})
             ])
             cls.router = cls.tester.qdrouterd('test-router', config)
 
         def run_qdstat(self, args, regexp=None, address=None):
             p = self.popen(
-                ['qdstat', '--bus', str(address or self.router.addresses[0]), '--timeout', str(system_test.TIMEOUT) ] + args,
+                ['qdstat', '--bus', str(address or self.router.addresses[0]), '--ssl-disable-peer-name-verify',
+                 '--timeout', str(system_test.TIMEOUT) ] + args,
                 name='qdstat-'+self.id(), stdout=PIPE, expect=None)
+
             out = p.communicate()[0]
             assert p.returncode == 0, \
                 "qdstat exit status %s, output:\n%s" % (p.returncode, out)
             if regexp: assert re.search(regexp, out, re.I), "Can't find '%s' in '%s'" % (regexp, out)
             return out
 
-        def ssl_test(self, url_name, arg_names):
-            """Run simple SSL connection test with supplied parameters.
-            See test_ssl_* below.
-            """
+        def get_ssl_args(self):
             args = dict(
                 trustfile = ['--ssl-trustfile', self.ssl_file('ca-certificate.pem')],
                 bad_trustfile = ['--ssl-trustfile', self.ssl_file('bad-ca-certificate.pem')],
@@ -134,6 +134,13 @@ try:
                 client_pass = ['--ssl-password', 'client-password'])
             args['client_cert_all'] = args['client_cert'] + args['client_key'] + args['client_pass']
 
+            return args
+
+        def ssl_test(self, url_name, arg_names):
+            """Run simple SSL connection test with supplied parameters.
+            See test_ssl_* below.
+            """
+            args = self.get_ssl_args()
             addrs = [self.router.addresses[i] for i in xrange(4)];
             urls = dict(zip(['none', 'strict', 'unsecured', 'auth'], addrs) +
                         zip(['none_s', 'strict_s', 'unsecured_s', 'auth_s'],
@@ -220,6 +227,27 @@ except SSLUnavailable:
         def test_skip(self):
             self.skipTest("Proton SSL support unavailable.")
 
+try:
+    SSLDomain(SSLDomain.MODE_CLIENT)
+    class QdstatSslTestSslPasswordFile(QdstatSslTest):
+        """
+        Tests the --ssl-password-file command line parameter
+        """
+        def get_ssl_args(self):
+            args = dict(
+                trustfile = ['--ssl-trustfile', self.ssl_file('ca-certificate.pem')],
+                bad_trustfile = ['--ssl-trustfile', self.ssl_file('bad-ca-certificate.pem')],
+                client_cert = ['--ssl-certificate', self.ssl_file('client-certificate.pem')],
+                client_key = ['--ssl-key', self.ssl_file('client-private-key.pem')],
+                client_pass = ['--ssl-password-file', self.ssl_file('client-password-file.txt')])
+            args['client_cert_all'] = args['client_cert'] + args['client_key'] + args['client_pass']
+
+            return args
+
+except SSLUnavailable:
+    class QdstatSslTest(system_test.TestCase):
+        def test_skip(self):
+            self.skipTest("Proton SSL support unavailable.")
 
 try:
     SSLDomain(SSLDomain.MODE_CLIENT)
@@ -246,15 +274,15 @@ try:
                             'saslConfigPath': os.getcwd(),
                             'workerThreads': 1,
                             'saslConfigName': 'tests-mech-NOEXTERNAL'}),
-                ('ssl-profile', {'name': 'server-ssl',
-                                 'cert-db': cls.ssl_file('ca-certificate.pem'),
-                                 'cert-file': cls.ssl_file('server-certificate.pem'),
-                                 'key-file': cls.ssl_file('server-private-key.pem'),
+                ('sslProfile', {'name': 'server-ssl',
+                                 'certDb': cls.ssl_file('ca-certificate.pem'),
+                                 'certFile': cls.ssl_file('server-certificate.pem'),
+                                 'keyFile': cls.ssl_file('server-private-key.pem'),
                                  'password': 'server-password'}),
                 ('listener', {'port': cls.tester.get_port()}),
-                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl', 'authenticatePeer': 'no', 'requireSsl': 'yes'}),
-                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl', 'authenticatePeer': 'no', 'requireSsl': 'no'}),
-                ('listener', {'port': cls.tester.get_port(), 'ssl-profile': 'server-ssl', 'authenticatePeer': 'yes', 'requireSsl': 'yes',
+                ('listener', {'port': cls.tester.get_port(), 'sslProfile': 'server-ssl', 'authenticatePeer': 'no', 'requireSsl': 'yes'}),
+                ('listener', {'port': cls.tester.get_port(), 'sslProfile': 'server-ssl', 'authenticatePeer': 'no', 'requireSsl': 'no'}),
+                ('listener', {'port': cls.tester.get_port(), 'sslProfile': 'server-ssl', 'authenticatePeer': 'yes', 'requireSsl': 'yes',
                               'saslMechanisms': 'EXTERNAL'})
             ])
             cls.router = cls.tester.qdrouterd('test-router', config)

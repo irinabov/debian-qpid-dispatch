@@ -24,6 +24,7 @@
 
 static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
+static void qdr_link_check_credit_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_send_to_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_update_delivery_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 
@@ -43,12 +44,13 @@ qdr_delivery_t *qdr_link_deliver(qdr_link_t *link, qd_message_t *msg, qd_field_i
     qdr_delivery_t *dlv    = new_qdr_delivery_t();
 
     ZERO(dlv);
-    dlv->ref_count      = 1;    // referenced by the action
+    sys_atomic_init(&dlv->ref_count, 1); // referenced by the action
     dlv->link           = link;
     dlv->msg            = msg;
     dlv->to_addr        = 0;
     dlv->origin         = ingress;
     dlv->settled        = settled;
+    dlv->presettled     = settled;
     dlv->link_exclusion = link_exclusion;
 
     action->args.connection.delivery = dlv;
@@ -65,12 +67,13 @@ qdr_delivery_t *qdr_link_deliver_to(qdr_link_t *link, qd_message_t *msg,
     qdr_delivery_t *dlv    = new_qdr_delivery_t();
 
     ZERO(dlv);
-    dlv->ref_count      = 1;    // referenced by the action
+    sys_atomic_init(&dlv->ref_count, 1); // referenced by the action
     dlv->link           = link;
     dlv->msg            = msg;
     dlv->to_addr        = addr;
     dlv->origin         = ingress;
     dlv->settled        = settled;
+    dlv->presettled     = settled;
     dlv->link_exclusion = link_exclusion;
 
     action->args.connection.delivery = dlv;
@@ -89,10 +92,11 @@ qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *
     qdr_delivery_t *dlv    = new_qdr_delivery_t();
 
     ZERO(dlv);
-    dlv->ref_count = 1;    // referenced by the action
-    dlv->link      = link;
-    dlv->msg       = msg;
-    dlv->settled   = settled;
+    sys_atomic_init(&dlv->ref_count, 1); // referenced by the action
+    dlv->link       = link;
+    dlv->msg        = msg;
+    dlv->settled    = settled;
+    dlv->presettled = settled;
 
     action->args.connection.delivery = dlv;
     action->args.connection.tag_length = tag_length;
@@ -184,6 +188,14 @@ void qdr_link_flow(qdr_core_t *core, qdr_link_t *link, int credit, bool drain_mo
 }
 
 
+void qdr_link_check_credit(qdr_core_t *core, qdr_link_t *link)
+{
+    qdr_action_t *action = qdr_action(qdr_link_check_credit_CT, "link_check_credit");
+    action->args.connection.link = link;
+    qdr_action_enqueue(core, action);
+}
+
+
 void qdr_send_to1(qdr_core_t *core, qd_message_t *msg, qd_field_iterator_t *addr, bool exclude_inprocess, bool control)
 {
     qdr_action_t *action = qdr_action(qdr_send_to_CT, "send_to");
@@ -239,39 +251,70 @@ void *qdr_delivery_get_context(qdr_delivery_t *delivery)
     return delivery->context;
 }
 
-
 void qdr_delivery_incref(qdr_delivery_t *delivery)
 {
     qdr_connection_t *conn = delivery->link ? delivery->link->conn : 0;
 
     if (!!conn) {
-        sys_mutex_lock(conn->work_lock);
-        delivery->ref_count++;
-        sys_mutex_unlock(conn->work_lock);
+        sys_atomic_inc(&delivery->ref_count);
+    }
+}
+
+
+static void qdr_delivery_decref_internal(qdr_delivery_t *delivery, bool lock_held)
+{
+    qdr_link_t       *link   = delivery->link;
+    qdr_connection_t *conn   = link ? link->conn : 0;
+    bool              delete = false;
+    
+    if (!!conn) {
+        uint32_t ref_count = sys_atomic_dec(&delivery->ref_count);
+        assert(ref_count > 0);
+        delete = (ref_count - 1) == 0;
+    }
+
+    if (delete) {
+        if (delivery->msg)
+            qd_message_free(delivery->msg);
+
+        if (delivery->to_addr)
+            qd_field_iterator_free(delivery->to_addr);
+
+        if (delivery->tracking_addr) {
+            int link_bit = conn->mask_bit;
+            delivery->tracking_addr->outstanding_deliveries[link_bit]--;
+            delivery->tracking_addr->tracked_deliveries--;
+            delivery->tracking_addr = 0;
+        }
+
+        if (link) {
+            if (delivery->presettled)
+                link->presettled_deliveries++;
+            else if (delivery->disposition == PN_ACCEPTED)
+                link->accepted_deliveries++;
+            else if (delivery->disposition == PN_REJECTED)
+                link->rejected_deliveries++;
+            else if (delivery->disposition == PN_RELEASED)
+                link->released_deliveries++;
+            else if (delivery->disposition == PN_MODIFIED)
+                link->modified_deliveries++;
+        }
+
+        qd_bitmask_free(delivery->link_exclusion);
+        free_qdr_delivery_t(delivery);
     }
 }
 
 
 void qdr_delivery_decref(qdr_delivery_t *delivery)
 {
-    qdr_connection_t *conn   = delivery->link ? delivery->link->conn : 0;
-    bool              delete = false;
-    
-    if (!!conn) {
-        sys_mutex_lock(conn->work_lock);
-        assert(delivery->ref_count > 0);
-        delete = --delivery->ref_count == 0;
-        sys_mutex_unlock(conn->work_lock);
-    }
+    qdr_delivery_decref_internal(delivery, false);
+}
 
-    if (delete) {
-        if (delivery->msg)
-            qd_message_free(delivery->msg);
-        if (delivery->to_addr)
-            qd_field_iterator_free(delivery->to_addr);
-        qd_bitmask_free(delivery->link_exclusion);
-        free_qdr_delivery_t(delivery);
-    }
+
+void qdr_delivery_decref_LH(qdr_delivery_t *delivery)
+{
+    qdr_delivery_decref_internal(delivery, true);
 }
 
 
@@ -430,8 +473,46 @@ static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discar
 }
 
 
-static int qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery_t *dlv, qdr_address_t *addr)
+static void qdr_link_check_credit_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
 {
+    if (discard)
+        return;
+
+    qdr_link_t *link = action->args.connection.link;
+    qdr_link_issue_credit_CT(core, link, 0, false);
+}
+
+
+/**
+ * Return the number of outbound paths to destinations that this address has.
+ * Note that even if there are more than zero paths, the destination still may
+ * be unreachable (e.g. an rnode next hop with no link).
+ */
+static long qdr_addr_path_count_CT(qdr_address_t *addr)
+{
+    return (long) DEQ_SIZE(addr->subscriptions) + (long) DEQ_SIZE(addr->rlinks) +
+        (long) qd_bitmask_cardinality(addr->rnodes);
+}
+
+
+static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery_t *dlv, qdr_address_t *addr)
+{
+    if (addr && addr == link->owning_addr && qdr_addr_path_count_CT(addr) == 0) {
+        //
+        // We are trying to forward a delivery on an address that has no outbound paths
+        // AND the incoming link is targeted (not anonymous).  In this case, we must put
+        // the delivery on the incoming link's undelivered list.  Note that it is safe
+        // to do this because the undelivered list will be flushed once the number of
+        // paths transitions from zero to one.
+        //
+        // Use the action-reference as the reference for undelivered rather
+        // than decrementing and incrementing the delivery ref_count.
+        //
+        DEQ_INSERT_TAIL(link->undelivered, dlv);
+        dlv->where = QDR_DELIVERY_IN_UNDELIVERED;
+        return;
+    }
+
     int fanout = 0;
 
     if (addr) {
@@ -442,26 +523,15 @@ static int qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery_
     }
 
     if (fanout == 0) {
-        if (link->owning_addr) {
-            //
-            // Message was not delivered and the link is not anonymous.
-            // Queue the message for later delivery (when the address gets
-            // a valid destination).
-            //
-            // Use the action-reference as the reference for undelivered rather
-            // than decrementing and incrementing the delivery ref_count.
-            //
-            DEQ_INSERT_TAIL(link->undelivered, dlv);
-            dlv->where = QDR_DELIVERY_IN_UNDELIVERED;
-        } else {
-            //
-            // Release the delivery
-            //
+        //
+        // Message was not delivered, drop the delivery.
+        //
+        // If the delivery is not settled, release it.
+        //
+        if (!dlv->settled)
             qdr_delivery_release_CT(core, dlv);
-            qdr_delivery_decref(dlv);
-            if (link->link_type == QD_LINK_ROUTER)
-                qdr_link_issue_credit_CT(core, link, 1, false);
-        }
+        qdr_delivery_decref(dlv);
+        qdr_link_issue_credit_CT(core, link, 1, false);
     } else if (fanout > 0) {
         if (dlv->settled) {
             //
@@ -492,8 +562,6 @@ static int qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery_
                 qdr_link_issue_credit_CT(core, link, 1, false);
         }
     }
-
-    return fanout;
 }
 
 
@@ -714,7 +782,7 @@ void qdr_addr_start_inlinks_CT(qdr_core_t *core, qdr_address_t *addr)
     if (DEQ_SIZE(addr->inlinks) == 0)
         return;
 
-    if (DEQ_SIZE(addr->subscriptions) + DEQ_SIZE(addr->rlinks) + qd_bitmask_cardinality(addr->rnodes) == 1) {
+    if (qdr_addr_path_count_CT(addr) == 1) {
         qdr_link_ref_t *ref = DEQ_HEAD(addr->inlinks);
         while (ref) {
             qdr_link_t *link = ref->link;
@@ -761,7 +829,7 @@ void qdr_delivery_push_CT(qdr_core_t *core, qdr_delivery_t *dlv)
 
     sys_mutex_lock(link->conn->work_lock);
     if (dlv->where != QDR_DELIVERY_IN_UNDELIVERED) {
-        dlv->ref_count++; // We have the lock, don't use the incref function
+        sys_atomic_inc(&dlv->ref_count);
         qdr_add_delivery_ref(&link->updated_deliveries, dlv);
         qdr_add_link_ref(&link->conn->links_with_deliveries, link, QDR_LINK_LIST_CLASS_DELIVERY);
         activate = true;
