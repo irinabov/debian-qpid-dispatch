@@ -11,7 +11,7 @@ Build-Depends: debhelper (>= 9),
                dblatex,
                libqpid-proton10-dev (>= 0.17.0),
                python-qpid-proton (>= 0.17.0),
-               openssl-dev,
+               libssl-dev,
                libwebsockets-dev (>= 2.1.0)
 Standards-Version: 3.9.7
 Homepage: http://qpid.apache.org/components/dispatch-router
