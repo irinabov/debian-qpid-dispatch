@@ -12,8 +12,8 @@ override_dh_auto_configure:
 	dh_auto_configure -- -DCMAKE_BUILD_TYPE=RelWithDebInfo \
                              -DLIB_INSTALL_DIR:PATH=/usr/lib/${DEB_HOST_MULTIARCH}
 
-override_dh_auto_build:
-	dh_auto_build -- doc
+#override_dh_auto_build:
+#	dh_auto_build -- doc
 
 override_dh_auto_install:
 	dh_auto_install
