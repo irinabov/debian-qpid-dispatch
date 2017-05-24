@@ -1,6 +1,8 @@
-qpid-dispatch (0.7.0-5qpid+xenial1) xenial; urgency=medium
+qpid-dispatch (0.7.0-6qpid+xenial1) xenial; urgency=medium
 
   * Rebased to Dispatch 0.7.0
+  * Can't build manpages in PPA/testing, removing them from build for now
+
  -- Irina Boverman <iboverma@redhat.com>  Fri, 19 May 2017 14:58:45 -0400
 
 qpid-dispatch (0.6.1-3qpid+xenial1) xenial; urgency=medium
