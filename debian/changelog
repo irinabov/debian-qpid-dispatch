@@ -1,4 +1,4 @@
-qpid-dispatch (0.7.0-6qpid+xenial1) xenial; urgency=medium
+qpid-dispatch (0.7.0-7qpid+xenial1) xenial; urgency=medium
 
   * Rebased to Dispatch 0.7.0
   * Can't build manpages in PPA/testing, removing them from build for now
