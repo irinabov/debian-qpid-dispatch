@@ -20,7 +20,7 @@ Package: qdrouterd
 Architecture: any
 Depends: libqpid-proton10,
          adduser,
-         libwebsockets,
+         libwebsockets7,
          ${shlibs:Depends}, ${misc:Depends}
 Pre-Depends: ${misc:Pre-Depends}
 Replaces:    libqpid-dispatch1, libqpid-dispatch1-dev
