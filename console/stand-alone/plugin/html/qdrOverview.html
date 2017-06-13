@@ -17,11 +17,9 @@ specific language governing permissions and limitations
 under the License.
 -->
 <div id="overview-controller" ng-controller="QDR.OverviewController" ng-include="tmplOverviewTree"></div>
-
 <script type="text/ng-template" id="overviewGrid.html">
     <div class="gridDetails" ng-include="template.url"></div>
 </script>
-
 
 <!-- the following scripts are content that gets loaded into the above div that has the temple.url -->
 <script type="text/ng-template" id="routers.html">
@@ -50,7 +48,7 @@ under the License.
 <script type="text/ng-template" id="address.html">
     <div class="row-fluid">
         <ul class="nav nav-tabs">
-            <li ng-repeat="mode in gridModes" ng-click="selectMode(mode,'Address')" ng-class="{active : isModeSelected(mode,'Address')}" title="{{mode.title}}" ng-bind-html-unsafe="mode.content"> </li>
+            <li ng-repeat="mode in gridModes" ng-click="selectMode(mode,'Address')" ng-class="{active : isModeSelected(mode,'Address')}" title="{{mode.title}}" ng-bind-html="mode.content"> </li>
         </ul>
         <div ng-if="isModeVisible('Address','attributes')" class="selectedItems">
             <h3>Address {{address.data.title}}</h3>
@@ -96,7 +94,7 @@ under the License.
 <script type="text/ng-template" id="connection.html">
     <div class="row-fluid">
         <ul class="nav nav-tabs">
-            <li ng-repeat="mode in gridModes" ng-click="selectMode(mode,'Connection')" ng-class="{active : isModeSelected(mode,'Connection')}" title="{{mode.title}}" ng-bind-html-unsafe="mode.content"> </li>
+            <li ng-repeat="mode in gridModes" ng-click="selectMode(mode,'Connection')" ng-class="{active : isModeSelected(mode,'Connection')}" title="{{mode.title}}" ng-bind-html="mode.content"> </li>
         </ul>
         <div ng-if="isModeVisible('Connection','attributes')" class="selectedItems">
             <h3>Connection {{connection.data.title}}</h3>
@@ -122,9 +120,17 @@ under the License.
 </script>
 <script type="text/ng-template" id="logs.html">
     <div class="row-fluid">
-        <h3>Recent log entries</h3>
+        <h3>Recent log events</h3>
         <div class="overview">
             <div class="gridStyle" ng-grid="allLogGrid"></div>
+        </div>
+    </div>
+</script>
+<script type="text/ng-template" id="logModule.html">
+    <div class="row-fluid">
+        <h3>{{logModule.module}} events</h3>
+        <div class="overview-cell">
+            <div class="gridStyle" ng-grid="logModuleGrid"></div>
         </div>
     </div>
 </script>
@@ -166,5 +172,38 @@ under the License.
             {{row.label CUSTOM_FILTERS}} ({{row.totalChildren()}} {{AggItemsLabel}})
         </span>
     <div ng-class="{true: 'ngAggArrowCollapsed', false: 'ngAggArrowExpanded'}[row.collapsed]"></div>
+    </div>
+</script>
+
+<script type="text/ng-template" id="viewLogs.html">
+    <div class="modal-header">
+        <h3 class="modal-title">Logs for {{nodeName}} {{module}}:{{level | humanify}}</h3>
+    </div>
+    <div class="modal-body">
+        <div ng-if="loading == false">
+            <div class="log-details" ng-if="logFields.length > 0">
+                <table class="log-entry" ng-repeat="entry in logFields track by $index">
+                    <tr>
+                        <td>Router</td><td>{{entry.nodeId}}</td>
+                    </tr>
+                    <tr>
+                        <td align="left" colspan="2">{{entry.time}}</td>
+                    </tr>
+                    <tr>
+                        <td>Source</td><td>{{entry.source}}:{{entry.line}}</td>
+                    </tr>
+                    <tr>
+                        <td valign="middle">Message</td><td valign="middle"><pre>{{entry.message}}</pre></td>
+                    </tr>
+                </table>
+            </div>
+            <div ng-if="logFields.length == 0">No log entries</div>
+        </div>
+        <div ng-if="loading == true">
+            Loading...
+        </div>
+    </div>
+    <div class="modal-footer">
+        <button class="btn btn-primary" type="button" ng-click="ok()">Close</button>
     </div>
 </script>

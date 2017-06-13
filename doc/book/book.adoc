@@ -24,6 +24,7 @@ Qpid Dispatch Router Book
 :doctype: book
 
 include::introduction.adoc[]
+include::theory_of_operation.adoc[]
 
 [[using-qpid-dispatch]]
 Using Qpid Dispatch
@@ -54,7 +55,7 @@ Technical Details and Specifications
 include::client_compatibility.adoc[]
 include::addressing.adoc[]
 include::amqp-mapping.adoc[]
-include::{generated}/schema.adoc[]
+include::{generated_book}/schema.adoc[]
 
 :leveloffset: 0
 

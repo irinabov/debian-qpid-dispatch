@@ -18,6 +18,7 @@
  */
 
 #include "router_core_private.h"
+#include <strings.h>
 
 struct qdr_terminus_t {
     qdr_field_t            *address;
@@ -25,6 +26,7 @@ struct qdr_terminus_t {
     pn_expiry_policy_t      expiry_policy;
     pn_seconds_t            timeout;
     bool                    dynamic;
+    bool                    coordinator;
     pn_distribution_mode_t  distribution_mode;
     pn_data_t              *properties;
     pn_data_t              *filter;
@@ -35,11 +37,14 @@ struct qdr_terminus_t {
 ALLOC_DECLARE(qdr_terminus_t);
 ALLOC_DEFINE(qdr_terminus_t);
 
+const char* QDR_COORDINATOR_ADDRESS = "$coordinator";
+
 qdr_terminus_t *qdr_terminus(pn_terminus_t *pn)
 {
     qdr_terminus_t *term = new_qdr_terminus_t();
     ZERO(term);
 
+    term->coordinator = false;
     term->properties   = pn_data(0);
     term->filter       = pn_data(0);
     term->outcomes     = pn_data(0);
@@ -47,6 +52,10 @@ qdr_terminus_t *qdr_terminus(pn_terminus_t *pn)
 
     if (pn) {
         const char *addr = pn_terminus_get_address(pn);
+        if (pn_terminus_get_type(pn) == PN_COORDINATOR) {
+            addr = QDR_COORDINATOR_ADDRESS;
+            term->coordinator = true;
+        }
         if (addr && *addr)
             term->address = qdr_field(addr);
 
@@ -85,24 +94,28 @@ void qdr_terminus_copy(qdr_terminus_t *from, pn_terminus_t *to)
 {
     if (!from)
         return;
+    if (from->coordinator) {
+        pn_terminus_set_type(to, PN_COORDINATOR);
+        pn_data_copy(pn_terminus_capabilities(to), from->capabilities);
+    } else {
+        if (from->address) {
+            qd_iterator_reset_view(from->address->iterator, ITER_VIEW_ALL);
+            unsigned char *addr = qd_iterator_copy(from->address->iterator);
+            pn_terminus_set_address(to, (char*) addr);
+            free(addr);
+        }
 
-    if (from->address) {
-        qd_address_iterator_reset_view(from->address->iterator, ITER_VIEW_ALL);
-        unsigned char *addr = qd_field_iterator_copy(from->address->iterator);
-        pn_terminus_set_address(to, (char*) addr);
-        free(addr);
+        pn_terminus_set_durability(to,        from->durability);
+        pn_terminus_set_expiry_policy(to,     from->expiry_policy);
+        pn_terminus_set_timeout(to,           from->timeout);
+        pn_terminus_set_dynamic(to,           from->dynamic);
+        pn_terminus_set_distribution_mode(to, from->distribution_mode);
+
+        pn_data_copy(pn_terminus_properties(to),   from->properties);
+        pn_data_copy(pn_terminus_filter(to),       from->filter);
+        pn_data_copy(pn_terminus_outcomes(to),     from->outcomes);
+        pn_data_copy(pn_terminus_capabilities(to), from->capabilities);
     }
-
-    pn_terminus_set_durability(to,        from->durability);
-    pn_terminus_set_expiry_policy(to,     from->expiry_policy);
-    pn_terminus_set_timeout(to,           from->timeout);
-    pn_terminus_set_dynamic(to,           from->dynamic);
-    pn_terminus_set_distribution_mode(to, from->distribution_mode);
-
-    pn_data_copy(pn_terminus_properties(to),   from->properties);
-    pn_data_copy(pn_terminus_filter(to),       from->filter);
-    pn_data_copy(pn_terminus_outcomes(to),     from->outcomes);
-    pn_data_copy(pn_terminus_capabilities(to), from->capabilities);
 }
 
 
@@ -129,7 +142,7 @@ bool qdr_terminus_has_capability(qdr_terminus_t *term, const char *capability)
 
 bool qdr_terminus_is_anonymous(qdr_terminus_t *term)
 {
-    return term == 0 || term->address == 0;
+    return term == 0 || (term->address == 0 && !term->dynamic);
 }
 
 
@@ -146,7 +159,15 @@ void qdr_terminus_set_address(qdr_terminus_t *term, const char *addr)
 }
 
 
-qd_field_iterator_t *qdr_terminus_get_address(qdr_terminus_t *term)
+void qdr_terminus_set_address_iterator(qdr_terminus_t *term, qd_iterator_t *addr)
+{
+    qdr_field_t *old = term->address;
+    term->address = qdr_field_from_iter(addr);
+    qdr_field_free(old);
+}
+
+
+qd_iterator_t *qdr_terminus_get_address(qdr_terminus_t *term)
 {
     if (qdr_terminus_is_anonymous(term))
         return 0;
@@ -155,10 +176,9 @@ qd_field_iterator_t *qdr_terminus_get_address(qdr_terminus_t *term)
 }
 
 
-qd_field_iterator_t *qdr_terminus_dnp_address(qdr_terminus_t *term)
+qd_iterator_t *qdr_terminus_dnp_address(qdr_terminus_t *term)
 {
     pn_data_t *props = term->properties;
-
     if (!props)
         return 0;
 
@@ -169,7 +189,7 @@ qd_field_iterator_t *qdr_terminus_dnp_address(qdr_terminus_t *term)
             if (pn_data_next(props)) {
                 pn_bytes_t val = pn_data_get_string(props);
                 if (val.start && *val.start != '\0')
-                    return qd_field_iterator_binary(val.start, val.size);
+                    return qd_iterator_binary(val.start, val.size, ITER_VIEW_ALL);
             }
         }
     }
@@ -177,4 +197,38 @@ qd_field_iterator_t *qdr_terminus_dnp_address(qdr_terminus_t *term)
     return 0;
 }
 
+
+void qdr_terminus_set_dnp_address_iterator(qdr_terminus_t *term, qd_iterator_t *iter)
+{
+    char       buffer[1001];
+    char      *text    = buffer;
+    bool       on_heap = false;
+    pn_data_t *old     = term->properties;
+    size_t     len;
+
+    if (!old)
+        return;
+
+    if (qd_iterator_length(iter) < 1000) {
+        len = qd_iterator_ncopy(iter, (unsigned char*) text, 1000);
+        text[len] = '\0';
+    } else {
+        text    = (char*) qd_iterator_copy(iter);
+        on_heap = true;
+        len = strlen(text);
+    }
+
+    pn_data_t *new = pn_data(pn_data_size(old));
+    pn_data_put_map(new);
+    pn_data_enter(new);
+    pn_data_put_symbol(new, pn_bytes(strlen(QD_DYNAMIC_NODE_PROPERTY_ADDRESS), QD_DYNAMIC_NODE_PROPERTY_ADDRESS));
+    pn_data_put_string(new, pn_bytes(len, text));
+    pn_data_exit(new);
+
+    term->properties = new;
+    pn_data_free(old);
+
+    if (on_heap)
+        free(text);
+}
 

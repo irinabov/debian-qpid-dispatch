@@ -31,9 +31,10 @@
 #define QDR_CONFIG_AUTO_LINK_PHASE         5
 #define QDR_CONFIG_AUTO_LINK_CONNECTION    6
 #define QDR_CONFIG_AUTO_LINK_CONTAINER_ID  7
-#define QDR_CONFIG_AUTO_LINK_LINK_REF      8
-#define QDR_CONFIG_AUTO_LINK_OPER_STATUS   9
-#define QDR_CONFIG_AUTO_LINK_LAST_ERROR    10
+#define QDR_CONFIG_AUTO_LINK_EXT_ADDR      8
+#define QDR_CONFIG_AUTO_LINK_LINK_REF      9
+#define QDR_CONFIG_AUTO_LINK_OPER_STATUS   10
+#define QDR_CONFIG_AUTO_LINK_LAST_ERROR    11
 
 const char *qdr_config_auto_link_columns[] =
     {"name",
@@ -44,6 +45,7 @@ const char *qdr_config_auto_link_columns[] =
      "phase",
      "connection",
      "containerId",
+     "externalAddr",
      "linkRef",
      "operStatus",
      "lastError",
@@ -97,7 +99,10 @@ static void qdr_config_auto_link_insert_column_CT(qdr_auto_link_t *al, int col, 
     case QDR_CONFIG_AUTO_LINK_CONNECTION:
     case QDR_CONFIG_AUTO_LINK_CONTAINER_ID:
         if (al->conn_id) {
-            key = (const char*) qd_hash_key_by_handle(al->conn_id->hash_handle);
+            key = (const char*) qd_hash_key_by_handle(al->conn_id->connection_hash_handle);
+            if (!key)
+                key = (const char*) qd_hash_key_by_handle(al->conn_id->container_hash_handle);
+
             if (key && key[0] == 'L' && col == QDR_CONFIG_AUTO_LINK_CONNECTION) {
                 qd_compose_insert_string(body, &key[1]);
                 break;
@@ -108,6 +113,13 @@ static void qdr_config_auto_link_insert_column_CT(qdr_auto_link_t *al, int col, 
             }
         }
         qd_compose_insert_null(body);
+        break;
+
+    case QDR_CONFIG_AUTO_LINK_EXT_ADDR:
+        if (al->external_addr)
+            qd_compose_insert_string(body, al->external_addr);
+        else
+            qd_compose_insert_null(body);
         break;
 
     case QDR_CONFIG_AUTO_LINK_LINK_REF:
@@ -241,11 +253,11 @@ void qdra_config_auto_link_get_next_CT(qdr_core_t *core, qdr_query_t *query)
 static const char *qdra_auto_link_direction_CT(qd_parsed_field_t *field, qd_direction_t *dir)
 {
     if (field) {
-        qd_field_iterator_t *iter = qd_parse_raw(field);
-        if (qd_field_iterator_equal(iter, (unsigned char*) "in")) {
+        qd_iterator_t *iter = qd_parse_raw(field);
+        if (qd_iterator_equal(iter, (unsigned char*) "in")) {
             *dir = QD_INCOMING;
             return 0;
-        } else if (qd_field_iterator_equal(iter, (unsigned char*) "out")) {
+        } else if (qd_iterator_equal(iter, (unsigned char*) "out")) {
             *dir = QD_OUTGOING;
             return 0;
         }
@@ -255,7 +267,7 @@ static const char *qdra_auto_link_direction_CT(qd_parsed_field_t *field, qd_dire
 }
 
 
-static qdr_auto_link_t *qdr_auto_link_config_find_by_identity_CT(qdr_core_t *core, qd_field_iterator_t *identity)
+static qdr_auto_link_t *qdr_auto_link_config_find_by_identity_CT(qdr_core_t *core, qd_iterator_t *identity)
 {
     if (!identity)
         return 0;
@@ -265,7 +277,7 @@ static qdr_auto_link_t *qdr_auto_link_config_find_by_identity_CT(qdr_core_t *cor
         // Convert the passed in identity to a char*
         char id[100];
         snprintf(id, 100, "%"PRId64, rc->identity);
-        if (qd_field_iterator_equal(identity, (const unsigned char*) id))
+        if (qd_iterator_equal(identity, (const unsigned char*) id))
             break;
         rc = DEQ_NEXT(rc);
     }
@@ -275,14 +287,14 @@ static qdr_auto_link_t *qdr_auto_link_config_find_by_identity_CT(qdr_core_t *cor
 }
 
 
-static qdr_auto_link_t *qdr_auto_link_config_find_by_name_CT(qdr_core_t *core, qd_field_iterator_t *name)
+static qdr_auto_link_t *qdr_auto_link_config_find_by_name_CT(qdr_core_t *core, qd_iterator_t *name)
 {
     if (!name)
         return 0;
 
     qdr_auto_link_t *rc = DEQ_HEAD(core->auto_links);
     while (rc) { // Sometimes the name can be null
-        if (rc->name && qd_field_iterator_equal(name, (const unsigned char*) rc->name))
+        if (rc->name && qd_iterator_equal(name, (const unsigned char*) rc->name))
             break;
         rc = DEQ_NEXT(rc);
     }
@@ -291,10 +303,10 @@ static qdr_auto_link_t *qdr_auto_link_config_find_by_name_CT(qdr_core_t *core, q
 }
 
 
-void qdra_config_auto_link_delete_CT(qdr_core_t          *core,
-                                      qdr_query_t         *query,
-                                      qd_field_iterator_t *name,
-                                      qd_field_iterator_t *identity)
+void qdra_config_auto_link_delete_CT(qdr_core_t    *core,
+                                     qdr_query_t   *query,
+                                     qd_iterator_t *name,
+                                     qd_iterator_t *identity)
 {
     qdr_auto_link_t *al = 0;
 
@@ -322,10 +334,10 @@ void qdra_config_auto_link_delete_CT(qdr_core_t          *core,
     qdr_agent_enqueue_response_CT(core, query);
 }
 
-void qdra_config_auto_link_create_CT(qdr_core_t          *core,
-                                      qd_field_iterator_t *name,
-                                      qdr_query_t         *query,
-                                      qd_parsed_field_t   *in_body)
+void qdra_config_auto_link_create_CT(qdr_core_t        *core,
+                                     qd_iterator_t     *name,
+                                     qdr_query_t       *query,
+                                     qd_parsed_field_t *in_body)
 {
     while (true) {
         //
@@ -333,7 +345,7 @@ void qdra_config_auto_link_create_CT(qdr_core_t          *core,
         //
         qdr_auto_link_t *al = DEQ_HEAD(core->auto_links);
         while (al) {
-            if (name && al->name && qd_field_iterator_equal(name, (const unsigned char*) al->name))
+            if (name && al->name && qd_iterator_equal(name, (const unsigned char*) al->name))
                 break;
             al = DEQ_NEXT(al);
         }
@@ -360,6 +372,15 @@ void qdra_config_auto_link_create_CT(qdr_core_t          *core,
         qd_parsed_field_t *phase_field      = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_PHASE]);
         qd_parsed_field_t *connection_field = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_CONNECTION]);
         qd_parsed_field_t *container_field  = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_CONTAINER_ID]);
+        qd_parsed_field_t *external_addr    = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_EXT_ADDR]);
+
+        if (connection_field && container_field) {
+            query->status = QD_AMQP_BAD_REQUEST;
+            query->status.description = "Both connection and containerId cannot be specified. Specify only one";
+            qd_log(core->agent_log, QD_LOG_ERROR, "Error performing CREATE of %s: %s", CONFIG_AUTOLINK_TYPE, query->status.description);
+            break;
+        }
+
 
         //
         // Addr and dir fields are mandatory.  Fail if they're not both here.
@@ -399,10 +420,7 @@ void qdra_config_auto_link_create_CT(qdr_core_t          *core,
         //
         // The request is good.  Create the entity.
         //
-        bool               is_container = !!container_field;
-        qd_parsed_field_t *in_use_conn  = is_container ? container_field : connection_field;
-
-        al = qdr_route_add_auto_link_CT(core, name, addr_field, dir, phase, in_use_conn, is_container);
+        al = qdr_route_add_auto_link_CT(core, name, addr_field, dir, phase, container_field, connection_field, external_addr);
 
         //
         // Compose the result map for the response.
@@ -453,11 +471,11 @@ static void qdr_manage_write_config_auto_link_map_CT(qdr_core_t          *core,
 }
 
 
-void qdra_config_auto_link_get_CT(qdr_core_t        *core,
-                                qd_field_iterator_t *name,
-                                qd_field_iterator_t *identity,
-                                qdr_query_t         *query,
-                                const char          *qdr_config_auto_link_columns[])
+void qdra_config_auto_link_get_CT(qdr_core_t    *core,
+                                  qd_iterator_t *name,
+                                  qd_iterator_t *identity,
+                                  qdr_query_t   *query,
+                                  const char    *qdr_config_auto_link_columns[])
 {
     qdr_auto_link_t *al = 0;
 

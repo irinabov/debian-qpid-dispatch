@@ -262,8 +262,9 @@ div.chartContainer div.aChart {
 }
 
 #list-controller select {
-	height: auto;
-	float: left;
+  height: 25px;
+  float: left;
+  padding: 0;
 }
 
 
@@ -294,6 +295,7 @@ div.qdr-overview.pane {
 }
 div.qdr-topology.pane.left {
 	width: auto;
+  /*border-right: 1px solid lightgray; */
 }
 
 /* the selected row in the name table */
@@ -301,8 +303,12 @@ div#main.qdr div.qdrList div.selected {
   background-color: #e0e0ff !important;
 }
 
-#dialogChart {
+#dialogChart, #dialogEditChart {
     height: 200px;
+}
+
+.chartOptions .modal-body {
+  overflow-y: initial;
 }
 
 div.qdrCharts p.chartLabels button {
@@ -449,6 +455,14 @@ ul.qdrTopoModes {
 .overview .ngRow:hover {
 	background:#e0e0ff;
 }
+
+.overview-cell .ngCell:hover {
+	background:#e0e0ff;
+}
+.overview-cell .ngCell.col0:hover, .overview-cell .ngCell.col1:hover {
+	background: initial;
+}
+
 
 .qdr-overview.pane.left, .qdr-attributes.pane.left {
 	top: 104px;
@@ -853,6 +867,9 @@ table.log-entry pre {
 circle.node.normal.console {
     fill: lightcyan;
 }
+circle.node.artemis {
+    fill: lightgreen;
+}
 
 text.console, text.on-demand, text.normal {
 	font-family: FontAwesome;
@@ -865,13 +882,13 @@ text.console, text.on-demand, text.normal {
     src: url("brokers.ttf") /* TTF file for CSS3 browsers */
 }
 
-text.artemis.on-demand {
+text.artemis {
     font-family: Brokers;
     font-size: 20px;
     font-weight: bold;
 }
 
-text.qpid-cpp.on-demand {
+text.qpid-cpp {
     font-family: Brokers;
     font-size: 18px;
     font-weight: bold;
@@ -919,4 +936,8 @@ div#durationSlider, div#rateSlider {
 
 div#list-controller {
     padding-left: 300px;
+}
+
+.listening-on {
+    background-color: #CCFFCC;
 }

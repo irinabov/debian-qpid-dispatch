@@ -19,6 +19,7 @@
 
 #include "router_core_private.h"
 #include <stdio.h>
+#include <strings.h>
 
 ALLOC_DEFINE(qdr_address_t);
 ALLOC_DEFINE(qdr_address_config_t);
@@ -29,7 +30,9 @@ ALLOC_DEFINE(qdr_link_t);
 ALLOC_DEFINE(qdr_router_ref_t);
 ALLOC_DEFINE(qdr_link_ref_t);
 ALLOC_DEFINE(qdr_general_work_t);
+ALLOC_DEFINE(qdr_link_work_t);
 ALLOC_DEFINE(qdr_connection_ref_t);
+ALLOC_DEFINE(qdr_connection_info_t);
 
 static void qdr_general_handler(void *context);
 
@@ -98,17 +101,59 @@ void qdr_core_free(qdr_core_t *core)
     //
     // Free the core resources
     //
-    qdr_core_unsubscribe(core->agent_subscription_mobile);
-    qdr_core_unsubscribe(core->agent_subscription_local);
     sys_thread_free(core->thread);
     sys_cond_free(core->action_cond);
     sys_mutex_free(core->action_lock);
     sys_mutex_free(core->work_lock);
     sys_mutex_free(core->id_lock);
     qd_timer_free(core->work_timer);
+    //we can't call qdr_core_unsubscribe on the subscriptions because the action processing thread has
+    //already been shut down. But, all the action would have done at this point is free the subscriptions
+    //so we just do that directly.
+    free(core->agent_subscription_mobile);
+    free(core->agent_subscription_local);
+
+    for (int i = 0; i <= QD_TREATMENT_LINK_BALANCED; ++i) {
+        if (core->forwarders[i]) {
+            free(core->forwarders[i]);
+        }
+    }
+
+    qdr_address_t *addr = 0;
+    while ( (addr = DEQ_HEAD(core->addrs)) ) {
+        qdr_core_remove_address(core, addr);
+    }
+    qdr_address_config_t *addr_config = 0;
+    while ( (addr_config = DEQ_HEAD(core->addr_config))) {
+        qdr_core_remove_address_config(core, addr_config);
+    }
+    qd_hash_free(core->addr_hash);
+
+    qd_hash_free(core->conn_id_hash);
+    //TODO what about the actual connection identifier objects?
+
+    qdr_node_t *rnode = 0;
+    while ( (rnode = DEQ_HEAD(core->routers)) ) {
+        qdr_router_node_free(core, rnode);
+    }
+
+    if (core->query_lock)                sys_mutex_free(core->query_lock);
+    if (core->routers_by_mask_bit)       free(core->routers_by_mask_bit);
+    if (core->control_links_by_mask_bit) free(core->control_links_by_mask_bit);
+    if (core->data_links_by_mask_bit)    free(core->data_links_by_mask_bit);
+    if (core->neighbor_free_mask)        qd_bitmask_free(core->neighbor_free_mask);
+
     free(core);
 }
 
+void qdr_router_node_free(qdr_core_t *core, qdr_node_t *rnode)
+{
+    qd_bitmask_free(rnode->valid_origins);
+    DEQ_REMOVE(core->routers, rnode);
+    core->routers_by_mask_bit[rnode->mask_bit] = 0;
+    core->cost_epoch++;
+    free_qdr_node_t(rnode);
+}
 
 ALLOC_DECLARE(qdr_field_t);
 ALLOC_DEFINE(qdr_field_t);
@@ -136,13 +181,13 @@ qdr_field_t *qdr_field(const char *text)
         DEQ_INSERT_TAIL(field->buffers, buf);
     }
 
-    field->iterator = qd_field_iterator_buffer(DEQ_HEAD(field->buffers), 0, ilength);
+    field->iterator = qd_iterator_buffer(DEQ_HEAD(field->buffers), 0, ilength, ITER_VIEW_ALL);
 
     return field;
 }
 
 
-qdr_field_t *qdr_field_from_iter(qd_field_iterator_t *iter)
+qdr_field_t *qdr_field_from_iter(qd_iterator_t *iter)
 {
     if (!iter)
         return 0;
@@ -153,24 +198,24 @@ qdr_field_t *qdr_field_from_iter(qd_field_iterator_t *iter)
     int          length;
 
     ZERO(field);
-    qd_field_iterator_reset(iter);
-    remaining = qd_field_iterator_remaining(iter);
+    qd_iterator_reset(iter);
+    remaining = qd_iterator_remaining(iter);
     length    = remaining;
     while (remaining) {
         buf = qd_buffer();
         size_t cap    = qd_buffer_capacity(buf);
-        int    copied = qd_field_iterator_ncopy(iter, qd_buffer_cursor(buf), cap);
+        int    copied = qd_iterator_ncopy(iter, qd_buffer_cursor(buf), cap);
         qd_buffer_insert(buf, copied);
         DEQ_INSERT_TAIL(field->buffers, buf);
-        remaining = qd_field_iterator_remaining(iter);
+        remaining = qd_iterator_remaining(iter);
     }
 
-    field->iterator = qd_field_iterator_buffer(DEQ_HEAD(field->buffers), 0, length);
+    field->iterator = qd_iterator_buffer(DEQ_HEAD(field->buffers), 0, length, ITER_VIEW_ALL);
 
     return field;
 }
 
-qd_field_iterator_t *qdr_field_iterator(qdr_field_t *field)
+qd_iterator_t *qdr_field_iterator(qdr_field_t *field)
 {
     if (!field)
         return 0;
@@ -182,7 +227,7 @@ qd_field_iterator_t *qdr_field_iterator(qdr_field_t *field)
 void qdr_field_free(qdr_field_t *field)
 {
     if (field) {
-        qd_field_iterator_free(field->iterator);
+        qd_iterator_free(field->iterator);
         qd_buffer_list_free_buffers(&field->buffers);
         free_qdr_field_t(field);
     }
@@ -194,7 +239,7 @@ char *qdr_field_copy(qdr_field_t *field)
     if (!field || !field->iterator)
         return 0;
 
-    return (char*) qd_field_iterator_copy(field->iterator);
+    return (char*) qd_iterator_copy(field->iterator);
 }
 
 
@@ -230,26 +275,56 @@ qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment
 
 qdr_address_t *qdr_add_local_address_CT(qdr_core_t *core, char aclass, const char *address, qd_address_treatment_t treatment)
 {
-    char                 addr_string[1000];
-    qdr_address_t       *addr = 0;
-    qd_field_iterator_t *iter = 0;
+    char           addr_string[1000];
+    qdr_address_t *addr = 0;
+    qd_iterator_t *iter = 0;
 
     snprintf(addr_string, sizeof(addr_string), "%c%s", aclass, address);
-    iter = qd_address_iterator_string(addr_string, ITER_VIEW_ALL);
+    iter = qd_iterator_string(addr_string, ITER_VIEW_ALL);
 
     qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
     if (!addr) {
         addr = qdr_address_CT(core, treatment);
         qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
-        DEQ_ITEM_INIT(addr);
         DEQ_INSERT_TAIL(core->addrs, addr);
         addr->block_deletion = true;
         addr->local = (aclass == 'L');
     }
-    qd_field_iterator_free(iter);
+    qd_iterator_free(iter);
     return addr;
 }
 
+void qdr_core_remove_address(qdr_core_t *core, qdr_address_t *addr)
+{
+    // Remove the address from the list and hash index
+    qd_hash_remove_by_handle(core->addr_hash, addr->hash_handle);
+    DEQ_REMOVE(core->addrs, addr);
+
+    // Free resources associated with this address
+    qd_hash_handle_free(addr->hash_handle);
+    qd_bitmask_free(addr->rnodes);
+    if (addr->treatment == QD_TREATMENT_ANYCAST_CLOSEST) {
+        qd_bitmask_free(addr->closest_remotes);
+    }
+    else if (addr->treatment == QD_TREATMENT_ANYCAST_BALANCED) {
+        free(addr->outstanding_deliveries);
+    }
+    free_qdr_address_t(addr);
+}
+
+void qdr_core_remove_address_config(qdr_core_t *core, qdr_address_config_t *addr)
+{
+    // Remove the address from the list and the hash index.
+    qd_hash_remove_by_handle(core->addr_hash, addr->hash_handle);
+    DEQ_REMOVE(core->addr_config, addr);
+
+    // Free resources associated with this address.
+    if (addr->name) {
+        free(addr->name);
+    }
+    qd_hash_handle_free(addr->hash_handle);
+    free_qdr_address_config_t(addr);
+}
 
 void qdr_add_link_ref(qdr_link_ref_list_t *ref_list, qdr_link_t *link, int cls)
 {

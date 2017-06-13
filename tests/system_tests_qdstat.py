@@ -22,7 +22,7 @@ import re
 import system_test
 import unittest
 from subprocess import PIPE
-from proton import Url, SSLDomain, SSLUnavailable
+from proton import Url, SSLDomain, SSLUnavailable, SASL
 
 class QdstatTest(system_test.TestCase):
     """Test qdstat tool output"""
@@ -50,19 +50,39 @@ class QdstatTest(system_test.TestCase):
         self.run_qdstat(['--help'], r'Usage: qdstat')
 
     def test_general(self):
-        self.run_qdstat(['--general'], r'(?s)Router Statistics.*Mode\s*Standalone')
+        out = self.run_qdstat(['--general'], r'(?s)Router Statistics.*Mode\s*Standalone')
+        self.assertTrue("Connections  1" in out)
+        self.assertTrue("Nodes        0" in out)
+        self.assertTrue("Auto Links   0" in out)
+        self.assertTrue("Link Routes  0" in out)
+        self.assertTrue("Router Id    QDR.A" in out)
+        self.assertTrue("Mode         standalone" in out)
 
     def test_connections(self):
         self.run_qdstat(['--connections'], r'host.*container.*role')
 
     def test_links(self):
-        self.run_qdstat(['--links'], r'endpoint.*out.*local.*temp.')
+        out = self.run_qdstat(['--links'], r'endpoint.*out.*local.*temp.')
+        parts = out.split("\n")
+        self.assertEqual(len(parts), 6)
+
+    def test_links_with_limit(self):
+        out = self.run_qdstat(['--links', '--limit=1'])
+        parts = out.split("\n")
+        self.assertEqual(len(parts), 5)
 
     def test_nodes(self):
         self.run_qdstat(['--nodes'], r'No Router List')
 
     def test_address(self):
-        self.run_qdstat(['--address'], r'\$management')
+        out = self.run_qdstat(['--address'], r'\$management')
+        parts = out.split("\n")
+        self.assertEqual(len(parts), 8)
+
+    def test_address_with_limit(self):
+        out = self.run_qdstat(['--address', '--limit=1'])
+        parts = out.split("\n")
+        self.assertEqual(len(parts), 5)
 
     def test_memory(self):
         out = self.run_qdstat(['--memory'])
@@ -322,6 +342,8 @@ try:
             self.assertRaises(AssertionError, self.ssl_test, url_name, arg_names)
 
         def test_ssl_cert_to_auth_fail_no_sasl_external(self):
+            if not SASL.extended():
+                self.skipTest("Cyrus library not available. skipping test")
             self.ssl_test_bad('auth_s', ['client_cert_all'])
 
         def test_ssl_trustfile_cert_to_auth_fail_no_sasl_external(self):

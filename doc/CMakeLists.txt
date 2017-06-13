@@ -64,13 +64,13 @@ if(BUILD_DOCS)
     list(APPEND GENERATED_TXT "${output}")
   endmacro()
 
-  schema_gen(${src}/book/schema_txt.py ${bin}/schema.adoc)
-  schema_gen(${src}/man/qdrouterd.conf.5.py ${bin}/qdrouterd.conf.5.adoc)
+  schema_gen(${src}/book/schema_txt.py ${bin}/book/schema.adoc)
+  schema_gen(${src}/man/qdrouterd.conf.5.py ${bin}/man/qdrouterd.conf.5.adoc)
 
   # Generate asciidoc .adoc from --help output for man pages
   macro(help2txt program)
     get_filename_component(name ${program} NAME)
-    set(output ${bin}/${name}_help.adoc)
+    set(output ${bin}/man/${name}_help.adoc)
     add_custom_command(
       OUTPUT ${output}
       COMMAND ${RUN} -s ${src}/man/help2txt.py ${program} --help 1> ${output}
@@ -84,21 +84,40 @@ if(BUILD_DOCS)
 
   add_custom_target(doc_gen ALL DEPENDS ${GENERATED_TXT})
   install(DIRECTORY ${src}/book/ DESTINATION ${QD_DOC_INSTALL_DIR})
-  install(FILES ${bin}/schema.adoc DESTINATION ${QD_DOC_INSTALL_DIR})
+  
+  install(FILES ${bin}/book/schema.adoc DESTINATION ${QD_DOC_INSTALL_DIR})
+  install(FILES ${bin}/man/qdrouterd.conf.5.adoc DESTINATION ${QD_DOC_INSTALL_DIR})
+  
+  EXECUTE_PROCESS(COMMAND ${CMAKE_COMMAND} -E copy_directory ${src}/book/ ${bin}/book)
+  EXECUTE_PROCESS(COMMAND ${CMAKE_COMMAND} -E copy_directory ${src}/man/ ${bin}/man)  
 
   find_program(ASCIIDOC_EXE asciidoc DOC "Generate HTML documentation")
   if (ASCIIDOC_EXE)
     configure_file(${src}/asciidoc.conf.in ${bin}/asciidoc.conf)
+    configure_file(${src}/index.adoc ${bin}/index.adoc)
 
     # Copy the book dir images for HTML viewing in the build directory.
     # Don't use configure_file since it truncates .png files at 1st ^Z character
-    EXECUTE_PROCESS(COMMAND ${CMAKE_COMMAND} -E copy_directory ${src}/book/ ${bin})
+    
+    # Copy the images. Don't use configure_file since it truncates .png files at 1st ^Z character
+    file(GLOB_RECURSE PNG_SRC RELATIVE ${src} *.png)
+    foreach(file ${PNG_SRC})
+        get_filename_component(name ${file} NAME)
+        EXECUTE_PROCESS(COMMAND ${CMAKE_COMMAND} -E copy_if_different ${src}/${file} ${bin}/_images/${name})
+    endforeach()    
 
     # Generate HTML
     file(GLOB_RECURSE ADOC_SRC *.adoc)
-    foreach(source index book/book man/qdmanage.8 man/qdrouterd.8 man/qdstat.8 ${bin}/qdrouterd.conf.5)
+    foreach(source index book/book man/qdmanage.8 man/qdrouterd.8 man/qdstat.8 man/qdrouterd.conf.5)
       get_filename_component(name ${source} NAME)
-      set(output ${bin}/${name}.html)
+      get_filename_component(dir ${source} PATH)
+      string(FIND ${name} "." dot)
+      if(dot GREATER 0)
+        string(LENGTH ${name} length)
+        MATH(EXPR desired_length "${length}-2")
+        string(SUBSTRING ${name} "0" ${desired_length} name)
+      endif(dot GREATER 0)
+      set(output ${bin}/${dir}/${name}.html)
       add_custom_command(
         OUTPUT ${output} ${output}.in
         # Pretty .html for direct viewing.
@@ -106,7 +125,7 @@ if(BUILD_DOCS)
         # Raw .html.in body for inclusion in Qpid website.
         COMMAND  ${ASCIIDOC_EXE} ${ADOC_FLAGS} -s -o ${output}.in ${source}.adoc
         DEPENDS ${source}.adoc ${GENERATED_TXT} ${ADOC_SRC} ${bin}/asciidoc.conf
-        WORKING_DIRECTORY ${src} # Book include links assume we are in source dir.
+        WORKING_DIRECTORY ${bin}
         )
       list(APPEND DOC_DEPENDS ${output})
       install_doc(FILES ${output} DESTINATION ${QD_DOC_INSTALL_DIR})
@@ -115,8 +134,9 @@ if(BUILD_DOCS)
     find_program(A2X_EXE a2x DOC DOC "Generate Unix man pages")
     if (A2X_EXE)
       # Generate man pages.
-      foreach(source ${src}/man/qdmanage.8 ${src}/man/qdrouterd.8 ${src}/man/qdstat.8 ${bin}/qdrouterd.conf.5)
+      foreach(source ${bin}/man/qdmanage.8 ${bin}/man/qdrouterd.8 ${bin}/man/qdstat.8 ${bin}/man/qdrouterd.conf.5)
         get_filename_component(name ${source} NAME)
+        get_filename_component(dir ${source} PATH)
         string(REGEX REPLACE ".*\\.([0-9])$" "\\1" section ${source}) # Man section number
         set(output ${bin}/${name})
         add_custom_command(

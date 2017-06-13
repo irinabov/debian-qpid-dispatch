@@ -81,6 +81,8 @@ static char *test_buffer_list_clone(void *context)
     // ensure copy is un-molested:
     if (!compare_buffer(&copy, (unsigned char *)pattern, pattern_len)) return "Buffer list corrupted";
 
+    qd_buffer_list_free_buffers(&list);
+    qd_buffer_list_free_buffers(&copy);
     return 0;
 }
 
@@ -88,6 +90,7 @@ static char *test_buffer_list_clone(void *context)
 int buffer_tests()
 {
     int result = 0;
+    char *test_group = "buffer_tests";
 
     TEST_CASE(test_buffer_list_clone, 0);
 

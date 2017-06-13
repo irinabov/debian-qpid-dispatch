@@ -23,6 +23,7 @@
 #include <qpid/dispatch/log.h>
 #include <qpid/dispatch/amqp.h>
 #include <qpid/dispatch/server.h>
+#include <qpid/dispatch/failoverlist.h>
 #include "qpid/dispatch/python_embedded.h"
 #include "entity.h"
 #include "entity_cache.h"
@@ -38,6 +39,85 @@
 #include <errno.h>
 #include <inttypes.h>
 
+typedef struct qd_thread_t {
+    qd_server_t  *qd_server;
+    int           thread_id;
+    volatile int  running;
+    volatile int  canceled;
+    int           using_thread;
+    sys_thread_t *thread;
+} qd_thread_t;
+
+
+typedef struct qd_work_item_t {
+    DEQ_LINKS(struct qd_work_item_t);
+    qdpn_connector_t *cxtr;
+} qd_work_item_t;
+
+DEQ_DECLARE(qd_work_item_t, qd_work_list_t);
+
+
+struct qd_server_t {
+    qd_dispatch_t            *qd;
+    int                       thread_count;
+    const char               *container_name;
+    const char               *sasl_config_path;
+    const char               *sasl_config_name;
+    qdpn_driver_t            *driver;
+    qd_log_source_t          *log_source;
+    qd_conn_handler_cb_t      conn_handler;
+    qd_pn_event_handler_cb_t  pn_event_handler;
+    qd_pn_event_complete_cb_t pn_event_complete_handler;
+    void                     *start_context;
+    void                     *conn_handler_context;
+    sys_cond_t               *cond;
+    sys_mutex_t              *lock;
+    qd_thread_t             **threads;
+    qd_work_list_t            work_queue;
+    qd_timer_list_t           pending_timers;
+    bool                      a_thread_is_waiting;
+    int                       threads_active;
+    int                       pause_requests;
+    int                       threads_paused;
+    int                       pause_next_sequence;
+    int                       pause_now_serving;
+    qd_signal_handler_cb_t    signal_handler;
+    bool                      signal_handler_running;
+    void                     *signal_context;
+    int                       pending_signal;
+    qd_timer_t               *heartbeat_timer;
+    uint64_t                 next_connection_id;
+    void                     *py_displayname_obj;
+    qd_http_server_t         *http;
+};
+
+/**
+ * Listener objects represent the desire to accept incoming transport connections.
+ */
+struct qd_listener_t {
+    qd_server_t              *server;
+    const qd_server_config_t *config;
+    void                     *context;
+    qdpn_listener_t          *pn_listener;
+    qd_http_listener_t       *http;
+};
+
+
+/**
+ * Connector objects represent the desire to create and maintain an outgoing transport connection.
+ */
+struct qd_connector_t {
+    qd_server_t              *server;
+    cxtr_state_t              state;
+    const qd_server_config_t *config;
+    void                     *context;
+    qd_connection_t          *ctx;
+    qd_timer_t               *timer;
+    long                      delay;
+};
+
+
+
 static __thread qd_server_t *thread_server = 0;
 
 #define HEARTBEAT_INTERVAL 1000
@@ -47,7 +127,6 @@ ALLOC_DEFINE(qd_listener_t);
 ALLOC_DEFINE(qd_connector_t);
 ALLOC_DEFINE(qd_deferred_call_t);
 ALLOC_DEFINE(qd_connection_t);
-ALLOC_DEFINE(qd_user_fd_t);
 
 const char *QD_CONNECTION_TYPE = "connection";
 const char *MECH_EXTERNAL = "EXTERNAL";
@@ -109,29 +188,14 @@ static void free_qd_connection(qd_connection_t *ctx)
     free_qd_connection_t(ctx);
 }
 
-qd_error_t qd_entity_update_connection(qd_entity_t* entity, void *impl);
-
 /**
  * This function is set as the pn_transport->tracer and is invoked when proton tries to write the log message to pn_transport->tracer
  */
-static void qd_transport_tracer(pn_transport_t *transport, const char *message)
+static void transport_tracer(pn_transport_t *transport, const char *message)
 {
     qd_connection_t *ctx = (qd_connection_t*) pn_transport_get_context(transport);
     if (ctx)
         qd_log(ctx->server->log_source, QD_LOG_TRACE, "[%"PRIu64"]:%s", ctx->connection_id, message);
-}
-
-static qd_error_t connection_entity_update_host(qd_entity_t* entity, qd_connection_t *conn)
-{
-    const qd_server_config_t *config;
-    if (conn->connector) {
-        config = conn->connector->config;
-        char host[strlen(config->host)+strlen(config->port)+2];
-        snprintf(host, sizeof(host), "%s:%s", config->host, config->port);
-        return qd_entity_set_string(entity, "host", host);
-    }
-    else
-        return qd_entity_set_string(entity, "host", qdpn_connector_name(conn->pn_cxtr));
 }
 
 
@@ -141,9 +205,14 @@ static qd_error_t connection_entity_update_host(qd_entity_t* entity, qd_connecti
  */
 qd_error_t qd_register_display_name_service(qd_dispatch_t *qd, void *displaynameservice)
 {
-    qd->server->py_displayname_obj    = displaynameservice;
-    qd->server->py_displayname_module = PyImport_ImportModule("qpid_dispatch_internal.display_name.display_name");
-    return qd->server->py_displayname_module ? QD_ERROR_NONE : qd_error(QD_ERROR_RUNTIME, "Fail importing DisplayNameService module");
+    if (displaynameservice) {
+        qd->server->py_displayname_obj = displaynameservice;
+        Py_XINCREF((PyObject *)qd->server->py_displayname_obj);
+        return QD_ERROR_NONE;
+    }
+    else {
+        return qd_error(QD_ERROR_VALUE, "displaynameservice is not set");
+    }
 }
 
 
@@ -151,13 +220,12 @@ qd_error_t qd_register_display_name_service(qd_dispatch_t *qd, void *displayname
  * Returns a char pointer to a user id which is constructed from components specified in the config->ssl_uid_format.
  * Parses through each component and builds a semi-colon delimited string which is returned as the user id.
  */
-static const char *qd_transport_get_user(qd_connection_t *conn, pn_transport_t *tport)
+static const char *transport_get_user(qd_connection_t *conn, pn_transport_t *tport)
 {
     const qd_server_config_t *config =
             conn->connector ? conn->connector->config : conn->listener->config;
 
     if (config->ssl_uid_format) {
-
         // The ssl_uid_format length cannot be greater that 7
         assert(strlen(config->ssl_uid_format) < 8);
 
@@ -327,27 +395,17 @@ static const char *qd_transport_get_user(qd_connection_t *conn, pn_transport_t *
             if (config->ssl_display_name_file) {
                 // Translate extracted id into display name
                 qd_python_lock_state_t lock_state = qd_python_lock();
-                PyObject *module = (PyObject*)conn->server->py_displayname_module;
-                PyObject *query = PyObject_GetAttrString(module, "display_name_local_query");
-                if (query) {
-                    PyObject *result = PyObject_CallFunction(query, "(Oss)",
-                                                            (PyObject *)conn->server->py_displayname_obj,
-                                                            config->ssl_profile, user_id);
-                    if (result) {
-                        const char *res_string = PyString_AsString(result);
-                        free(user_id);
-                        user_id = malloc(strlen(res_string) + 1);
-                        user_id[0] = '\0';
-                        strcat(user_id, res_string);
-                        Py_XDECREF(result);
-                    } else {
-                        qd_log(conn->server->log_source, QD_LOG_DEBUG, "Internal: failed to read displaynameservice query result");
-                    }
-                    Py_XDECREF(query);
+                PyObject *result = PyObject_CallMethod((PyObject *)conn->server->py_displayname_obj, "query", "(ss)", config->ssl_profile, user_id );
+                if (result) {
+                    const char *res_string = PyString_AsString(result);
+                    free(user_id);
+                    user_id = malloc(strlen(res_string) + 1);
+                    user_id[0] = '\0';
+                    strcat(user_id, res_string);
+                    Py_XDECREF(result);
                 } else {
-                    qd_log(conn->server->log_source, QD_LOG_DEBUG, "Internal: failed to locate query function");
+                    qd_log(conn->server->log_source, QD_LOG_DEBUG, "Internal: failed to read displaynameservice query result");
                 }
-                Py_XDECREF(module);
                 qd_python_unlock(lock_state);
             }
             qd_log(conn->server->log_source, QD_LOG_DEBUG, "User id is '%s' ", user_id);
@@ -365,13 +423,14 @@ static const char *qd_transport_get_user(qd_connection_t *conn, pn_transport_t *
  * Allocate a new qd_connection
  *  with DEQ items initialized, call lock allocated, and all other fields cleared.
  */
-qd_connection_t *qd_connection_allocate()
+static qd_connection_t *connection_allocate()
 {
     qd_connection_t *ctx = new_qd_connection_t();
     ZERO(ctx);
     DEQ_ITEM_INIT(ctx);
     DEQ_INIT(ctx->deferred_calls);
     ctx->deferred_call_lock = sys_mutex();
+    DEQ_INIT(ctx->free_link_session_list);
     return ctx;
 }
 
@@ -385,7 +444,7 @@ void qd_connection_set_user(qd_connection_t *conn)
         conn->user_id = pn_transport_get_user(tport);
         // We want to set the user name only if it is not already set and the selected sasl mechanism is EXTERNAL
         if (mech && strcmp(mech, MECH_EXTERNAL) == 0) {
-            const char *user_id = qd_transport_get_user(conn, tport);
+            const char *user_id = transport_get_user(conn, tport);
             if (user_id)
                 conn->user_id = user_id;
         }
@@ -395,130 +454,11 @@ void qd_connection_set_user(qd_connection_t *conn)
 }
 
 
-static void qd_get_next_pn_data(pn_data_t *data, const char **d, int *d1)
-{
-    if (pn_data_next(data)) {
-        switch (pn_data_type(data)) {
-            case PN_STRING:
-                *d = pn_data_get_string(data).start;
-                break;
-            case PN_SYMBOL:
-                *d = pn_data_get_symbol(data).start;
-                break;
-            case PN_INT:
-                *d1 = pn_data_get_int(data);
-                break;
-            default:
-                break;
-        }
-    }
-}
-
-
-/**
- * Obtains the remote connection properties and sets it as a map on the passed in entity.
- * @param
- */
-static qd_error_t qd_set_connection_properties(qd_entity_t* entity, qd_connection_t *conn)
-{
-    // Get the connection properties and stick it into the entity as a map
-    pn_data_t *data = pn_connection_remote_properties(conn->pn_conn);
-    const char *props = "properties";
-    if (data) {
-        size_t count = pn_data_get_map(data);
-        pn_data_enter(data);
-
-        // Create a new map.
-        qd_error_t error_t = qd_entity_set_map(entity, props);
-
-        if (error_t != QD_ERROR_NONE)
-            return error_t;
-
-        for (size_t i = 0; i < count/2; i++) {
-            const char *key   = 0;
-            // We are assuming for now that all keys are strings
-            qd_get_next_pn_data(data, &key, 0);
-            const char *value_string = 0;
-            int value_int = 0;
-            // We are assuming for now that all values are either strings or integers
-            qd_get_next_pn_data(data, &value_string, &value_int);
-
-            if (value_string)
-                error_t = qd_entity_set_map_key_value_string(entity, props, key, value_string);
-            else if (value_int)
-                error_t = qd_entity_set_map_key_value_int(entity, props, key, value_int);
-
-            if (error_t != QD_ERROR_NONE)
-                return error_t;
-        }
-        pn_data_exit(data);
-    }
-
-    return QD_ERROR_NONE;
-}
-
-
 qd_error_t qd_entity_refresh_sslProfile(qd_entity_t* entity, void *impl)
 {
     return QD_ERROR_NONE;
 }
 
-
-qd_error_t qd_entity_refresh_connection(qd_entity_t* entity, void *impl)
-{
-    qd_connection_t *conn = (qd_connection_t*)impl;
-    pn_transport_t *tport = 0;
-    pn_sasl_t      *sasl  = 0;
-    pn_ssl_t       *ssl   = 0;
-    const char     *mech  = 0;
-    const char     *user  = 0;
-
-    if (conn->pn_conn) {
-        tport = pn_connection_transport(conn->pn_conn);
-        ssl   = conn->ssl;
-    }
-    if (tport) {
-        sasl = pn_sasl(tport);
-        if(conn->user_id)
-            user = conn->user_id;
-        else
-            user = pn_transport_get_user(tport);
-    }
-    if (sasl)
-        mech = pn_sasl_get_mech(sasl);
-
-    if (qd_entity_set_bool(entity, "opened", conn->opened) == 0 &&
-        qd_entity_set_string(entity, "container",
-                             conn->pn_conn ? pn_connection_remote_container(conn->pn_conn) : 0) == 0 &&
-        connection_entity_update_host(entity, conn) == 0 &&
-        qd_entity_set_string(entity, "sasl", mech) == 0 &&
-        qd_entity_set_string(entity, "role", conn->role) == 0 &&
-        qd_entity_set_string(entity, "dir", conn->connector ? "out" : "in") == 0 &&
-        qd_entity_set_string(entity, "user", user) == 0 &&
-        qd_set_connection_properties(entity, conn) == 0 &&
-        qd_entity_set_long(entity, "identity", conn->connection_id) == 0 &&
-        qd_entity_set_bool(entity, "isAuthenticated", tport && pn_transport_is_authenticated(tport)) == 0 &&
-        qd_entity_set_bool(entity, "isEncrypted", tport && pn_transport_is_encrypted(tport)) == 0 &&
-        qd_entity_set_bool(entity, "ssl", ssl != 0) == 0) {
-
-        if (ssl) {
-            #define SSL_ATTR_SIZE 50
-            char proto[SSL_ATTR_SIZE];
-            char cipher[SSL_ATTR_SIZE];
-            pn_ssl_get_protocol_name(ssl, proto, SSL_ATTR_SIZE);
-            pn_ssl_get_cipher_name(ssl, cipher, SSL_ATTR_SIZE);
-            if (qd_entity_set_string(entity, "sslProto", proto)   == 0 &&
-                qd_entity_set_string(entity, "sslCipher", cipher) == 0 &&
-                qd_entity_set_long(entity, "sslSsf", pn_ssl_get_ssf(ssl)) == 0) {
-                    return QD_ERROR_NONE;
-            }
-        }
-        else
-            return QD_ERROR_NONE;
-    }
-
-    return qd_error_code();
-}
 
 static qd_error_t listener_setup_ssl(qd_connection_t *ctx, const qd_server_config_t *config, pn_transport_t *tport)
 {
@@ -578,7 +518,9 @@ static const char *log_incoming(char *buf, size_t size, qdpn_connector_t *cxtr)
     const char *cname = qdpn_connector_name(cxtr);
     const char *host = qd_listener->config->host;
     const char *port = qd_listener->config->port;
-    snprintf(buf, size, "incoming connection from %s to %s:%s", cname, host, port);
+    const char *protocol = qd_listener->config->http ? "HTTP" : "AMQP";
+    snprintf(buf, size, "incoming %s connection from %s to %s:%s",
+             protocol, cname, host, port);
     return buf;
 }
 
@@ -619,6 +561,46 @@ static void decorate_connection(qd_server_t *qd_server, pn_connection_t *conn, c
         pn_data_put_int(pn_connection_properties(conn), config->inter_router_cost);
     }
 
+    if (config) {
+        qd_failover_list_t *fol = config->failover_list;
+        if (fol) {
+            pn_data_put_symbol(pn_connection_properties(conn),
+                               pn_bytes(strlen(QD_CONNECTION_PROPERTY_FAILOVER_LIST_KEY), QD_CONNECTION_PROPERTY_FAILOVER_LIST_KEY));
+            pn_data_put_list(pn_connection_properties(conn));
+            pn_data_enter(pn_connection_properties(conn));
+            int fol_count = qd_failover_list_size(fol);
+            for (int i = 0; i < fol_count; i++) {
+                pn_data_put_map(pn_connection_properties(conn));
+                pn_data_enter(pn_connection_properties(conn));
+                pn_data_put_symbol(pn_connection_properties(conn),
+                                   pn_bytes(strlen(QD_CONNECTION_PROPERTY_FAILOVER_NETHOST_KEY), QD_CONNECTION_PROPERTY_FAILOVER_NETHOST_KEY));
+                pn_data_put_string(pn_connection_properties(conn),
+                                   pn_bytes(strlen(qd_failover_list_host(fol, i)), qd_failover_list_host(fol, i)));
+
+                pn_data_put_symbol(pn_connection_properties(conn),
+                                   pn_bytes(strlen(QD_CONNECTION_PROPERTY_FAILOVER_PORT_KEY), QD_CONNECTION_PROPERTY_FAILOVER_PORT_KEY));
+                pn_data_put_string(pn_connection_properties(conn),
+                                   pn_bytes(strlen(qd_failover_list_port(fol, i)), qd_failover_list_port(fol, i)));
+
+                if (qd_failover_list_scheme(fol, i)) {
+                    pn_data_put_symbol(pn_connection_properties(conn),
+                                       pn_bytes(strlen(QD_CONNECTION_PROPERTY_FAILOVER_SCHEME_KEY), QD_CONNECTION_PROPERTY_FAILOVER_SCHEME_KEY));
+                    pn_data_put_string(pn_connection_properties(conn),
+                                       pn_bytes(strlen(qd_failover_list_scheme(fol, i)), qd_failover_list_scheme(fol, i)));
+                }
+
+                if (qd_failover_list_hostname(fol, i)) {
+                    pn_data_put_symbol(pn_connection_properties(conn),
+                                       pn_bytes(strlen(QD_CONNECTION_PROPERTY_FAILOVER_HOSTNAME_KEY), QD_CONNECTION_PROPERTY_FAILOVER_HOSTNAME_KEY));
+                    pn_data_put_string(pn_connection_properties(conn),
+                                       pn_bytes(strlen(qd_failover_list_hostname(fol, i)), qd_failover_list_hostname(fol, i)));
+                }
+                pn_data_exit(pn_connection_properties(conn));
+            }
+            pn_data_exit(pn_connection_properties(conn));
+        }
+    }
+
     pn_data_exit(pn_connection_properties(conn));
 }
 
@@ -631,6 +613,7 @@ static void thread_process_listeners_LH(qd_server_t *qd_server)
     qd_connection_t  *ctx;
 
     for (listener = qdpn_driver_listener(driver); listener; listener = qdpn_driver_listener(driver)) {
+        qd_listener_t *li = qdpn_listener_context(listener);
         bool policy_counted = false;
         cxtr = qdpn_listener_accept(listener, qd_server->qd->policy, &qd_policy_socket_accept, &policy_counted);
         if (!cxtr)
@@ -638,10 +621,7 @@ static void thread_process_listeners_LH(qd_server_t *qd_server)
 
         char logbuf[qd_log_max_len()];
 
-        qd_log(qd_server->log_source, QD_LOG_DEBUG, "Accepting %s",
-               log_incoming(logbuf, sizeof(logbuf), cxtr));
-        
-        ctx = qd_connection_allocate();
+        ctx = connection_allocate();
         ctx->server        = qd_server;
         ctx->owner_thread  = CONTEXT_UNSPECIFIED_OWNER;
         ctx->pn_cxtr       = cxtr;
@@ -665,9 +645,8 @@ static void thread_process_listeners_LH(qd_server_t *qd_server)
         ctx->owner_thread = CONTEXT_NO_OWNER;
         qdpn_connector_set_context(cxtr, ctx);
 
-        // qd_server->lock is already locked
-        DEQ_INSERT_TAIL(qd_server->connections, ctx);
-        qd_entity_cache_add(QD_CONNECTION_TYPE, ctx);
+        qd_log(qd_server->log_source, QD_LOG_INFO, "Accepting %s with connection id [%"PRIu64"]",
+           log_incoming(logbuf, sizeof(logbuf), cxtr), ctx->connection_id);
 
         //
         // Get a pointer to the transport so we can insert security components into it
@@ -680,20 +659,27 @@ static void thread_process_listeners_LH(qd_server_t *qd_server)
         //
         pn_transport_set_server(tport);
         pn_transport_set_max_frame(tport, config->max_frame_size);
+        pn_transport_set_channel_max(tport, config->max_sessions - 1);
         pn_transport_set_idle_timeout(tport, config->idle_timeout_seconds * 1000);
 
         //
-        // Proton pushes out its trace to qd_transport_tracer() which in turn writes a trace message to the qdrouter log
+        // Proton pushes out its trace to transport_tracer() which in turn writes a trace message to the qdrouter log
         // If trace level logging is enabled on the router set PN_TRACE_DRV | PN_TRACE_FRM | PN_TRACE_RAW on the proton transport
         //
         pn_transport_set_context(tport, ctx);
         if (qd_log_enabled(qd_server->log_source, QD_LOG_TRACE)) {
-            pn_transport_trace(tport, PN_TRACE_DRV | PN_TRACE_FRM | PN_TRACE_RAW);
-            pn_transport_set_tracer(tport, qd_transport_tracer);
+            pn_transport_trace(tport, PN_TRACE_FRM);
+            pn_transport_set_tracer(tport, transport_tracer);
         }
 
-        // Set up SSL if configured
-        if (config->ssl_profile) {
+        if (li->http) {
+            // Set up HTTP if configured, HTTP provides its own SSL.
+            qd_log(qd_server->log_source, QD_LOG_TRACE, "Configuring HTTP%s on %s",
+                   config->ssl_profile ? "S" : "",
+                   log_incoming(logbuf, sizeof(logbuf), cxtr));
+            qd_http_listener_accept(li->http, cxtr);
+        } else if (config->ssl_profile)  {
+            // Set up SSL if configured and HTTP is not providing SSL.
             qd_log(qd_server->log_source, QD_LOG_TRACE, "Configuring SSL on %s",
                    log_incoming(logbuf, sizeof(logbuf), cxtr));
             if (listener_setup_ssl(ctx, config, tport) != QD_ERROR_NONE) {
@@ -789,15 +775,6 @@ static int process_connector(qd_server_t *qd_server, qdpn_connector_t *cxtr)
     if (ctx->closed)
         return 0;
 
-    //
-    // If this is a user connection, bypass the AMQP processing and invoke the
-    // UserFD handler instead.
-    //
-    if (ctx->ufd) {
-        qd_server->ufd_handler(ctx->ufd->context, ctx->ufd);
-        return 1;
-    }
-
     do {
         passes++;
 
@@ -834,16 +811,10 @@ static int process_connector(qd_server_t *qd_server, qdpn_connector_t *cxtr)
                 //
                 if (!ctx->opened && pn_event_type(event) == PN_CONNECTION_REMOTE_OPEN) {
                     ctx->opened = true;
-                    qd_conn_event_t ce = QD_CONN_EVENT_LISTENER_OPEN;
-
                     if (ctx->connector) {
-                        ce = QD_CONN_EVENT_CONNECTOR_OPEN;
                         ctx->connector->delay = 2000;  // Delay on re-connect in case there is a recurring error
                     } else
                         assert(ctx->listener);
-
-                    qd_server->conn_handler(qd_server->conn_handler_context,
-                                            ctx->context, ce, (qd_connection_t*) qdpn_connector_context(cxtr));
                     events = 1;
                 } else if (pn_event_type(event) == PN_TRANSPORT_ERROR) {
                     if (ctx->connector) {
@@ -857,6 +828,11 @@ static int process_connector(qd_server_t *qd_server, qdpn_connector_t *cxtr)
 
                 event = ctx->event_stall ? 0 : pn_collector_peek(collector);
             }
+
+            //
+            // Free up any links and sessions that need to be freed since all the events have been popped from the collector.
+            //
+            qd_server->pn_event_complete_handler(qd_server->conn_handler_context, qd_conn);
             events += qd_server->conn_handler(qd_server->conn_handler_context, ctx->context, QD_CONN_EVENT_WRITABLE, qd_conn);
         }
     } while (events > 0);
@@ -893,13 +869,6 @@ static void *thread_run(void *arg)
 
     if (thread->canceled)
         return 0;
-
-    //
-    // Invoke the start handler if the application supplied one.
-    // This handler can be used to set NUMA or processor affinnity for the thread.
-    //
-    if (qd_server->start_handler)
-        qd_server->start_handler(qd_server->start_context, thread->thread_id);
 
     //
     // Main Loop
@@ -1095,7 +1064,6 @@ static void *thread_run(void *arg)
                 }
 
                 sys_mutex_lock(qd_server->lock);
-                DEQ_REMOVE(qd_server->connections, ctx);
 
                 if (ctx->policy_counted) {
                     qd_policy_socket_close(qd_server->qd->policy, ctx);
@@ -1177,7 +1145,7 @@ static void cxtr_try_open(void *context)
     if (ct->state != CXTR_STATE_CONNECTING)
         return;
 
-    qd_connection_t *ctx = qd_connection_allocate();
+    qd_connection_t *ctx = connection_allocate();
     ctx->server       = ct->server;
     ctx->owner_thread = CONTEXT_UNSPECIFIED_OWNER;
     ctx->pn_conn      = pn_connection();
@@ -1190,7 +1158,7 @@ static void cxtr_try_open(void *context)
     ctx->role          = (char*) malloc(role_length);
     strcpy(ctx->role, ctx->connector->config->role);
 
-    qd_log(ct->server->log_source, QD_LOG_TRACE, "Connecting to %s:%s", ct->config->host, ct->config->port);
+    qd_log(ct->server->log_source, QD_LOG_INFO, "Connecting to %s:%s", ct->config->host, ct->config->port);
 
     pn_connection_collect(ctx->pn_conn, ctx->collector);
     decorate_connection(ctx->server, ctx->pn_conn, ct->config);
@@ -1202,10 +1170,6 @@ static void cxtr_try_open(void *context)
     // Increment the connection id so the next connection can use it
     ctx->connection_id = ct->server->next_connection_id++;
     ctx->pn_cxtr = qdpn_connector(ct->server->driver, ct->config->host, ct->config->port, ct->config->protocol_family, (void*) ctx);
-    if (ctx->pn_cxtr) {
-        DEQ_INSERT_TAIL(ct->server->connections, ctx);
-        qd_entity_cache_add(QD_CONNECTION_TYPE, ctx);
-    }
     sys_mutex_unlock(ct->server->lock);
 
     const qd_server_config_t *config = ct->config;
@@ -1247,16 +1211,17 @@ static void cxtr_try_open(void *context)
     // Configure the transport
     //
     pn_transport_set_max_frame(tport, config->max_frame_size);
+    pn_transport_set_channel_max(tport, config->max_sessions - 1);
     pn_transport_set_idle_timeout(tport, config->idle_timeout_seconds * 1000);
 
     //
-    // Proton pushes out its trace to qd_transport_tracer() which in turn writes a trace message to the qdrouter log
+    // Proton pushes out its trace to transport_tracer() which in turn writes a trace message to the qdrouter log
     //
     // If trace level logging is enabled on the router set PN_TRACE_DRV | PN_TRACE_FRM | PN_TRACE_RAW on the proton transport
     pn_transport_set_context(tport, ctx);
     if (qd_log_enabled(ct->server->log_source, QD_LOG_TRACE)) {
-        pn_transport_trace(tport, PN_TRACE_DRV | PN_TRACE_FRM | PN_TRACE_RAW);
-        pn_transport_set_tracer(tport, qd_transport_tracer);
+        pn_transport_trace(tport, PN_TRACE_FRM);
+        pn_transport_set_tracer(tport, transport_tracer);
     }
 
     //
@@ -1355,19 +1320,16 @@ qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *containe
     if (qd_server == 0)
         return 0;
 
-    DEQ_INIT(qd_server->connections);
     qd_server->qd               = qd;
     qd_server->log_source       = qd_log_source("SERVER");
     qd_server->thread_count     = thread_count;
     qd_server->container_name   = container_name;
     qd_server->sasl_config_path = sasl_config_path;
     qd_server->sasl_config_name = sasl_config_name;
-    qd_server->driver           = qdpn_driver();
-    qd_server->start_handler    = 0;
+    qd_server->driver           = qdpn_driver(qd_server->log_source);
     qd_server->conn_handler     = 0;
     qd_server->pn_event_handler = 0;
     qd_server->signal_handler   = 0;
-    qd_server->ufd_handler      = 0;
     qd_server->start_context    = 0;
     qd_server->signal_context   = 0;
     qd_server->lock             = sys_mutex();
@@ -1391,9 +1353,8 @@ qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *containe
     qd_server->signal_handler_running = false;
     qd_server->heartbeat_timer        = 0;
     qd_server->next_connection_id     = 1;
-    qd_server->py_displayname_module  = 0;
     qd_server->py_displayname_obj     = 0;
-
+    qd_server->http                   = qd_http_server(qd, qd_server->log_source);
     qd_log(qd_server->log_source, QD_LOG_INFO, "Container Name: %s", qd_server->container_name);
 
     return qd_server;
@@ -1405,11 +1366,13 @@ void qd_server_free(qd_server_t *qd_server)
     if (!qd_server) return;
     for (int i = 0; i < qd_server->thread_count; i++)
         thread_free(qd_server->threads[i]);
+    qd_http_server_free(qd_server->http);
     qd_timer_finalize();
     qdpn_driver_free(qd_server->driver);
     sys_mutex_free(qd_server->lock);
     sys_cond_free(qd_server->cond);
     free(qd_server->threads);
+    Py_XDECREF((PyObject *)qd_server->py_displayname_obj);
     free(qd_server);
 }
 
@@ -1417,11 +1380,13 @@ void qd_server_free(qd_server_t *qd_server)
 void qd_server_set_conn_handler(qd_dispatch_t            *qd,
                                 qd_conn_handler_cb_t      handler,
                                 qd_pn_event_handler_cb_t  pn_event_handler,
+                                qd_pn_event_complete_cb_t pn_event_complete_handler,
                                 void                     *handler_context)
 {
-    qd->server->conn_handler         = handler;
-    qd->server->pn_event_handler     = pn_event_handler;
-    qd->server->conn_handler_context = handler_context;
+    qd->server->conn_handler              = handler;
+    qd->server->pn_event_handler          = pn_event_handler;
+    qd->server->pn_event_complete_handler = pn_event_complete_handler;
+    qd->server->conn_handler_context      = handler_context;
 }
 
 
@@ -1429,19 +1394,6 @@ void qd_server_set_signal_handler(qd_dispatch_t *qd, qd_signal_handler_cb_t hand
 {
     qd->server->signal_handler = handler;
     qd->server->signal_context = context;
-}
-
-
-void qd_server_set_start_handler(qd_dispatch_t *qd, qd_thread_start_cb_t handler, void *context)
-{
-    qd->server->start_handler = handler;
-    qd->server->start_context = context;
-}
-
-
-void qd_server_set_user_fd_handler(qd_dispatch_t *qd, qd_user_fd_handler_cb_t ufd_handler)
-{
-    qd->server->ufd_handler = ufd_handler;
 }
 
 
@@ -1680,7 +1632,6 @@ void qd_connection_set_event_stall(qd_connection_t *conn, bool stall)
          qd_server_activate(conn, true);
 }
 
-
 qd_listener_t *qd_server_listen(qd_dispatch_t *qd, const qd_server_config_t *config, void *context)
 {
     qd_server_t   *qd_server = qd->server;
@@ -1692,13 +1643,29 @@ qd_listener_t *qd_server_listen(qd_dispatch_t *qd, const qd_server_config_t *con
     li->server      = qd_server;
     li->config      = config;
     li->context     = context;
-    li->pn_listener = qdpn_listener(qd_server->driver, config->host, config->port, config->protocol_family, (void*) li);
+    li->http = NULL;
+
+    if (config->http) {
+        li->http = qd_http_listener(qd_server->http, config);
+        if (!li->http) {
+            free_qd_listener_t(li);
+            qd_log(qd_server->log_source, QD_LOG_ERROR, "Cannot start HTTP listener on %s:%s",
+                   config->host, config->port);
+            return NULL;
+        }
+    }
+
+    li->pn_listener = qdpn_listener(
+        qd_server->driver, config->host, config->port, config->protocol_family, li);
 
     if (!li->pn_listener) {
         free_qd_listener_t(li);
-        return 0;
+        qd_log(qd_server->log_source, QD_LOG_ERROR, "Cannot start listener on %s:%s",
+               config->host, config->port);
+        return NULL;
     }
-    qd_log(qd_server->log_source, QD_LOG_TRACE, "Listening on %s:%s", config->host, config->port);
+    qd_log(qd_server->log_source, QD_LOG_TRACE, "Listening on %s:%s%s", config->host, config->port,
+           config->http ? (config->ssl_profile ? "(HTTPS)":"(HTTP)") : "");
 
     return li;
 }
@@ -1708,7 +1675,7 @@ void qd_server_listener_free(qd_listener_t* li)
 {
     if (!li)
         return;
-
+    if (li->http) qd_http_listener_free(li->http);
     qdpn_listener_free(li->pn_listener);
     free_qd_listener_t(li);
 }
@@ -1759,71 +1726,6 @@ void qd_server_connector_free(qd_connector_t* ct)
     free_qd_connector_t(ct);
 }
 
-
-qd_user_fd_t *qd_user_fd(qd_dispatch_t *qd, int fd, void *context)
-{
-    qd_server_t  *qd_server = qd->server;
-    qd_user_fd_t *ufd       = new_qd_user_fd_t();
-
-    if (!ufd)
-        return 0;
-
-    qd_connection_t *ctx = qd_connection_allocate();
-    ctx->server       = qd_server;
-    ctx->owner_thread = CONTEXT_NO_OWNER;
-    ctx->ufd          = ufd;
-
-    // Copy the role from the connector config
-    if (ctx->connector && ctx->connector->config) {
-        int role_length    = strlen(ctx->connector->config->role) + 1;
-        ctx->role          = (char*) malloc(role_length);
-        strcpy(ctx->role, ctx->connector->config->role);
-    }
-
-    ufd->context = context;
-    ufd->server  = qd_server;
-    ufd->fd      = fd;
-    ufd->pn_conn = qdpn_connector_fd(qd_server->driver, fd, (void*) ctx);
-    qdpn_driver_wakeup(qd_server->driver);
-
-    return ufd;
-}
-
-
-void qd_user_fd_free(qd_user_fd_t *ufd)
-{
-    if (!ufd) return;
-    qdpn_connector_close(ufd->pn_conn);
-    free_qd_user_fd_t(ufd);
-}
-
-
-void qd_user_fd_activate_read(qd_user_fd_t *ufd)
-{
-    qdpn_connector_activate(ufd->pn_conn, QDPN_CONNECTOR_READABLE);
-    qdpn_driver_wakeup(ufd->server->driver);
-}
-
-
-void qd_user_fd_activate_write(qd_user_fd_t *ufd)
-{
-    qdpn_connector_activate(ufd->pn_conn, QDPN_CONNECTOR_WRITABLE);
-    qdpn_driver_wakeup(ufd->server->driver);
-}
-
-
-bool qd_user_fd_is_readable(qd_user_fd_t *ufd)
-{
-    return qdpn_connector_activated(ufd->pn_conn, QDPN_CONNECTOR_READABLE);
-}
-
-
-bool qd_user_fd_is_writeable(qd_user_fd_t *ufd)
-{
-    return qdpn_connector_activated(ufd->pn_conn, QDPN_CONNECTOR_WRITABLE);
-}
-
-
 void qd_server_timer_pending_LH(qd_timer_t *timer)
 {
     DEQ_INSERT_TAIL(timer->server->pending_timers, timer);
@@ -1834,4 +1736,26 @@ void qd_server_timer_pending_LH(qd_timer_t *timer)
 void qd_server_timer_cancel_LH(qd_timer_t *timer)
 {
     DEQ_REMOVE(timer->server->pending_timers, timer);
+}
+
+qd_dispatch_t* qd_server_dispatch(qd_server_t *server) { return server->qd; }
+
+const char* qd_connection_name(const qd_connection_t *c) {
+    return qdpn_connector_name(c->pn_cxtr);
+}
+
+const char* qd_connection_hostip(const qd_connection_t *c) {
+    return qdpn_connector_hostip(c->pn_cxtr);
+}
+
+qd_connector_t* qd_connection_connector(const qd_connection_t *c) {
+    return c->connector;
+}
+
+const qd_server_config_t *qd_connector_config(const qd_connector_t *c) {
+    return c->config;
+}
+
+qd_http_listener_t *qd_listener_http(qd_listener_t *l) {
+    return l->http;
 }

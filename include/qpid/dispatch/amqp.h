@@ -30,6 +30,13 @@
 
 
 /**
+ * AMQP Constants
+ */
+typedef enum {
+    QD_AMQP_MIN_MAX_FRAME_SIZE = 512
+} qd_amqp_constants_t;
+
+/**
  * AMQP Performative Tags
  */
 typedef enum {
@@ -121,11 +128,16 @@ extern const char * const QD_CONNECTION_PROPERTY_PRODUCT_KEY;
 extern const char * const QD_CONNECTION_PROPERTY_PRODUCT_VALUE;
 extern const char * const QD_CONNECTION_PROPERTY_VERSION_KEY;
 extern const char * const QD_CONNECTION_PROPERTY_COST_KEY;
+extern const char * const QD_CONNECTION_PROPERTY_FAILOVER_LIST_KEY;
+extern const char * const QD_CONNECTION_PROPERTY_FAILOVER_NETHOST_KEY;
+extern const char * const QD_CONNECTION_PROPERTY_FAILOVER_PORT_KEY;
+extern const char * const QD_CONNECTION_PROPERTY_FAILOVER_SCHEME_KEY;
+extern const char * const QD_CONNECTION_PROPERTY_FAILOVER_HOSTNAME_KEY;
 /// @}
 
 /** @name AMQP error codes. */
 /// @{
-/** An AMQP error status code and string description  */
+/** AMQP management error status code and string description (HTTP-style)  */
 typedef struct qd_amqp_error_t { int status; const char* description; } qd_amqp_error_t;
 extern const qd_amqp_error_t QD_AMQP_OK;
 extern const qd_amqp_error_t QD_AMQP_CREATED;
@@ -136,6 +148,23 @@ extern const qd_amqp_error_t QD_AMQP_NOT_FOUND;
 extern const qd_amqp_error_t QD_AMQP_NOT_IMPLEMENTED;
 /// @}
 
-/// @}
+/** @name Standard AMQP error condition names. */
+/// @{
+extern const char * const QD_AMQP_COND_INTERNAL_ERROR;
+extern const char * const QD_AMQP_COND_NOT_FOUND;
+extern const char * const QD_AMQP_COND_UNAUTHORIZED_ACCESS;
+extern const char * const QD_AMQP_COND_DECODE_ERROR;
+extern const char * const QD_AMQP_COND_RESOURCE_LIMIT_EXCEEDED;
+extern const char * const QD_AMQP_COND_NOT_ALLOWED;
+extern const char * const QD_AMQP_COND_INVALID_FIELD;
+extern const char * const QD_AMQP_COND_NOT_IMPLEMENTED;
+extern const char * const QD_AMQP_COND_RESOURCE_LOCKED;
+extern const char * const QD_AMQP_COND_PRECONDITION_FAILED;
+extern const char * const QD_AMQP_COND_RESOURCE_DELETED;
+extern const char * const QD_AMQP_COND_ILLEGAL_STATE;
+extern const char * const QD_AMQP_COND_FRAME_SIZE_TOO_SMALL;
+/// @};
 
+/// Name for AMQP conditions from the router that don't have a more specific name.
+extern const char * const QD_COND;
 #endif

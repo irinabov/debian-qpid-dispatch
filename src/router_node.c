@@ -26,6 +26,7 @@
 #include "dispatch_private.h"
 #include "entity_cache.h"
 #include "router_private.h"
+#include <qpid/dispatch/router_core.h>
 
 const char *QD_ROUTER_NODE_TYPE = "router.node";
 const char *QD_ROUTER_ADDRESS_TYPE = "router.address";
@@ -45,6 +46,7 @@ static void qd_router_connection_get_config(const qd_connection_t  *conn,
                                             qdr_connection_role_t  *role,
                                             int                    *cost,
                                             const char            **name,
+                                            bool                   *multi_tenant,
                                             bool                   *strip_annotations_in,
                                             bool                   *strip_annotations_out,
                                             int                    *link_capacity)
@@ -73,6 +75,8 @@ static void qd_router_connection_get_config(const qd_connection_t  *conn,
                 strncmp("connector/", *name, 10) == 0)
                 *name = 0;
         }
+
+        *multi_tenant = cf ? cf->multi_tenant : false;
     }
 }
 
@@ -87,13 +91,13 @@ static int AMQP_writable_conn_handler(void *type_context, qd_connection_t *conn,
 }
 
 
-static qd_field_iterator_t *router_annotate_message(qd_router_t       *router,
-                                                    qd_parsed_field_t *in_ma,
-                                                    qd_message_t      *msg,
-                                                    qd_bitmask_t     **link_exclusions,
-                                                    bool               strip_inbound_annotations)
+static qd_iterator_t *router_annotate_message(qd_router_t       *router,
+                                              qd_parsed_field_t *in_ma,
+                                              qd_message_t      *msg,
+                                              qd_bitmask_t     **link_exclusions,
+                                              bool               strip_inbound_annotations)
 {
-    qd_field_iterator_t *ingress_iter = 0;
+    qd_iterator_t *ingress_iter = 0;
 
     qd_parsed_field_t *trace   = 0;
     qd_parsed_field_t *ingress = 0;
@@ -110,17 +114,17 @@ static qd_field_iterator_t *router_annotate_message(qd_router_t       *router,
             qd_parsed_field_t *sub  = qd_parse_sub_key(in_ma, idx);
             if (!sub)
                 continue;
-            qd_field_iterator_t *iter = qd_parse_raw(sub);
+            qd_iterator_t *iter = qd_parse_raw(sub);
             if (!iter)
                 continue;
 
-            if        (qd_field_iterator_equal(iter, (unsigned char*) QD_MA_TRACE)) {
+            if        (qd_iterator_equal(iter, (unsigned char*) QD_MA_TRACE)) {
                 trace = qd_parse_sub_value(in_ma, idx);
-            } else if (qd_field_iterator_equal(iter, (unsigned char*) QD_MA_INGRESS)) {
+            } else if (qd_iterator_equal(iter, (unsigned char*) QD_MA_INGRESS)) {
                 ingress = qd_parse_sub_value(in_ma, idx);
-            } else if (qd_field_iterator_equal(iter, (unsigned char*) QD_MA_TO)) {
+            } else if (qd_iterator_equal(iter, (unsigned char*) QD_MA_TO)) {
                 to = qd_parse_sub_value(in_ma, idx);
-            } else if (qd_field_iterator_equal(iter, (unsigned char*) QD_MA_PHASE)) {
+            } else if (qd_iterator_equal(iter, (unsigned char*) QD_MA_PHASE)) {
                 phase = qd_parse_sub_value(in_ma, idx);
             }
             done = trace && ingress && to && phase;
@@ -149,8 +153,8 @@ static qd_field_iterator_t *router_annotate_message(qd_router_t       *router,
             uint32_t idx = 0;
             qd_parsed_field_t *trace_item = qd_parse_sub_value(trace, idx);
             while (trace_item) {
-                qd_field_iterator_t *iter = qd_parse_raw(trace_item);
-                qd_address_iterator_reset_view(iter, ITER_VIEW_ALL);
+                qd_iterator_t *iter = qd_parse_raw(trace_item);
+                qd_iterator_reset_view(iter, ITER_VIEW_ALL);
                 qd_compose_insert_string_iterator(trace_field, iter);
                 idx++;
                 trace_item = qd_parse_sub_value(trace, idx);
@@ -210,6 +214,8 @@ static void AMQP_rx_handler(void* context, qd_link_t *link, pn_delivery_t *pnd)
     qd_router_t    *router   = (qd_router_t*) context;
     pn_link_t      *pn_link  = qd_link_pn(link);
     qdr_link_t     *rlink    = (qdr_link_t*) qd_link_get_context(link);
+    qd_connection_t  *conn   = qd_link_connection(link);
+    const qd_server_config_t *cf = qd_connection_config(conn);
     qdr_delivery_t *delivery = 0;
     qd_message_t   *msg;
 
@@ -222,8 +228,22 @@ static void AMQP_rx_handler(void* context, qd_link_t *link, pn_delivery_t *pnd)
     //        send it.
     //
     msg = qd_message_receive(pnd);
+
     if (!msg)
         return;
+
+    if (cf->log_message) {
+        char repr[qd_message_repr_len()];
+        char* message_repr = qd_message_repr((qd_message_t*)msg,
+                                             repr,
+                                             sizeof(repr),
+                                             cf->log_bits);
+        if (message_repr) {
+            qd_log(qd_message_log_source(), QD_LOG_TRACE, "Link %s received %s",
+                   pn_link_name(pn_link),
+                   message_repr);
+        }
+    }
 
     //
     // Consume the delivery.
@@ -244,7 +264,9 @@ static void AMQP_rx_handler(void* context, qd_link_t *link, pn_delivery_t *pnd)
     //
     if (qdr_link_is_routed(rlink)) {
         pn_delivery_tag_t dtag = pn_delivery_tag(pnd);
-        delivery = qdr_link_deliver_to_routed_link(rlink, msg, pn_delivery_settled(pnd), (uint8_t*) dtag.start, dtag.size);
+        delivery = qdr_link_deliver_to_routed_link(rlink, msg, pn_delivery_settled(pnd), (uint8_t*) dtag.start, dtag.size,
+                                                   pn_disposition_type(pn_delivery_remote(pnd)), pn_disposition_data(pn_delivery_remote(pnd)));
+
         if (delivery) {
             if (pn_delivery_settled(pnd))
                 pn_delivery_settle(pnd);
@@ -270,8 +292,10 @@ static void AMQP_rx_handler(void* context, qd_link_t *link, pn_delivery_t *pnd)
     // If the user is not allowed to proxy the user_id then the message user_id
     // must be blank or it must be equal to the connection user name.
     //
-    bool             check_user = false;
-    qd_connection_t *conn       = qd_link_connection(link);
+    bool              check_user   = false;
+    qdr_connection_t *qdr_conn     = (qdr_connection_t*) qd_connection_get_context(conn);
+    int               tenant_space_len;
+    const char       *tenant_space = qdr_connection_get_tenant_space(qdr_conn, &tenant_space_len);
     if (conn->policy_settings) 
         check_user = !conn->policy_settings->allowUserIdProxy;
 
@@ -289,33 +313,33 @@ static void AMQP_rx_handler(void* context, qd_link_t *link, pn_delivery_t *pnd)
     if (valid_message) {
         if (check_user) {
             // This connection must not allow proxied user_id
-            qd_field_iterator_t *userid_iter  = qd_message_field_iterator(msg, QD_FIELD_USER_ID);
+            qd_iterator_t *userid_iter  = qd_message_field_iterator(msg, QD_FIELD_USER_ID);
             if (userid_iter) {
                 // The user_id property has been specified
-                if (qd_field_iterator_remaining(userid_iter) > 0) {
+                if (qd_iterator_remaining(userid_iter) > 0) {
                     // user_id property in message is not blank
-                    if (!qd_field_iterator_equal(userid_iter, (const unsigned char *)conn->user_id)) {
+                    if (!qd_iterator_equal(userid_iter, (const unsigned char *)conn->user_id)) {
                         // This message is rejected: attempted user proxy is disallowed
                         qd_log(router->log_source, QD_LOG_DEBUG, "Message rejected due to user_id proxy violation. User:%s", conn->user_id);
                         pn_link_flow(pn_link, 1);
                         pn_delivery_update(pnd, PN_REJECTED);
                         pn_delivery_settle(pnd);
                         qd_message_free(msg);
-                        qd_field_iterator_free(userid_iter);
+                        qd_iterator_free(userid_iter);
                         return;
                     }
                 }
-                qd_field_iterator_free(userid_iter);
+                qd_iterator_free(userid_iter);
             }
         }
 
         qd_parsed_field_t   *in_ma        = qd_message_message_annotations(msg);
         qd_bitmask_t        *link_exclusions;
         bool                 strip        = qdr_link_strip_annotations_in(rlink);
-        qd_field_iterator_t *ingress_iter = router_annotate_message(router, in_ma, msg, &link_exclusions, strip);
+        qd_iterator_t *ingress_iter = router_annotate_message(router, in_ma, msg, &link_exclusions, strip);
 
         if (anonymous_link) {
-            qd_field_iterator_t *addr_iter = 0;
+            qd_iterator_t *addr_iter = 0;
             int phase = 0;
             
             //
@@ -324,7 +348,7 @@ static void AMQP_rx_handler(void* context, qd_link_t *link, pn_delivery_t *pnd)
             if (in_ma) {
                 qd_parsed_field_t *ma_to = qd_parse_value_by_key(in_ma, QD_MA_TO);
                 if (ma_to) {
-                    addr_iter = qd_field_iterator_dup(qd_parse_raw(ma_to));
+                    addr_iter = qd_iterator_dup(qd_parse_raw(ma_to));
                     phase = qd_message_get_phase_annotation(msg);
                 }
             }
@@ -332,24 +356,46 @@ static void AMQP_rx_handler(void* context, qd_link_t *link, pn_delivery_t *pnd)
             //
             // Still no destination address?  Use the TO field from the message properties.
             //
-            if (!addr_iter)
+            if (!addr_iter) {
                 addr_iter = qd_message_field_iterator(msg, QD_FIELD_TO);
 
+                //
+                // If the address came from the TO field and we need to apply a tenant-space,
+                // set the to-override with the annotated address.
+                //
+                if (addr_iter && tenant_space) {
+                    qd_iterator_reset_view(addr_iter, ITER_VIEW_ADDRESS_WITH_SPACE);
+                    qd_iterator_annotate_space(addr_iter, tenant_space, tenant_space_len);
+                    qd_composed_field_t *to_override = qd_compose_subfield(0);
+                    qd_compose_insert_string_iterator(to_override, addr_iter);
+                    qd_message_set_to_override_annotation(msg, to_override);
+                }
+            }
+
             if (addr_iter) {
-                qd_address_iterator_reset_view(addr_iter, ITER_VIEW_ADDRESS_HASH);
+                qd_iterator_reset_view(addr_iter, ITER_VIEW_ADDRESS_HASH);
                 if (phase > 0)
-                    qd_address_iterator_set_phase(addr_iter, '0' + (char) phase);
+                    qd_iterator_annotate_phase(addr_iter, '0' + (char) phase);
                 delivery = qdr_link_deliver_to(rlink, msg, ingress_iter, addr_iter, pn_delivery_settled(pnd),
                                                link_exclusions);
             }
         } else {
+            //
+            // This is a targeted link, not anonymous.
+            //
             const char *term_addr = pn_terminus_get_address(qd_link_remote_target(link));
             if (!term_addr)
                 term_addr = pn_terminus_get_address(qd_link_source(link));
 
             if (term_addr) {
                 qd_composed_field_t *to_override = qd_compose_subfield(0);
-                qd_compose_insert_string(to_override, term_addr);
+                if (tenant_space) {
+                    qd_iterator_t *aiter = qd_iterator_string(term_addr, ITER_VIEW_ADDRESS_WITH_SPACE);
+                    qd_iterator_annotate_space(aiter, tenant_space, tenant_space_len);
+                    qd_compose_insert_string_iterator(to_override, aiter);
+                    qd_iterator_free(aiter);
+                } else
+                    qd_compose_insert_string(to_override, term_addr);
                 qd_message_set_to_override_annotation(msg, to_override);
                 int phase = qdr_link_phase(rlink);
                 if (phase != 0)
@@ -409,15 +455,21 @@ static void AMQP_disposition_handler(void* context, qd_link_t *link, pn_delivery
 {
     qd_router_t    *router   = (qd_router_t*) context;
     qdr_delivery_t *delivery = (qdr_delivery_t*) pn_delivery_get_context(pnd);
-    bool            give_reference = false;
 
     //
     // It's important to not do any processing without a qdr_delivery.  When pre-settled
     // multi-frame deliveries arrive, it's possible for the settlement to register before
     // the whole message arrives.  Such premature settlement indications must be ignored.
     //
+
     if (!delivery)
         return;
+
+    pn_disposition_t *disp   = pn_delivery_remote(pnd);
+    pn_condition_t *cond     = pn_disposition_condition(disp);
+    qdr_error_t    *error    = qdr_error_from_pn(cond);
+
+    bool            give_reference = false;
 
     //
     // If the delivery is settled, remove the linkage between the PN and QDR deliveries.
@@ -436,7 +488,10 @@ static void AMQP_disposition_handler(void* context, qd_link_t *link, pn_delivery
     // Update the disposition of the delivery
     //
     qdr_delivery_update_disposition(router->router_core, delivery,
-                                    pn_delivery_remote_state(pnd), pn_delivery_settled(pnd),
+                                    pn_delivery_remote_state(pnd),
+                                    pn_delivery_settled(pnd),
+                                    error,
+                                    pn_disposition_data(disp),
                                     give_reference);
 
     //
@@ -454,10 +509,14 @@ static int AMQP_incoming_link_handler(void* context, qd_link_t *link)
 {
     qd_connection_t  *conn     = qd_link_connection(link);
     qdr_connection_t *qdr_conn = (qdr_connection_t*) qd_connection_get_context(conn);
+
+    char *terminus_addr = (char*)pn_terminus_get_address(pn_link_remote_target((pn_link_t  *)qd_link_pn(link)));
+
     qdr_link_t       *qdr_link = qdr_link_first_attach(qdr_conn, QD_INCOMING,
                                                        qdr_terminus(qd_link_remote_source(link)),
                                                        qdr_terminus(qd_link_remote_target(link)),
-                                                       pn_link_name(qd_link_pn(link)));
+                                                       pn_link_name(qd_link_pn(link)),
+                                                       terminus_addr);
     qdr_link_set_context(qdr_link, link);
     qd_link_set_context(link, qdr_link);
 
@@ -472,10 +531,14 @@ static int AMQP_outgoing_link_handler(void* context, qd_link_t *link)
 {
     qd_connection_t  *conn     = qd_link_connection(link);
     qdr_connection_t *qdr_conn = (qdr_connection_t*) qd_connection_get_context(conn);
+
+    char *terminus_addr = (char*)pn_terminus_get_address(pn_link_remote_source((pn_link_t  *)qd_link_pn(link)));
+
     qdr_link_t       *qdr_link = qdr_link_first_attach(qdr_conn, QD_OUTGOING,
                                                        qdr_terminus(qd_link_remote_source(link)),
                                                        qdr_terminus(qd_link_remote_target(link)),
-                                                       pn_link_name(qd_link_pn(link)));
+                                                       pn_link_name(qd_link_pn(link)),
+                                                       terminus_addr);
     qdr_link_set_context(qdr_link, link);
     qd_link_set_context(link, qdr_link);
 
@@ -557,17 +620,53 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
     bool                   strip_annotations_out = false;
     int                    link_capacity = 1;
     const char            *name = 0;
+    bool                   multi_tenant = false;
+    const char            *vhost = 0;
     uint64_t               connection_id = qd_connection_connection_id(conn);
     pn_connection_t       *pn_conn = qd_connection_pn(conn);
+    pn_transport_t *tport = 0;
+    pn_sasl_t      *sasl  = 0;
+    pn_ssl_t       *ssl   = 0;
+    const char     *mech  = 0;
+    const char     *user  = 0;
+    const char *container = conn->pn_conn ? pn_connection_remote_container(conn->pn_conn) : 0;
+    if (conn->pn_conn) {
+        tport = pn_connection_transport(conn->pn_conn);
+        ssl   = conn->ssl;
+    }
+    if (tport) {
+        sasl = pn_sasl(tport);
+        if(conn->user_id)
+            user = conn->user_id;
+        else
+            user = pn_transport_get_user(tport);
+    }
 
-    qd_router_connection_get_config(conn, &role, &cost, &name,
+    if (sasl)
+        mech = pn_sasl_get_mech(sasl);
+
+    const char *host = 0;
+    char host_local[255];
+    const qd_server_config_t *config;
+    if (qd_connection_connector(conn)) {
+        config = qd_connector_config(qd_connection_connector(conn));
+        snprintf(host_local, 254, "%s:%s", config->host, config->port);
+        host = &host_local[0];
+    }
+    else
+        host = qd_connection_name(conn);
+
+
+    qd_router_connection_get_config(conn, &role, &cost, &name, &multi_tenant,
                                     &strip_annotations_in, &strip_annotations_out, &link_capacity);
+
+    pn_data_t *props = pn_conn ? pn_connection_remote_properties(pn_conn) : 0;
 
     if (role == QDR_ROLE_INTER_ROUTER) {
         //
         // Check the remote properties for an inter-router cost value.
         //
-        pn_data_t *props = pn_conn ? pn_connection_remote_properties(pn_conn) : 0;
+
         if (props) {
             pn_data_rewind(props);
             pn_data_next(props);
@@ -595,9 +694,46 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
             cost = remote_cost;
     }
 
+    if (multi_tenant)
+        vhost = pn_connection_remote_hostname(pn_conn);
+
+    char proto[50];
+    memset(proto, 0, 50);
+    char cipher[50];
+    memset(cipher, 0, 50);
+
+    int ssl_ssf = 0;
+    bool is_ssl = false;
+
+    if (ssl) {
+        pn_ssl_get_protocol_name(ssl, proto, 50);
+        pn_ssl_get_cipher_name(ssl, cipher, 50);
+        ssl_ssf = pn_ssl_get_ssf(ssl);
+        is_ssl = true;
+    }
+
+
+    qdr_connection_info_t *connection_info = qdr_connection_info(tport && pn_transport_is_encrypted(tport),
+                                                                 tport && pn_transport_is_authenticated(tport),
+                                                                 conn->opened,
+                                                                 (char *)mech,
+                                                                 conn->connector ? QD_OUTGOING : QD_INCOMING,
+                                                                 host,
+                                                                 proto,
+                                                                 cipher,
+                                                                 (char *)user,
+                                                                 container,
+                                                                 props,
+                                                                 ssl_ssf,
+                                                                 is_ssl);
+
     qdr_connection_t *qdrc = qdr_connection_opened(router->router_core, inbound, role, cost, connection_id, name,
                                                    pn_connection_remote_container(pn_conn),
-                                                   strip_annotations_in, strip_annotations_out, link_capacity);
+                                                   strip_annotations_in,
+                                                   strip_annotations_out,
+                                                   link_capacity,
+                                                   vhost,
+                                                   connection_info);
 
     qd_connection_set_context(conn, qdrc);
     qdr_connection_set_context(qdrc, conn);
@@ -695,7 +831,7 @@ qd_router_t *qd_router(qd_dispatch_t *qd, qd_router_mode_t mode, const char *are
     // Inform the field iterator module of this router's id and area.  The field iterator
     // uses this to offload some of the address-processing load from the router.
     //
-    qd_field_iterator_set_address(area, id);
+    qd_iterator_set_address(area, id);
 
     //
     // Seed the random number generator
@@ -774,7 +910,7 @@ static void CORE_link_second_attach(void *context, qdr_link_t *link, qdr_terminu
 }
 
 
-static void CORE_link_detach(void *context, qdr_link_t *link, qdr_error_t *error, bool first)
+static void CORE_link_detach(void *context, qdr_link_t *link, qdr_error_t *error, bool first, bool close)
 {
     qd_link_t *qlink = (qd_link_t*) qdr_link_get_context(link);
     if (!qlink)
@@ -788,7 +924,11 @@ static void CORE_link_detach(void *context, qdr_link_t *link, qdr_error_t *error
         pn_condition_t *cond = pn_link_condition(pn_link);
         qdr_error_copy(error, cond);
     }
-    qd_link_close(qlink);
+
+    if (close)
+        qd_link_close(qlink);
+    else
+        qd_link_detach(qlink);
 
     //
     // This is the last event for this link that we are going to send into Proton.
@@ -859,19 +999,24 @@ static void CORE_link_drain(void *context, qdr_link_t *link, bool mode)
 }
 
 
-static void CORE_link_push(void *context, qdr_link_t *link)
+static int CORE_link_push(void *context, qdr_link_t *link, int limit)
 {
     qd_router_t *router = (qd_router_t*) context;
     qd_link_t   *qlink  = (qd_link_t*) qdr_link_get_context(link);
     if (!qlink)
-        return;
+        return 0;
     
     pn_link_t *plink = qd_link_pn(qlink);
 
     if (plink) {
         int link_credit = pn_link_credit(plink);
+        if (link_credit > limit)
+            link_credit = limit;
         qdr_link_process_deliveries(router->router_core, link, link_credit);
+        return link_credit;
     }
+
+    return 0;
 }
 
 
@@ -894,6 +1039,8 @@ static void CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_t *d
     pn_delivery(plink, pn_dtag(tag, tag_length));
     pn_delivery_t *pdlv = pn_link_current(plink);
 
+    // handle any delivery-state on the transfer e.g. transactional-state
+    qdr_delivery_write_extension_state(dlv, pdlv, true);
     //
     // If the remote send settle mode is set to 'settled', we should settle the delivery on behalf of the receiver.
     //
@@ -909,7 +1056,7 @@ static void CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_t *d
 
     if (!settled && remote_snd_settled)
         // Tell the core that the delivery has been accepted and settled, since we are settling on behalf of the receiver
-        qdr_delivery_update_disposition(router->router_core, dlv, PN_ACCEPTED, true, false);
+        qdr_delivery_update_disposition(router->router_core, dlv, PN_ACCEPTED, true, 0, 0, false);
 
     if (settled || remote_snd_settled)
         pn_delivery_settle(pdlv);
@@ -920,10 +1067,25 @@ static void CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_t *d
 
 static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t disp, bool settled)
 {
-    pn_delivery_t *pnd = (pn_delivery_t*) qdr_delivery_get_context(dlv);
+    qd_router_t   *router = (qd_router_t*) context;
+    pn_delivery_t *pnd    = (pn_delivery_t*) qdr_delivery_get_context(dlv);
 
     if (!pnd)
         return;
+
+    qdr_error_t *error = qdr_delivery_error(dlv);
+
+    if (error) {
+        pn_condition_t *condition = pn_disposition_condition(pn_delivery_local(pnd));
+        char *name = qdr_error_name(error);
+        char *description = qdr_error_description(error);
+        pn_condition_set_name(condition, (const char*)name);
+        pn_condition_set_description(condition, (const char*)description);
+        pn_data_copy(pn_condition_info(condition), qdr_error_info(error));
+        //proton makes copies of name and description, so it is ok to free them here.
+        free(name);
+        free(description);
+    }
 
     //
     // If the disposition has changed, update the proton delivery.
@@ -931,6 +1093,8 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
     if (disp != pn_delivery_remote_state(pnd)) {
         if (disp == PN_MODIFIED)
             pn_disposition_set_failed(pn_delivery_local(pnd), true);
+
+        qdr_delivery_write_extension_state(dlv, pnd, false);
         pn_delivery_update(pnd, disp);
     }
 
@@ -941,7 +1105,7 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
         qdr_delivery_set_context(dlv, 0);
         pn_delivery_set_context(pnd, 0);
         pn_delivery_settle(pnd);
-        qdr_delivery_decref(dlv);
+        qdr_delivery_decref(router->router_core, dlv);
     }
 }
 
