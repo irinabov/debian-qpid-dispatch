@@ -1,3 +1,9 @@
+qpid-dispatch (0.8.0-1qpid+xenial1) xenial; urgency=medium
+
+  * Rebased to Dispatch 0.8.0
+
+ -- Irina Boverman <iboverma@redhat.com>  Tue, 13 Jun 2017 10:33:54 -0400
+
 qpid-dispatch (0.7.0-7qpid+xenial1) xenial; urgency=medium
 
   * Rebased to Dispatch 0.7.0
