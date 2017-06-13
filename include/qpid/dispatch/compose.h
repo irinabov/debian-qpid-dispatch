@@ -182,6 +182,7 @@ void qd_compose_insert_binary_buffers(qd_composed_field_t *field, qd_buffer_list
  * @param value A pointer to a null-terminated string.
  */
 void qd_compose_insert_string(qd_composed_field_t *field, const char *value);
+void qd_compose_insert_string2(qd_composed_field_t *field, const char *value1, const char *value2);
 
 /**
  * Insert a utf8-encoded string into the field from an iterator
@@ -190,7 +191,7 @@ void qd_compose_insert_string(qd_composed_field_t *field, const char *value);
  * @param iter An iterator for a string value.  The caller is responsible for freeing
  *        this iterator after the call is complete.
  */
-void qd_compose_insert_string_iterator(qd_composed_field_t *field, qd_field_iterator_t *iter);
+void qd_compose_insert_string_iterator(qd_composed_field_t *field, qd_iterator_t *iter);
 
 /**
  * Insert a symbol into the field.
@@ -207,7 +208,7 @@ void qd_compose_insert_symbol(qd_composed_field_t *field, const char *value);
  * @param iter An iterator for a typed value.  The caller is responsible for freeing
  *        this iterator after the call is complete.
  */
-void qd_compose_insert_typed_iterator(qd_composed_field_t *field, qd_field_iterator_t *iter);
+void qd_compose_insert_typed_iterator(qd_composed_field_t *field, qd_iterator_t *iter);
 
 /**
  * Begin composing a new sub field that can be appended to a composed field.

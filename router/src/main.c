@@ -35,13 +35,6 @@ static qd_dispatch_t *dispatch = 0;
 static qd_log_source_t *log_source = 0;
 static const char* argv0 = 0;
 
-/**
- * The thread_start_handler is invoked once for each server thread at thread startup.
- */
-static void thread_start_handler(void* context, int thread_id)
-{
-}
-
 
 /**
  * This is the OS signal handler, invoked on an undetermined thread at a completely
@@ -108,24 +101,16 @@ static void check(int fd) {
 
 static void main_process(const char *config_path, const char *python_pkgdir, int fd)
 {
-    qd_error_clear();
-    struct stat st;
-    if (stat(python_pkgdir, &st))
-        fail(fd, "Cannot find python library path '%s'", python_pkgdir);
-    if (!S_ISDIR(st.st_mode)) {
-        qd_error(QD_ERROR_RUNTIME, "Python library path '%s' not a directory", python_pkgdir);
-        check(fd);
-    }
-
     dispatch = qd_dispatch(python_pkgdir);
     check(fd);
     log_source = qd_log_source("MAIN"); /* Logging is initialized by qd_dispatch. */
+    qd_dispatch_validate_config(config_path);
+    check(fd);
     qd_dispatch_load_config(dispatch, config_path);
     check(fd);
 
-    (void)server_signal_handler; (void)thread_start_handler;(void)signal_handler;
+    (void)server_signal_handler; (void)signal_handler;
     qd_server_set_signal_handler(dispatch, server_signal_handler, 0);
-    qd_server_set_start_handler(dispatch, thread_start_handler, 0);
 
     signal(SIGHUP,  signal_handler);
     signal(SIGQUIT, signal_handler);
@@ -134,8 +119,8 @@ static void main_process(const char *config_path, const char *python_pkgdir, int
 
     if (fd > 2) {               /* Daemon mode, fd is one end of a pipe not stdout or stderr */
         #ifdef __sun
-        FILE *file = fdopen(fd, "a+");
-        fprintf(file, "ok");
+        const char * okResult = "ok";
+        write(fd, okResult, (strlen(okResult)+1));
         #else
         dprintf(fd, "ok"); // Success signal
         #endif
@@ -207,7 +192,7 @@ static void daemon_process(const char *config_path, const char *python_pkgdir,
             //
             // Set the umask to 0
             //
-            if (umask(0) < 0) fail(pipefd[1], "Can't set umask");
+            umask(0);
 
             //
             // Set the current directory to "/" to avoid blocking

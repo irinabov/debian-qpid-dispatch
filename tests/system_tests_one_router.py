@@ -18,7 +18,7 @@
 #
 
 import unittest
-from proton import Message, Delivery, PENDING, ACCEPTED, REJECTED
+from proton import Condition, Message, Delivery, PENDING, ACCEPTED, REJECTED
 from system_test import TestCase, Qdrouterd, main_module
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, AtMostOnce, AtLeastOnce
@@ -1115,6 +1115,11 @@ class RouterTest(TestCase):
         test.run()
         self.assertEqual(None, test.error)
 
+    def test_reject_disposition(self):
+        test = RejectDispositionTest(self.address)
+        test.run()
+        self.assertTrue(test.received_error)
+
     def test_connection_properties(self):
         connection = BlockingConnection(self.router.addresses[0],
                                         timeout=60,
@@ -1123,10 +1128,10 @@ class RouterTest(TestCase):
 
         node = Node.connect(self.router.addresses[0])
 
-        results = [[{u'connection': u'properties', u'int_property': 6451}], [{}]]
+        results = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'properties']).results
 
-        self.assertEqual(node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['properties']).results,
-                         results)
+        self.assertEqual(results[0][0][u'connection'], u'properties')
+        self.assertEqual(results[0][0][u'int_property'], 6451)
 
         client.connection.close()
 
@@ -1433,8 +1438,8 @@ class BatchedSettlementTest(MessagingHandler):
         self.address = address
         self.dest = "balanced.BatchedSettlement"
         self.error = None
-        self.count       = 20000
-        self.batch_count = 200
+        self.count       = 200
+        self.batch_count = 20
         self.n_sent      = 0
         self.n_received  = 0
         self.n_settled   = 0
@@ -1451,21 +1456,19 @@ class BatchedSettlementTest(MessagingHandler):
         self.conn.close()
 
     def on_start(self, event):
-        self.timer    = event.reactor.schedule(20, Timeout(self))
+        self.timer    = event.reactor.schedule(10, Timeout(self))
         self.conn     = event.container.connect(self.address)
         self.sender   = event.container.create_sender(self.conn, self.dest)
         self.receiver = event.container.create_receiver(self.conn, self.dest)
 
     def send(self):
-        if self.n_sent < self.count:
-            while self.sender.credit > 0:
-                msg = Message(body="Batch-Test")
-                self.sender.send(msg)
-                self.n_sent += 1
+        while self.n_sent < self.count and self.sender.credit > 0:
+            msg = Message(body="Batch-Test")
+            self.sender.send(msg)
+            self.n_sent += 1
 
     def on_sendable(self, event):
-        if self.n_sent < self.count:
-            self.send()
+        self.send()
 
     def on_message(self, event):
         self.n_received += 1
@@ -1529,6 +1532,40 @@ class PresettledOverflowTest(MessagingHandler):
     def run(self):
         Container(self).run()
 
+
+class RejectDispositionTest(MessagingHandler):
+    def __init__(self, address):
+        super(RejectDispositionTest, self).__init__(auto_accept=False)
+        self.address = address
+        self.sent = False
+        self.received_error = False
+        self.dest = "rejectDispositionTest"
+        self.error_description = 'you were out of luck this time!'
+        self.error_name = u'amqp:internal-error'
+
+
+    def on_start(self, event):
+        conn = event.container.connect(self.address)
+        event.container.create_sender(conn, self.dest)
+        event.container.create_receiver(conn, self.dest)
+
+    def on_sendable(self, event):
+        if not self.sent:
+            event.sender.send(Message(body=u"Hello World!"))
+            self.sent = True
+
+    def on_rejected(self, event):
+        if event.delivery.remote.condition.description == self.error_description \
+                and event.delivery.remote.condition.name == self.error_name:
+            self.received_error = True
+        event.connection.close()
+
+    def on_message(self, event):
+        event.delivery.local.condition = Condition(self.error_name, self.error_description)
+        self.reject(event.delivery)
+
+    def run(self):
+        Container(self).run()
 
 if __name__ == '__main__':
     unittest.main(main_module())

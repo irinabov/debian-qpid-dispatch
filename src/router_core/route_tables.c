@@ -266,10 +266,10 @@ static void qdr_add_router_CT(qdr_core_t *core, qdr_action_t *action, bool disca
         //
         // Hash lookup the address to ensure there isn't an existing router address.
         //
-        qd_field_iterator_t *iter = address->iterator;
-        qdr_address_t       *addr;
+        qd_iterator_t *iter = address->iterator;
+        qdr_address_t *addr;
 
-        qd_address_iterator_reset_view(iter, ITER_VIEW_ADDRESS_HASH);
+        qd_iterator_reset_view(iter, ITER_VIEW_ADDRESS_HASH);
         qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
 
         if (addr) {
@@ -379,17 +379,8 @@ static void qdr_del_router_CT(qdr_core_t *core, qdr_action_t *action, bool disca
     //
     // Free the router node and the owning address records.
     //
-    qd_bitmask_free(rnode->valid_origins);
-    DEQ_REMOVE(core->routers, rnode);
-    core->cost_epoch++;
-    free_qdr_node_t(rnode);
-
-    qd_hash_remove_by_handle(core->addr_hash, oaddr->hash_handle);
-    DEQ_REMOVE(core->addrs, oaddr);
-    qd_hash_handle_free(oaddr->hash_handle);
-    core->routers_by_mask_bit[router_maskbit] = 0;
-    qd_bitmask_free(oaddr->rnodes);
-    free_qdr_address_t(oaddr);
+    qdr_router_node_free(core, rnode);
+    qdr_core_remove_address(core, oaddr);
 }
 
 
@@ -566,8 +557,8 @@ static void qdr_map_destination_CT(qdr_core_t *core, qdr_action_t *action, bool 
             break;
         }
 
-        qd_field_iterator_t *iter = address->iterator;
-        qdr_address_t       *addr = 0;
+        qd_iterator_t *iter = address->iterator;
+        qdr_address_t *addr = 0;
 
         qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
         if (!addr) {
@@ -609,9 +600,9 @@ static void qdr_unmap_destination_CT(qdr_core_t *core, qdr_action_t *action, boo
             break;
         }
 
-        qdr_node_t          *rnode = core->routers_by_mask_bit[router_maskbit];
-        qd_field_iterator_t *iter  = address->iterator;
-        qdr_address_t       *addr  = 0;
+        qdr_node_t    *rnode = core->routers_by_mask_bit[router_maskbit];
+        qd_iterator_t *iter  = address->iterator;
+        qdr_address_t *addr  = 0;
 
         qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
 
@@ -645,14 +636,14 @@ static void qdr_subscribe_CT(qdr_core_t *core, qdr_action_t *action, bool discar
         char phase          = action->args.io.address_phase;
         qdr_address_t *addr = 0;
 
-        char *astring = (char*) qd_field_iterator_copy(address->iterator);
+        char *astring = (char*) qd_iterator_copy(address->iterator);
         qd_log(core->log, QD_LOG_INFO, "In-process subscription %c/%s", aclass, astring);
         free(astring);
 
-        qd_address_iterator_override_prefix(address->iterator, aclass);
+        qd_iterator_annotate_prefix(address->iterator, aclass);
         if (aclass == 'M')
-            qd_address_iterator_set_phase(address->iterator, phase);
-        qd_address_iterator_reset_view(address->iterator, ITER_VIEW_ADDRESS_HASH);
+            qd_iterator_annotate_phase(address->iterator, phase);
+        qd_iterator_reset_view(address->iterator, ITER_VIEW_ADDRESS_HASH);
 
         qd_hash_retrieve(core->addr_hash, address->iterator, (void**) &addr);
         if (!addr) {

@@ -119,7 +119,11 @@ static void qdr_agent_write_column_CT(qd_composed_field_t *body, int col, qdr_li
         break;
 
     case QDR_LINK_OWNING_ADDR:
-        if (link->owning_addr)
+        if(link->terminus_addr)
+            qd_compose_insert_string(body, link->terminus_addr);
+        else if (link->connected_link && link->connected_link->terminus_addr)
+            qd_compose_insert_string(body, link->connected_link->terminus_addr);
+        else if (link->owning_addr)
             qd_compose_insert_string(body, address_key(link->owning_addr));
         else
             qd_compose_insert_null(body);
@@ -150,9 +154,12 @@ static void qdr_agent_write_column_CT(qd_composed_field_t *body, int col, qdr_li
         qd_compose_insert_ulong(body, link->total_deliveries);
         break;
 
-    case QDR_LINK_CONNECTION_ID:
-        qd_compose_insert_ulong(body, link->conn->management_id);
+    case QDR_LINK_CONNECTION_ID: {
+        char id[100];
+        snprintf(id, 100, "%"PRId64, link->conn->identity);
+        qd_compose_insert_string(body, id);
         break;
+    }
 
     case QDR_LINK_ADMIN_STATE:
         text = link->admin_enabled ? "enabled" : "disabled";
@@ -310,7 +317,7 @@ static void qdr_manage_write_response_map_CT(qd_composed_field_t *body, qdr_link
 }
 
 
-static qdr_link_t *qdr_link_find_by_identity(qdr_core_t *core, qd_field_iterator_t *identity)
+static qdr_link_t *qdr_link_find_by_identity(qdr_core_t *core, qd_iterator_t *identity)
 {
     if (!identity)
         return 0;
@@ -321,7 +328,7 @@ static qdr_link_t *qdr_link_find_by_identity(qdr_core_t *core, qd_field_iterator
         char id[100];
         if (link->identity) {
             snprintf(id, 100, "%"PRId64, link->identity);
-            if (qd_field_iterator_equal(identity, (const unsigned char *)id))
+            if (qd_iterator_equal(identity, (const unsigned char *)id))
                 break;
         }
         link = DEQ_NEXT(link);
@@ -332,7 +339,7 @@ static qdr_link_t *qdr_link_find_by_identity(qdr_core_t *core, qd_field_iterator
 }
 
 
-static qdr_link_t *qdr_link_find_by_name(qdr_core_t *core, qd_field_iterator_t *name)
+static qdr_link_t *qdr_link_find_by_name(qdr_core_t *core, qd_iterator_t *name)
 {
     if(!name)
         return 0;
@@ -340,7 +347,7 @@ static qdr_link_t *qdr_link_find_by_name(qdr_core_t *core, qd_field_iterator_t *
     qdr_link_t *link = DEQ_HEAD(core->open_links);
 
     while(link) {
-        if (link->name && qd_field_iterator_equal(name, (const unsigned char *)link->name))
+        if (link->name && qd_iterator_equal(name, (const unsigned char *)link->name))
             break;
         link = DEQ_NEXT(link);
     }
@@ -352,7 +359,7 @@ static qdr_link_t *qdr_link_find_by_name(qdr_core_t *core, qd_field_iterator_t *
 static void qdra_link_update_set_status(qdr_core_t *core, qdr_query_t *query, qdr_link_t *link)
 {
     if (link) {
-        //link->admin_state = qd_field_iterator_copy(adm_state);
+        //link->admin_state = qd_iterator_copy(adm_state);
         qdr_manage_write_response_map_CT(query->body, link);
         query->status = QD_AMQP_OK;
     }
@@ -370,11 +377,11 @@ static void qdra_link_set_bad_request(qdr_query_t *query)
     qd_compose_end_map(query->body);
 }
 
-void qdra_link_update_CT(qdr_core_t              *core,
-                             qd_field_iterator_t *name,
-                             qd_field_iterator_t *identity,
-                             qdr_query_t         *query,
-                             qd_parsed_field_t   *in_body)
+void qdra_link_update_CT(qdr_core_t            *core,
+                             qd_iterator_t     *name,
+                             qd_iterator_t     *identity,
+                             qdr_query_t       *query,
+                             qd_parsed_field_t *in_body)
 
 {
     // If the request was successful then the statusCode MUST contain 200 (OK) and the body of the message
@@ -389,7 +396,7 @@ void qdra_link_update_CT(qdr_core_t              *core,
 
         qd_parsed_field_t *admin_state = qd_parse_value_by_key(in_body, qdr_link_columns[QDR_LINK_ADMIN_STATE]);
         if (admin_state) { //admin state is the only field that can be updated via the update management request
-            //qd_field_iterator_t *adm_state = qd_parse_raw(admin_state);
+            //qd_iterator_t *adm_state = qd_parse_raw(admin_state);
 
             if (identity) {
                 qdr_link_t *link = qdr_link_find_by_identity(core, identity);

@@ -27,6 +27,7 @@
 #include "config.h"
 #include "dispatch_private.h"
 #include "alloc.h"
+#include "http.h"
 #include "log_private.h"
 #include "router_private.h"
 #include "message_private.h"
@@ -61,8 +62,19 @@ qd_dispatch_t *qd_dispatch(const char *python_pkgdir)
     qd_error_initialize();
     if (qd_error_code()) { qd_dispatch_free(qd); return 0; }
 
-    qd->router_area = strdup("0");
-    qd->router_id   = strdup("0");
+    if (python_pkgdir) {
+        struct stat st;
+        if (stat(python_pkgdir, &st)) {
+            qd_error_errno(errno, "Cannot find Python library path '%s'", python_pkgdir);
+            return NULL;
+        } else if (!S_ISDIR(st.st_mode)) {
+            qd_error(QD_ERROR_RUNTIME, "Python library path '%s' not a directory", python_pkgdir);
+            return NULL;
+        }
+    }
+
+    qd_dispatch_set_router_area(qd, strdup("0"));
+    qd_dispatch_set_router_id(qd, strdup("0"));
     qd->router_mode = QD_ROUTER_MODE_ENDPOINT;
 
     qd_python_initialize(qd, python_pkgdir);
@@ -95,6 +107,44 @@ qd_error_t qd_dispatch_load_config(qd_dispatch_t *qd, const char *config_path)
     return qd_error_code();
 }
 
+qd_error_t qd_dispatch_validate_config(const char *config_path)
+{
+	FILE* config_file = NULL;
+	char config_data = '\0';
+	qd_error_t validation_error = QD_ERROR_CONFIG;
+
+	do {
+		if (!config_path) {
+			validation_error = qd_error(QD_ERROR_VALUE, "Configuration path value was empty");
+			break;
+		}
+
+		config_file = fopen(config_path, "r");
+		if (!config_file) {
+			validation_error = qd_error(QD_ERROR_NOT_FOUND, "Configuration file could not be opened");
+			break;
+		}
+
+		// TODO Check the actual minimum number of bytes required for the smallest valid configuration file
+		if (!fread((void*)&config_data, 1, 1, config_file)) {
+			validation_error = qd_error(QD_ERROR_CONFIG, "Configuration file was empty");
+			break;
+		}
+
+		// TODO Add real validation code
+
+		validation_error = QD_ERROR_NONE;
+	} while (false); // do once
+
+	if (config_file)
+	{
+		fclose(config_file);
+	}
+
+	return validation_error;
+}
+
+
 /**
  * The Container Entity has been deprecated and will be removed in the future. Use the RouterEntity instead.
  */
@@ -116,17 +166,25 @@ qd_error_t qd_dispatch_configure_container(qd_dispatch_t *qd, qd_entity_t *entit
 
 qd_error_t qd_dispatch_configure_router(qd_dispatch_t *qd, qd_entity_t *entity)
 {
-    qd->router_id = qd_entity_opt_string(entity, "routerId", 0); QD_ERROR_RET();
-    if (! qd->router_id)
-        qd->router_id = qd_entity_opt_string(entity, "id", 0); QD_ERROR_RET();
-    assert(qd->router_id);
+    qd_dispatch_set_router_id(qd, qd_entity_opt_string(entity, "routerId", 0)); QD_ERROR_RET();
+    if (! qd->router_id) {
+        qd_dispatch_set_router_id(qd, qd_entity_opt_string(entity, "id", 0)); QD_ERROR_RET();
+    }
+    if (!qd->router_id) {
+        qd_log_source_t *router_log = qd_log_source("ROUTER");
+        qd_log(router_log, QD_LOG_CRITICAL, "Router Id not specified - process exiting");
+        exit(1);
+    }
+
     qd->router_mode = qd_entity_get_long(entity, "mode"); QD_ERROR_RET();
     qd->thread_count = qd_entity_opt_long(entity, "workerThreads", 4); QD_ERROR_RET();
 
-    if (! qd->sasl_config_path)
+    if (! qd->sasl_config_path) {
         qd->sasl_config_path = qd_entity_opt_string(entity, "saslConfigPath", 0); QD_ERROR_RET();
-    if (! qd->sasl_config_name)
+    }
+    if (! qd->sasl_config_name) {
         qd->sasl_config_name = qd_entity_opt_string(entity, "saslConfigName", "qdrouterd"); QD_ERROR_RET();
+    }
 
     char *dump_file = qd_entity_opt_string(entity, "debugDump", 0); QD_ERROR_RET();
     if (dump_file) {
@@ -228,11 +286,27 @@ void qd_dispatch_set_agent(qd_dispatch_t *qd, void *agent) {
     qd->agent = agent;
 }
 
+void qd_dispatch_set_router_id(qd_dispatch_t *qd, char *_id) {
+    if (qd->router_id) {
+        free(qd->router_id);
+    }
+    qd->router_id = _id;
+}
+
+void qd_dispatch_set_router_area(qd_dispatch_t *qd, char *_area) {
+    if (qd->router_area) {
+        free(qd->router_area);
+    }
+    qd->router_area = _area;
+}
+
 void qd_dispatch_free(qd_dispatch_t *qd)
 {
     if (!qd) return;
-    free(qd->router_id);
-    free(qd->router_area);
+    qd_dispatch_set_router_id(qd, NULL);
+    qd_dispatch_set_router_area(qd, NULL);
+    free(qd->sasl_config_path);
+    free(qd->sasl_config_name);
     qd_connection_manager_free(qd->connection_manager);
     qd_policy_free(qd->policy);
     Py_XDECREF((PyObject*) qd->agent);

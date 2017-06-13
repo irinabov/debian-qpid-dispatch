@@ -36,20 +36,25 @@
 #include <fcntl.h>
 #include <assert.h>
 #include <time.h>
+
+#ifndef __sun
 #include <sys/eventfd.h>
+#endif
 
 #ifdef __sun
 #include <signal.h>
 #endif
 
 #include <qpid/dispatch/driver.h>
+#include <qpid/dispatch/error.h>
 #include <qpid/dispatch/threading.h>
-#include "alloc.h"
 #include <proton/error.h>
 #include <proton/ssl.h>
 #include <proton/object.h>
 #include <qpid/dispatch/ctools.h>
-#include <qpid/dispatch/log.h>
+#include "alloc.h"
+#include "aprintf.h"
+#include "log_private.h"
 
 /* Decls */
 
@@ -75,7 +80,6 @@ static inline void ignore_result(int unused_result) {
 
 struct qdpn_driver_t {
     qd_log_source_t *log;
-    pn_trace_t       trace;
     sys_mutex_t     *lock;
 
     //
@@ -93,7 +97,11 @@ struct qdpn_driver_t {
     size_t          capacity;
     struct pollfd  *fds;
     size_t          nfds;
+#ifdef __sun
+    int             ctrl[2];
+#else
     int             efd;    // Event-FD for signaling the poll (driver-wakeup)
+#endif
     pn_timestamp_t  wakeup;
 };
 
@@ -103,8 +111,8 @@ struct qdpn_listener_t {
     void *context;
     int idx;
     int fd;
-    bool pending;
-    bool closed;
+    bool pending:1;
+    bool closed:1;
 };
 
 #define PN_NAME_MAX (256)
@@ -119,17 +127,16 @@ struct qdpn_connector_t {
     pn_transport_t *transport;
     qdpn_listener_t *listener;
     void *context;
+    qdpn_connector_methods_t *methods;
     int idx;
     int fd;
     int status;
-    pn_trace_t trace;
-    bool pending_tick;
-    bool pending_read;
-    bool pending_write;
-    bool socket_error;
-    bool closed;
-    bool input_done;
-    bool output_done;
+    bool pending_tick:1;
+    bool pending_read:1;
+    bool pending_write:1;
+    bool socket_error:1;
+    bool hangup:1;
+    bool closed:1;
 };
 
 ALLOC_DECLARE(qdpn_listener_t);
@@ -140,11 +147,19 @@ ALLOC_DEFINE(qdpn_connector_t);
 
 /* Impls */
 
-static void pni_fatal(const char *text)
+static void qdpn_log_errno(qdpn_driver_t *d, const char *fmt, ...)
 {
-    fprintf(stderr, "%s\n", text);
-    exit(1);
+    char msg[QD_LOG_TEXT_MAX];
+    char *begin = msg, *end = msg+sizeof(msg);
+    va_list ap;
+    va_start(ap, fmt);
+    vaprintf(&begin, end, fmt, ap);
+    va_end(ap);
+    aprintf(&begin, end, ": ");
+    strerror_r(errno, begin, end - begin);
+    qd_log(d->log, QD_LOG_ERROR, "%s", msg);
 }
+
 
 pn_timestamp_t pn_i_now(void)
 {
@@ -154,25 +169,14 @@ pn_timestamp_t pn_i_now(void)
 #else
     int cid = CLOCK_MONOTONIC;
 #endif
-    if (clock_gettime(cid, &now)) pni_fatal("clock_gettime() failed");
+    if (clock_gettime(cid, &now)) {
+        qd_error_errno(errno, "clock_gettime");
+        exit(1);
+    }
     return ((pn_timestamp_t)now.tv_sec) * 1000 + (now.tv_nsec / 1000000);
 }
 
-static bool pni_eq_nocase(const char *a, const char *b)
-{
-    while (*b) {
-        if (tolower(*a++) != tolower(*b++))
-            return false;
-    }
-    return !(*a);
-}
-
-static bool pn_env_bool(const char *name)
-{
-    char *v = getenv(name);
-    return v && (pni_eq_nocase(v, "true") || pni_eq_nocase(v, "1") ||
-                 pni_eq_nocase(v, "yes") || pni_eq_nocase(v, "on"));
-}
+pn_timestamp_t qdpn_now() { return pn_i_now(); }
 
 #define pn_min(X,Y) ((X) > (Y) ? (Y) : (X))
 #define pn_max(X,Y) ((X) < (Y) ? (Y) : (X))
@@ -183,14 +187,6 @@ static pn_timestamp_t pn_timestamp_min( pn_timestamp_t a, pn_timestamp_t b )
     if (a) return a;
     return b;
 }
-
-static void qdpn_log_errno(qdpn_driver_t *d, const char *msg)
-{
-    char ebuf[ERROR_MAX];
-    strerror_r(errno, ebuf, ERROR_MAX);
-    qd_log(d->log, QD_LOG_ERROR, "%s: %s", msg, ebuf);
-}
-
 
 // listener
 
@@ -277,7 +273,7 @@ qdpn_listener_t *qdpn_listener(qdpn_driver_t *driver,
     hints.ai_socktype = SOCK_STREAM;
     int code = getaddrinfo(host, port, &hints, &addr);
     if (code) {
-        qd_log(driver->log, QD_LOG_ERROR, "getaddrinfo(%s, %s): %s\n", host, port, gai_strerror(code));
+        qd_log(driver->log, QD_LOG_ERROR, "getaddrinfo(%s, %s): %s", host, port, gai_strerror(code));
         return 0;
     }
 
@@ -315,10 +311,6 @@ qdpn_listener_t *qdpn_listener(qdpn_driver_t *driver,
     }
 
     qdpn_listener_t *l = qdpn_listener_fd(driver, sock, context);
-
-    if (driver->trace & (PN_TRACE_FRM | PN_TRACE_RAW | PN_TRACE_DRV))
-        fprintf(stderr, "Listening on %s:%s\n", host, port);
-
     return l;
 }
 
@@ -370,11 +362,6 @@ qdpn_listener_t *qdpn_listener_next(qdpn_listener_t *listener)
     return next;
 }
 
-void qdpn_listener_trace(qdpn_listener_t *l, pn_trace_t trace)
-{
-    // XXX
-}
-
 void *qdpn_listener_context(qdpn_listener_t *l)
 {
     return l ? l->context : NULL;
@@ -407,7 +394,7 @@ qdpn_connector_t *qdpn_listener_accept(qdpn_listener_t *l,
     } else {
         int code = getnameinfo((struct sockaddr *) &addr, addrlen, hostip, MAX_HOST, serv, MAX_SERV, NI_NUMERICHOST | NI_NUMERICSERV);
         if (code != 0) {
-            qd_log(l->driver->log, QD_LOG_ERROR, "getnameinfo: %s\n", gai_strerror(code));
+            qd_log(l->driver->log, QD_LOG_ERROR, "getnameinfo: %s", gai_strerror(code));
             close(sock);
             return 0;
         } else {
@@ -424,10 +411,6 @@ qdpn_connector_t *qdpn_listener_accept(qdpn_listener_t *l,
             *counted = true;
         }
     }
-
-    if (l->driver->trace & (PN_TRACE_FRM | PN_TRACE_RAW | PN_TRACE_DRV))
-        fprintf(stderr, "Accepted from %s\n", name);
-
     qdpn_connector_t *c = qdpn_connector_fd(l->driver, sock, NULL);
     snprintf(c->name, PN_NAME_MAX, "%s", name);
     snprintf(c->hostip, PN_NAME_MAX, "%s", hostip);
@@ -441,14 +424,13 @@ void qdpn_listener_close(qdpn_listener_t *l)
     if (l->closed) return;
 
     if (close(l->fd) == -1)
-        perror("close");
+        qdpn_log_errno(l->driver, "close");
     l->closed = true;
 }
 
 void qdpn_listener_free(qdpn_listener_t *l)
 {
     if (!l) return;
-
     if (l->driver) qdpn_driver_remove_listener(l->driver, l);
     free_qdpn_listener_t(l);
 }
@@ -522,10 +504,17 @@ qdpn_connector_t *qdpn_connector(qdpn_driver_t *driver,
 
     qdpn_connector_t *c = qdpn_connector_fd(driver, sock, context);
     snprintf(c->name, PN_NAME_MAX, "%s:%s", host, port);
-    if (driver->trace & (PN_TRACE_FRM | PN_TRACE_RAW | PN_TRACE_DRV))
-        fprintf(stderr, "Connected to %s\n", c->name);
     return c;
 }
+
+
+static void connector_process(qdpn_connector_t *c);
+static void connector_close(qdpn_connector_t *c);
+
+static qdpn_connector_methods_t connector_methods = {
+    connector_process,
+    connector_close
+};
 
 qdpn_connector_t *qdpn_connector_fd(qdpn_driver_t *driver, int fd, void *context)
 {
@@ -539,22 +528,18 @@ qdpn_connector_t *qdpn_connector_fd(qdpn_driver_t *driver, int fd, void *context
     c->pending_read = false;
     c->pending_write = false;
     c->socket_error = false;
+    c->hangup = false;
     c->name[0] = '\0';
     c->idx = 0;
     c->fd = fd;
     c->status = PN_SEL_RD | PN_SEL_WR;
-    c->trace = driver->trace;
     c->closed = false;
     c->wakeup = 0;
     c->connection = NULL;
     c->transport = pn_transport();
-    c->input_done = false;
-    c->output_done = false;
     c->context = context;
     c->listener = NULL;
-
-    qdpn_connector_trace(c, driver->trace);
-
+    c->methods = &connector_methods;
     qdpn_driver_add_connector(driver, c);
     return c;
 }
@@ -586,13 +571,6 @@ qdpn_connector_t *qdpn_connector_next(qdpn_connector_t *connector)
     return next;
 }
 
-void qdpn_connector_trace(qdpn_connector_t *ctor, pn_trace_t trace)
-{
-    if (!ctor) return;
-    ctor->trace = trace;
-    if (ctor->transport) pn_transport_trace(ctor->transport, trace);
-}
-
 pn_transport_t *qdpn_connector_transport(qdpn_connector_t *ctor)
 {
     return ctor ? ctor->transport : NULL;
@@ -610,7 +588,6 @@ void qdpn_connector_set_connection(qdpn_connector_t *ctor, pn_connection_t *conn
         pn_class_incref(PN_OBJECT, ctor->connection);
         pn_transport_bind(ctor->transport, connection);
     }
-    if (ctor->transport) pn_transport_trace(ctor->transport, ctor->trace);
 }
 
 pn_connection_t *qdpn_connector_connection(qdpn_connector_t *ctor)
@@ -646,20 +623,34 @@ qdpn_listener_t *qdpn_connector_listener(qdpn_connector_t *ctor)
     return ctor ? ctor->listener : NULL;
 }
 
-void qdpn_connector_close(qdpn_connector_t *ctor)
+/* Mark the connector as closed, but don't close the FD (already closed or
+ * will be closed elsewhere)
+ */
+void qdpn_connector_mark_closed(qdpn_connector_t *ctor)
 {
-    // XXX: should probably signal engine and callback here
-    if (!ctor) return;
-
+    if (!ctor || !ctor->driver) return;
+    sys_mutex_lock(ctor->driver->lock);
     ctor->status = 0;
-    if (close(ctor->fd) == -1)
-        perror("close");
     if (!ctor->closed) {
-        sys_mutex_lock(ctor->driver->lock);
+        qd_log(ctor->driver->log, QD_LOG_TRACE, "closed %s", ctor->name);
         ctor->closed = true;
         ctor->driver->closed_count++;
-        sys_mutex_unlock(ctor->driver->lock);
     }
+    sys_mutex_unlock(ctor->driver->lock);
+}
+
+static void connector_close(qdpn_connector_t *ctor)
+{
+    if (ctor && !ctor->closed) {
+        qdpn_connector_mark_closed(ctor);
+        if (close(ctor->fd) == -1)
+            qdpn_log_errno(ctor->driver, "close %s", ctor->name);
+    }
+}
+
+void qdpn_connector_close(qdpn_connector_t *c)
+{
+    if (c && !c->closed) c->methods->close(c);
 }
 
 bool qdpn_connector_closed(qdpn_connector_t *ctor)
@@ -710,6 +701,9 @@ void qdpn_activate_all(qdpn_driver_t *d)
     sys_mutex_unlock(d->lock);
 }
 
+bool qdpn_connector_hangup(qdpn_connector_t *ctor) {
+    return ctor->hangup;
+}
 
 bool qdpn_connector_activated(qdpn_connector_t *ctor, qdpn_activate_criteria_t crit)
 {
@@ -740,151 +734,130 @@ static pn_timestamp_t qdpn_connector_tick(qdpn_connector_t *ctor, pn_timestamp_t
 
 void qdpn_connector_process(qdpn_connector_t *c)
 {
-    if (c) {
-        if (c->closed) return;
+    if (c && !c->closed) c->methods->process(c);
+}
 
-        pn_transport_t *transport = c->transport;
+static void connector_process(qdpn_connector_t *c)
+{
+    if(c->closed) return;
 
-        ///
-        /// Socket read
-        ///
-        if (!c->input_done) {
-            ssize_t capacity = pn_transport_capacity(transport);
-            if (capacity > 0) {
-                c->status |= PN_SEL_RD;
-                if (c->pending_read) {
-                    c->pending_read = false;
-                    ssize_t n =  recv(c->fd, pn_transport_tail(transport), capacity, 0);
-                    if (n < 0) {
-                        if (errno != EAGAIN) {
-                            perror("read");
-                            c->status &= ~PN_SEL_RD;
-                            c->input_done = true;
-                            pn_transport_close_tail( transport );
-                        }
-                    } else if (n == 0) {
-                        c->status &= ~PN_SEL_RD;
-                        c->input_done = true;
-                        pn_transport_close_tail( transport );
-                    } else {
-                        if (pn_transport_process(transport, (size_t) n) < 0) {
-                            c->status &= ~PN_SEL_RD;
-                            c->input_done = true;
-                        }
-                    }
+    pn_transport_t *transport = c->transport;
+    c->status = 0;
+
+    ///
+    /// Socket read
+    ///
+    ssize_t capacity = pn_transport_capacity(transport);
+    if (capacity > 0) {
+        c->status |= PN_SEL_RD;
+        if (c->pending_read) {
+            c->pending_read = false;
+            ssize_t n =  recv(c->fd, pn_transport_tail(transport), capacity, 0);
+            if (n < 0) {
+                if (errno != EAGAIN) {
+                    qdpn_log_errno(c->driver, "recv %s", c->name);
+                    pn_transport_close_tail( transport );
                 }
-            }
-
-            capacity = pn_transport_capacity(transport);
-
-            if (capacity < 0) {
-                c->status &= ~PN_SEL_RD;
-                c->input_done = true;
-            }
-        }
-
-        ///
-        /// Event wakeup
-        ///
-        c->wakeup = qdpn_connector_tick(c, pn_i_now());
-
-        ///
-        /// Socket write
-        ///
-        if (!c->output_done) {
-            ssize_t pending = pn_transport_pending(transport);
-            if (pending > 0) {
-                c->status |= PN_SEL_WR;
-                if (c->pending_write) {
-                    c->pending_write = false;
-                    #ifdef MSG_NOSIGNAL
-                    ssize_t n = send(c->fd, pn_transport_head(transport), pending, MSG_NOSIGNAL);
-                    #else
-                    ssize_t n = send(c->fd, pn_transport_head(transport), pending, 0);
-                    #endif
-                    if (n < 0) {
-                        // XXX
-                        if (errno != EAGAIN) {
-                            perror("send");
-                            c->output_done = true;
-                            c->status &= ~PN_SEL_WR;
-                            pn_transport_close_head( transport );
-                        }
-                    } else if (n) {
-                        pn_transport_pop(transport, (size_t) n);
-                    }
-                }
-            } else if (pending == 0) {
-                c->status &= ~PN_SEL_WR;
+            } else if (n == 0) { /* HUP */
+                pn_transport_close_tail( transport );
             } else {
-                c->output_done = true;
-                c->status &= ~PN_SEL_WR;
+                pn_transport_process(transport, (size_t) n);
             }
-        } else
-            c->status &= ~PN_SEL_WR;
-
-        // Closed?
-
-        if (c->input_done && c->output_done) {
-            if (c->trace & (PN_TRACE_FRM | PN_TRACE_RAW | PN_TRACE_DRV)) {
-                fprintf(stderr, "Closed %s\n", c->name);
-            }
-            qdpn_connector_close(c);
         }
+    }
+
+    ///
+    /// Event wakeup
+    ///
+    c->wakeup = qdpn_connector_tick(c, pn_i_now());
+
+    ///
+    /// Socket write
+    ///
+    ssize_t pending = pn_transport_pending(transport);
+    if (pending > 0) {
+        c->status |= PN_SEL_WR;
+        if (c->pending_write) {
+            c->pending_write = false;
+#ifdef MSG_NOSIGNAL
+            ssize_t n = send(c->fd, pn_transport_head(transport), pending, MSG_NOSIGNAL);
+#else
+            ssize_t n = send(c->fd, pn_transport_head(transport), pending, 0);
+#endif
+            if (n < 0) {
+                if (errno != EAGAIN) {
+                    qdpn_log_errno(c->driver, "send %s", c->name);
+                    pn_transport_close_head( transport );
+                }
+            } else if (n) {
+                pn_transport_pop(transport, (size_t) n);
+            }
+        }
+    }
+
+    if (pn_transport_closed(c->transport)) {
+        qdpn_connector_close(c);
     }
 }
 
 // driver
 
-qdpn_driver_t *qdpn_driver()
+qdpn_driver_t *qdpn_driver(qd_log_source_t *log)
 {
     qdpn_driver_t *d = (qdpn_driver_t *) malloc(sizeof(qdpn_driver_t));
     if (!d) return NULL;
+    ZERO(d);
     DEQ_INIT(d->listeners);
     DEQ_INIT(d->connectors);
-    d->log = qd_log_source("DRIVER");
+    d->log = log;
     d->lock = sys_mutex();
-    d->listener_next = NULL;
-    d->connector_next = NULL;
-    d->closed_count = 0;
-    d->capacity = 0;
-    d->fds = NULL;
-    d->nfds = 0;
-    d->efd  = 0;
-    d->trace = ((pn_env_bool("PN_TRACE_RAW") ? PN_TRACE_RAW : PN_TRACE_OFF) |
-                (pn_env_bool("PN_TRACE_FRM") ? PN_TRACE_FRM : PN_TRACE_OFF) |
-                (pn_env_bool("PN_TRACE_DRV") ? PN_TRACE_DRV : PN_TRACE_OFF));
-    d->wakeup = 0;
-
-    d->efd = eventfd(0, EFD_NONBLOCK);
-    if (d->efd < 0) {
-        perror("Can't create eventfd");
-        exit(1);
-    }
 
 #ifdef __sun
+    if (pipe(d->ctrl))
+        perror("Can't create control pipe");
+
+    qdpn_configure_sock(d, d->ctrl[0], false);
+    qdpn_configure_sock(d, d->ctrl[1], false);
+
     struct sigaction act;
     act.sa_handler = SIG_IGN;
     sigaction(SIGPIPE, &act, NULL);
+#else
+    d->efd = eventfd(0, EFD_NONBLOCK);
+    if (d->efd < 0) {
+        qdpn_log_errno(d, "Can't create eventfd");
+        exit(1);
+    }
 #endif
 
     return d;
-}
-
-void qdpn_driver_trace(qdpn_driver_t *d, pn_trace_t trace)
-{
-    d->trace = trace;
 }
 
 void qdpn_driver_free(qdpn_driver_t *d)
 {
     if (!d) return;
 
+#ifdef __sun
+    close(d->ctrl[0]);
+    close(d->ctrl[1]);
+#else
     close(d->efd);
-    while (DEQ_HEAD(d->connectors))
-        qdpn_connector_free(DEQ_HEAD(d->connectors));
-    while (DEQ_HEAD(d->listeners))
-        qdpn_listener_free(DEQ_HEAD(d->listeners));
+#endif
+
+    qdpn_connector_t *conn = DEQ_HEAD(d->connectors);
+
+    while (conn) {
+        qdpn_connector_free(conn);
+        conn = DEQ_HEAD(d->connectors);
+    }
+
+    qdpn_listener_t *listener = DEQ_HEAD(d->listeners);
+
+    while (listener) {
+        qdpn_listener_free(listener);
+        listener = DEQ_HEAD(d->listeners);
+    }
+
     free(d->fds);
     sys_mutex_free(d->lock);
     free(d);
@@ -892,26 +865,47 @@ void qdpn_driver_free(qdpn_driver_t *d)
 
 int qdpn_driver_wakeup(qdpn_driver_t *d)
 {
+#ifdef __sun
+    if (d) {
+        ssize_t count = write(d->ctrl[1], "x", 1);
+        if (count <= 0) {
+            return count;
+        } else {
+            return 0;
+        }
+    } else {
+        return PN_ARG_ERR;
+    }
+#else
     static uint64_t efd_delta = 1;
 
     if (d)
         ignore_result(write(d->efd, &efd_delta, sizeof(uint64_t)));
     return 0;
+#endif
 }
 
 static void qdpn_driver_rebuild(qdpn_driver_t *d)
 {
     sys_mutex_lock(d->lock);
     size_t size = DEQ_SIZE(d->listeners) + DEQ_SIZE(d->connectors);
-    while (d->capacity < size + 1) {
-        d->capacity = d->capacity ? 2*d->capacity : 16;
+    if (d->capacity < size + 1) {
+        d->capacity = d->capacity > 16 ? d->capacity : 16;
+        while (d->capacity < size + 1) {
+            d->capacity *= 2;
+        }
         d->fds = (struct pollfd *) realloc(d->fds, d->capacity*sizeof(struct pollfd));
     }
+
 
     d->wakeup = 0;
     d->nfds = 0;
 
+#ifdef __sun
+    d->fds[d->nfds].fd = d->ctrl[0];
+#else
     d->fds[d->nfds].fd = d->efd;
+#endif
     d->fds[d->nfds].events = POLLIN;
     d->fds[d->nfds].revents = 0;
     d->nfds++;
@@ -928,7 +922,7 @@ static void qdpn_driver_rebuild(qdpn_driver_t *d)
 
     qdpn_connector_t *c = DEQ_HEAD(d->connectors);
     while (c) {
-        if (!c->closed) {
+        if (!c->closed && !c->socket_error && !c->hangup) {
             d->wakeup = pn_timestamp_min(d->wakeup, c->wakeup);
             d->fds[d->nfds].fd = c->fd;
             d->fds[d->nfds].events = (c->status & PN_SEL_RD ? POLLIN : 0) | (c->status & PN_SEL_WR ? POLLOUT : 0);
@@ -967,8 +961,14 @@ int qdpn_driver_wait_3(qdpn_driver_t *d)
     bool woken = false;
     if (d->fds[0].revents & POLLIN) {
         woken = true;
+#ifdef __sun
+        //clear the pipe
+        char buffer[512];
+        while (read(d->ctrl[0], buffer, 512) == 512);
+#else
         char buffer[sizeof(uint64_t)];
         ignore_result(read(d->efd, buffer, sizeof(uint64_t)));
+#endif
     }
 
     sys_mutex_lock(d->lock);
@@ -985,30 +985,26 @@ int qdpn_driver_wait_3(qdpn_driver_t *d)
             c->pending_read = false;
             c->pending_write = false;
             c->pending_tick = false;
-        } else {
-            int idx = c->idx;
-            c->pending_read = (idx && d->fds[idx].revents & POLLIN);
-            c->pending_write = (idx && d->fds[idx].revents & POLLOUT);
+        } else if (c->idx) {
+            short revents = d->fds[c->idx].revents;
+            c->pending_read = (revents & POLLIN);
+            c->pending_write = (revents & POLLOUT);
+            c->socket_error = (revents & POLLERR);
             c->pending_tick = (c->wakeup &&  c->wakeup <= now);
-            if (idx && d->fds[idx].revents & POLLERR)
+            if (revents & ~(POLLIN|POLLOUT|POLLERR|POLLHUP)) {
+                qd_log(c->driver->log, QD_LOG_ERROR, "unexpected poll events %04x on %s",
+                       revents, c->name);
                 c->socket_error = true;
-            else if (idx && (d->fds[idx].revents & POLLHUP)) {
-                if (c->trace & (PN_TRACE_FRM | PN_TRACE_RAW | PN_TRACE_DRV)) {
-                    fprintf(stderr, "hangup on connector %s\n", c->name);
-                }
-                /* poll() is signalling POLLHUP. to see what happened we need
+            }
+            if (revents & POLLHUP) {
+                c->hangup = true;
+                /* poll() is signalling POLLHUP. To see what happened we need
                  * to do an actual recv() to get the error code. But we might
                  * be in a state where we're not interested in input, in that
                  * case try to get the error code via send() */
-                if (d->fds[idx].events & POLLIN)
-                    c->pending_read = true;
-                else if (d->fds[idx].events & POLLOUT)
-                    c->pending_write = true;
-            } else if (idx && (d->fds[idx].revents & ~(POLLIN|POLLOUT|POLLERR|POLLHUP))) {
-                if (c->trace & (PN_TRACE_FRM | PN_TRACE_RAW | PN_TRACE_DRV)) {
-                    fprintf(stderr, "Unexpected poll events: %04x on %s\n",
-                            d->fds[idx].revents, c->name);
-                }
+                short events = d->fds[c->idx].events;
+                if (events & POLLIN) c->pending_read = true;
+                else if (events & POLLOUT) c->pending_write = true;
             }
         }
         c = DEQ_NEXT(c);
@@ -1023,7 +1019,7 @@ int qdpn_driver_wait_3(qdpn_driver_t *d)
         DEQ_REMOVE_HEAD(d->connectors);
         DEQ_INSERT_TAIL(d->connectors, c);
     }
-    
+
     d->listener_next = DEQ_HEAD(d->listeners);
     d->connector_next = DEQ_HEAD(d->connectors);
     sys_mutex_unlock(d->lock);
@@ -1088,3 +1084,10 @@ qdpn_connector_t *qdpn_driver_connector(qdpn_driver_t *d)
     return NULL;
 }
 
+void qdpn_connector_wakeup(qdpn_connector_t *c, pn_timestamp_t t) {
+    c->wakeup = t;
+}
+
+void qdpn_connector_set_methods(qdpn_connector_t *c, qdpn_connector_methods_t *m) {
+    c->methods = m;
+}

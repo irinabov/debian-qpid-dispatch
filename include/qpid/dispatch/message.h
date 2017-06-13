@@ -25,6 +25,7 @@
 #include <qpid/dispatch/compose.h>
 #include <qpid/dispatch/parse.h>
 #include <qpid/dispatch/container.h>
+#include <qpid/dispatch/log.h>
 
 /**@file
  * Message representation. 
@@ -233,11 +234,11 @@ int qd_message_check(qd_message_t *msg, qd_message_depth_t depth);
  * @param field The field to be returned via iterator.
  * @return A field iterator that spans the requested field.
  */
-qd_field_iterator_t *qd_message_field_iterator_typed(qd_message_t *msg, qd_message_field_t field);
-qd_field_iterator_t *qd_message_field_iterator(qd_message_t *msg, qd_message_field_t field);
+qd_iterator_t *qd_message_field_iterator_typed(qd_message_t *msg, qd_message_field_t field);
+qd_iterator_t *qd_message_field_iterator(qd_message_t *msg, qd_message_field_t field);
 
 ssize_t qd_message_field_length(qd_message_t *msg, qd_message_field_t field);
-ssize_t qd_message_field_copy(qd_message_t *msg, qd_message_field_t field, void *buffer, size_t *hdr_length);
+ssize_t qd_message_field_copy(qd_message_t *msg, qd_message_field_t field, char *buffer, size_t *hdr_length);
 
 //
 // Functions for composed messages
@@ -251,9 +252,11 @@ void qd_message_compose_3(qd_message_t *msg, qd_composed_field_t *content1, qd_c
 /** Put string representation of a message suitable for logging in buffer.
  * @return buffer
  */
-char* qd_message_repr(qd_message_t *msg, char *buffer, size_t len);
+char* qd_message_repr(qd_message_t *msg, char* buffer, size_t len, qd_log_bits log_message);
 /** Recommended buffer length for qd_message_repr */
 int qd_message_repr_len();
+
+qd_log_source_t* qd_message_log_source();
 
 ///@}
 

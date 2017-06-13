@@ -20,6 +20,7 @@
 #include "router_core_private.h"
 #include <qpid/dispatch/amqp.h>
 #include <stdio.h>
+#include <strings.h>
 
 //
 // NOTE: If the in_delivery argument is NULL, the resulting out deliveries
@@ -104,12 +105,14 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
     uint64_t       *tag = (uint64_t*) dlv->tag;
 
     ZERO(dlv);
+    sys_atomic_init(&dlv->ref_count, 0);
     dlv->link       = link;
     dlv->msg        = qd_message_copy(msg);
     dlv->settled    = !in_dlv || in_dlv->settled;
     dlv->presettled = dlv->settled;
     *tag            = core->next_tag++;
     dlv->tag_length = 8;
+    dlv->error      = 0;
 
     //
     // Create peer linkage only if the delivery is not settled
@@ -119,7 +122,7 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
             dlv->peer = in_dlv;
             in_dlv->peer = dlv;
 
-            sys_atomic_init(&dlv->ref_count, 1);
+            qdr_delivery_incref(dlv);
             qdr_delivery_incref(in_dlv);
         }
     }
@@ -132,17 +135,35 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
 // Drop all pre-settled deliveries pending on the link's
 // undelivered list.
 //
-static void qdr_forward_drop_presettled_CT_LH(qdr_link_t *link)
+static void qdr_forward_drop_presettled_CT_LH(qdr_core_t *core, qdr_link_t *link)
 {
     qdr_delivery_t *dlv = DEQ_HEAD(link->undelivered);
     qdr_delivery_t *next;
 
     while (dlv) {
         next = DEQ_NEXT(dlv);
-        if (dlv->settled) {
+        //
+        // Remove pre-settled deliveries unless they are in a link_work
+        // record that is being processed.  If it's being processed, it is
+        // too late to drop the delivery.
+        //
+        if (dlv->settled && dlv->link_work && !dlv->link_work->processing) {
             DEQ_REMOVE(link->undelivered, dlv);
             dlv->where = QDR_DELIVERY_NOWHERE;
-            qdr_delivery_decref_LH(dlv);
+
+            //
+            // The link-work item representing this pending delivery must be
+            // updated to reflect the removal of the delivery.  If the item
+            // has no other deliveries associated with it, it can be removed
+            // from the work list.
+            //
+            assert(dlv->link_work);
+            if (dlv->link_work && (--dlv->link_work->value == 0)) {
+                DEQ_REMOVE(link->work_list, dlv->link_work);
+                free_qdr_link_work_t(dlv->link_work);
+                dlv->link_work = 0;
+            }
+            qdr_delivery_decref_CT(core, dlv);
         }
         dlv = next;
     }
@@ -159,16 +180,29 @@ void qdr_forward_deliver_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery_t *
     // the new delivery.
     //
     if (dlv->settled && link->capacity > 0 && DEQ_SIZE(link->undelivered) >= link->capacity)
-        qdr_forward_drop_presettled_CT_LH(link);
+        qdr_forward_drop_presettled_CT_LH(core, link);
 
     DEQ_INSERT_TAIL(link->undelivered, dlv);
     dlv->where = QDR_DELIVERY_IN_UNDELIVERED;
-    sys_atomic_inc(&dlv->ref_count);
+    qdr_delivery_incref(dlv);
 
     //
-    // If the link isn't already on the links_with_deliveries list, put it there.
+    // We must put a work item on the link's work list to represent this pending delivery.
+    // If there's already a delivery item on the tail of the work list, simply join that item
+    // by incrementing the value.
     //
-    qdr_add_link_ref(&link->conn->links_with_deliveries, link, QDR_LINK_LIST_CLASS_DELIVERY);
+    qdr_link_work_t *work = DEQ_TAIL(link->work_list);
+    if (work && work->work_type == QDR_LINK_WORK_DELIVERY) {
+        work->value++;
+    } else {
+        work = new_qdr_link_work_t();
+        ZERO(work);
+        work->work_type = QDR_LINK_WORK_DELIVERY;
+        work->value     = 1;
+        DEQ_INSERT_TAIL(link->work_list, work);
+        qdr_add_link_ref(&link->conn->links_with_work, link, QDR_LINK_LIST_CLASS_WORK);
+    }
+    dlv->link_work = work;
     sys_mutex_unlock(link->conn->work_lock);
 
     //
@@ -245,10 +279,10 @@ int qdr_forward_multicast_CT(qdr_core_t      *core,
     // candidate destination router.
     //
     int origin = -1;
-    qd_field_iterator_t *ingress_iter = in_delivery ? in_delivery->origin : 0;
+    qd_iterator_t *ingress_iter = in_delivery ? in_delivery->origin : 0;
 
     if (ingress_iter && !bypass_valid_origins) {
-        qd_address_iterator_reset_view(ingress_iter, ITER_VIEW_NODE_HASH);
+        qd_iterator_reset_view(ingress_iter, ITER_VIEW_NODE_HASH);
         qdr_address_t *origin_addr;
         qd_hash_retrieve(core->addr_hash, ingress_iter, (void*) &origin_addr);
         if (origin_addr && qd_bitmask_cardinality(origin_addr->rnodes) == 1)
@@ -517,10 +551,10 @@ int qdr_forward_balanced_CT(qdr_core_t      *core,
         // candidate destination router.
         //
         int origin = 0;
-        qd_field_iterator_t *ingress_iter = in_delivery ? in_delivery->origin : 0;
+        qd_iterator_t *ingress_iter = in_delivery ? in_delivery->origin : 0;
 
         if (ingress_iter) {
-            qd_address_iterator_reset_view(ingress_iter, ITER_VIEW_NODE_HASH);
+            qd_iterator_reset_view(ingress_iter, ITER_VIEW_NODE_HASH);
             qdr_address_t *origin_addr;
             qd_hash_retrieve(core->addr_hash, ingress_iter, (void*) &origin_addr);
             if (origin_addr && qd_bitmask_cardinality(origin_addr->rnodes) == 1)
@@ -586,7 +620,8 @@ int qdr_forward_balanced_CT(qdr_core_t      *core,
         //
         if (in_delivery && !in_delivery->settled && chosen_link_bit >= 0) {
             addr->outstanding_deliveries[chosen_link_bit]++;
-            out_delivery->tracking_addr = addr;
+            out_delivery->tracking_addr     = addr;
+            out_delivery->tracking_addr_bit = chosen_link_bit;
             addr->tracked_deliveries++;
         }
 
@@ -674,6 +709,8 @@ bool qdr_forward_link_balanced_CT(qdr_core_t     *core,
         out_link->link_type      = QD_LINK_ENDPOINT;
         out_link->link_direction = qdr_link_direction(in_link) == QD_OUTGOING ? QD_INCOMING : QD_OUTGOING;
         out_link->admin_enabled  = true;
+        out_link->terminus_addr  = 0;
+
         out_link->oper_status    = QDR_LINK_OPER_DOWN;
 
         out_link->name = (char*) malloc(strlen(in_link->name) + 1);

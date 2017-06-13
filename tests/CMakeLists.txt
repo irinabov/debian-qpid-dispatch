@@ -27,12 +27,11 @@ include_directories(
 ##
 set(unit_test_SOURCES
     compose_test.c
-    parse_test.c
     policy_test.c
     run_unit_tests.c
-    server_test.c
     timer_test.c
     tool_test.c
+    failoverlist_test.c
     )
 if (USE_MEMORY_POOL)
   list(APPEND unit_test_SOURCES alloc_test.c)
@@ -43,6 +42,7 @@ target_link_libraries(unit_tests qpid-dispatch)
 
 set(unit_test_size_SOURCES
     field_test.c
+    parse_test.c
     message_test.c
     buffer_test.c
     run_unit_tests_size.c
@@ -68,6 +68,10 @@ add_test(router_engine_test    ${TEST_WRAP} -m unittest -v router_engine_test)
 add_test(management_test       ${TEST_WRAP} -m unittest -v management)
 add_test(router_policy_test    ${TEST_WRAP} -m unittest -v router_policy_test)
 
+if(USE_LIBWEBSOCKETS)
+  set(SYSTEM_TESTS_HTTP system_tests_http)
+endif()
+
 # System test python modules
 foreach(py_test_module
 #   system_tests_broker
@@ -78,13 +82,21 @@ foreach(py_test_module
     system_tests_one_router
     system_tests_policy
     system_tests_protocol_family
+    system_tests_protocol_settings
     system_tests_qdmanage
     system_tests_qdstat
     system_tests_sasl_plain
     system_tests_user_id
     system_tests_user_id_proxy
     system_tests_deprecated
-    system_tests_two_routers)
+    system_tests_two_routers
+    system_tests_three_routers
+    system_tests_multi_tenancy
+    system_tests_dynamic_terminus
+    system_tests_log_message_components
+    system_tests_failover_list
+    ${SYSTEM_TESTS_HTTP}
+    )
 
   add_test(${py_test_module} ${TEST_WRAP} -m unittest -v ${py_test_module})
   list(APPEND SYSTEM_TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/${py_test_module}.py)

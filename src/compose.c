@@ -432,17 +432,36 @@ void qd_compose_insert_string(qd_composed_field_t *field, const char *value)
 }
 
 
-void qd_compose_insert_string_iterator(qd_composed_field_t *field, qd_field_iterator_t *iter)
+void qd_compose_insert_string2(qd_composed_field_t *field, const char *value1, const char *value2)
+{
+    uint32_t len1 = strlen(value1);
+    uint32_t len2 = strlen(value2);
+    uint32_t len  = len1 + len2;
+
+    if (len < 256) {
+        qd_insert_8(field, QD_AMQP_STR8_UTF8);
+        qd_insert_8(field, (uint8_t) len);
+    } else {
+        qd_insert_8(field, QD_AMQP_STR32_UTF8);
+        qd_insert_32(field, len);
+    }
+    qd_insert(field, (const uint8_t*) value1, len1);
+    qd_insert(field, (const uint8_t*) value2, len2);
+    bump_count(field);
+}
+
+
+void qd_compose_insert_string_iterator(qd_composed_field_t *field, qd_iterator_t *iter)
 {
     uint32_t len = 0;
 
-    qd_field_iterator_reset(iter);
-    while (!qd_field_iterator_end(iter)) {
-        qd_field_iterator_octet(iter);
+    qd_iterator_reset(iter);
+    while (!qd_iterator_end(iter)) {
+        qd_iterator_octet(iter);
         len++;
     }
 
-    qd_field_iterator_reset(iter);
+    qd_iterator_reset(iter);
     if (len < 256) {
         qd_insert_8(field, QD_AMQP_STR8_UTF8);
         qd_insert_8(field, (uint8_t) len);
@@ -451,8 +470,8 @@ void qd_compose_insert_string_iterator(qd_composed_field_t *field, qd_field_iter
         qd_insert_32(field, len);
     }
 
-    while (!qd_field_iterator_end(iter)) {
-        uint8_t octet = qd_field_iterator_octet(iter);
+    while (!qd_iterator_end(iter)) {
+        uint8_t octet = qd_iterator_octet(iter);
         qd_insert_8(field, octet);
     }
 
@@ -476,10 +495,10 @@ void qd_compose_insert_symbol(qd_composed_field_t *field, const char *value)
 }
 
 
-void qd_compose_insert_typed_iterator(qd_composed_field_t *field, qd_field_iterator_t *iter)
+void qd_compose_insert_typed_iterator(qd_composed_field_t *field, qd_iterator_t *iter)
 {
-    while (!qd_field_iterator_end(iter)) {
-        uint8_t octet = qd_field_iterator_octet(iter);
+    while (!qd_iterator_end(iter)) {
+        uint8_t octet = qd_iterator_octet(iter);
         qd_insert_8(field, octet);
     }
 
