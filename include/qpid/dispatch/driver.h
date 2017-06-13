@@ -22,6 +22,8 @@
  *
  */
 
+#include <qpid/dispatch/log.h>
+
 #include <proton/error.h>
 #include <proton/sasl.h>
 #include <proton/selectable.h>
@@ -56,9 +58,10 @@ typedef enum {
 /** Construct a driver
  *
  *  Call qdpn_driver_free() to release the driver object.
+ *  @param log source to use for log messages, the driver does not have it's own.
  *  @return new driver object, NULL if error
  */
-qdpn_driver_t *qdpn_driver(void);
+qdpn_driver_t *qdpn_driver(qd_log_source_t* log);
 
 /** Return the most recent error code.
  *
@@ -82,14 +85,6 @@ int qdpn_driver_errno(qdpn_driver_t *d);
  * @return the driver's error object
  */
 pn_error_t *qdpn_driver_error(qdpn_driver_t *d);
-
-/** Set the tracing level for the given driver.
- *
- * @param[in] driver the driver to trace
- * @param[in] trace the trace level to use.
- * @todo pn_trace_t needs documentation
- */
-void qdpn_driver_trace(qdpn_driver_t *driver, pn_trace_t trace);
 
 /** Force qdpn_driver_wait() to return
  *
@@ -145,13 +140,15 @@ void qdpn_driver_free(qdpn_driver_t *driver);
  * @param[in] protocol family to use (IPv4 or IPv6 or 0). If 0 (zero) is passed in the protocol family will be automatically determined from the address
  * @param[in] context application-supplied, can be accessed via
  *                    qdpn_listener_context()
+ * @param[in] methods to apply to new connectors.
  * @return a new listener on the given host:port, NULL if error
  */
 qdpn_listener_t *qdpn_listener(qdpn_driver_t *driver,
                                const char *host,
                                const char *port,
                                const char *protocol_family,
-                               void* context);
+                               void* context
+                              );
 
 /** Access the head listener for a driver.
  *
@@ -169,11 +166,6 @@ qdpn_listener_t *qdpn_listener_head(qdpn_driver_t *driver);
  * @return the next listener
  */
 qdpn_listener_t *qdpn_listener_next(qdpn_listener_t *listener);
-
-/**
- * @todo qdpn_listener_trace needs documentation
- */
-void qdpn_listener_trace(qdpn_listener_t *listener, pn_trace_t trace);
 
 /** Accept a connection that is pending on the listener.
  *
@@ -252,13 +244,6 @@ qdpn_connector_t *qdpn_connector_head(qdpn_driver_t *driver);
  * @return the next connector
  */
 qdpn_connector_t *qdpn_connector_next(qdpn_connector_t *connector);
-
-/** Set the tracing level for the given connector.
- *
- * @param[in] connector the connector to trace
- * @param[in] trace the trace level to use.
- */
-void qdpn_connector_trace(qdpn_connector_t *connector, pn_trace_t trace);
 
 /** Service the given connector.
  *
@@ -347,6 +332,19 @@ pn_transport_t *qdpn_connector_transport(qdpn_connector_t *connector);
  */
 void qdpn_connector_close(qdpn_connector_t *connector);
 
+/** Call when the socket is already closed, an the connector needs updating.
+ *
+ * @param[in] connector the connector whose socket has been closed
+ */
+void qdpn_connector_after_close(qdpn_connector_t *connector);
+
+
+/** Socket has been closed externally, mark it closed.
+ *
+ * @param[in] connector the connector whose socket will be closed
+ */
+void qdpn_connector_mark_closed(qdpn_connector_t *connector);
+
 /** Determine if the connector is closed.
  *
  * @return True if closed, otherwise false
@@ -395,6 +393,9 @@ void qdpn_activate_all(qdpn_driver_t *driver);
  */
 bool qdpn_connector_activated(qdpn_connector_t *connector, qdpn_activate_criteria_t criteria);
 
+/** True if the connector has received a hangup */
+bool qdpn_connector_hangup(qdpn_connector_t *connector);
+
 /** Create a listener using the existing file descriptor.
  *
  * @param[in] driver driver that will 'own' this listener
@@ -417,7 +418,24 @@ pn_socket_t qdpn_listener_get_fd(qdpn_listener_t *listener);
  */
 qdpn_connector_t *qdpn_connector_fd(qdpn_driver_t *driver, pn_socket_t fd, void *context);
 
-pn_socket_t qdpn_connector_get_fd(qdpn_connector_t *connector);
+/** Get the file descriptor for this connector */
+int qdpn_connector_get_fd(qdpn_connector_t *connector);
 
+/** Set the wakeup time on the connector */
+void qdpn_connector_wakeup(qdpn_connector_t* c, pn_timestamp_t t);
+
+/** Current time according */
+pn_timestamp_t qdpn_now();
+
+/** Implementation of connector methods (e.g. these are different for HTTP connectors */
+typedef struct qdpn_connector_methods_t {
+    void (*process)(qdpn_connector_t *c);
+    void (*close)(qdpn_connector_t *c);
+} qdpn_connector_methods_t;
+
+/** Set new methods for a connector (e.g. because it is a HTTP connector) */
+void qdpn_connector_set_methods(qdpn_connector_t *c, qdpn_connector_methods_t *methods);
+
+/**@}*/
 
 #endif /* driver.h */

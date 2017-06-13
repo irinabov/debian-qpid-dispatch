@@ -20,6 +20,7 @@
  */
 
 #include <qpid/dispatch/dispatch.h>
+#include <qpid/dispatch/failoverlist.h>
 #include <proton/engine.h>
 #include <proton/event.h>
 
@@ -35,21 +36,6 @@
  */
 
 /**
- * Thread Start Handler
- *
- * Callback invoked when a new server thread is started.  The callback is
- * invoked on the newly created thread.
- *
- * This handler can be used to set processor affinity or other thread-specific
- * tuning values.
- *
- * @param context The handler context supplied in qd_server_initialize.
- * @param thread_id The integer thread identifier that uniquely identifies this thread.
- */
-typedef void (*qd_thread_start_cb_t)(void* context, int thread_id);
-
-
-/**
  * Deferred callback
  *
  * This type is for calls that are deferred until they can be invoked on
@@ -60,20 +46,6 @@ typedef void (*qd_thread_start_cb_t)(void* context, int thread_id);
  *        was pending on was deleted.
  */
 typedef void (*qd_deferred_t)(void *context, bool discard);
-
-
-/**
- * Set the optional thread-start handler.
- *
- * This handler is called once on each worker thread at the time the thread is
- * started.  This may be used to set tuning settings like processor affinity,
- * etc.
- *
- * @param qd The dispatch handle returned by qd_dispatch.
- * @param start_handler The thread-start handler invoked per thread on thread startup.
- * @param context Opaque context to be passed back in the callback function.
- */
-void qd_server_set_start_handler(qd_dispatch_t *qd, qd_thread_start_cb_t start_handler, void *context);
 
 
 /**
@@ -216,15 +188,6 @@ typedef struct qd_connection_t qd_connection_t;
  * Event type for the connection callback.
  */
 typedef enum {
-    /// The connection just opened via a listener (inbound).
-    /// This event occurs when the AMQP OPEN is received from the client.
-    /// The AMQP connection still needs to be locally opened
-    QD_CONN_EVENT_LISTENER_OPEN,
-
-    /// The connection just opened via a connector (outbound).
-    /// The AMQP connection has been locally and remotely opened.
-    QD_CONN_EVENT_CONNECTOR_OPEN,
-
     /// The connection was closed at the transport level (not cleanly).
     QD_CONN_EVENT_CLOSE,
 
@@ -232,6 +195,7 @@ typedef enum {
     QD_CONN_EVENT_WRITABLE
 } qd_conn_event_t;
 
+typedef uint32_t qd_log_bits;
 
 /**
  * Configuration block for a connector or a listener.
@@ -252,6 +216,16 @@ typedef struct qd_server_config_t {
      * Possible values are IPv4 or IPv6. If not specified, the protocol family will be automatically determined from the address
      */
     char *protocol_family;
+
+    /**
+     * Accept HTTP connections, allow WebSocket "amqp" protocol upgrades.
+     */
+    bool http;
+
+    /**
+     * Directory for HTTP content
+     */
+    char *http_root;
 
     /**
      * Connection name, used as a reference from other parts of the configuration.
@@ -400,6 +374,12 @@ typedef struct qd_server_config_t {
     bool allow_redirect;
 
     /**
+     * MultiTenancy support.  If true, the vhost is used to define the address space of
+     * addresses used over this connection.
+     */
+    bool multi_tenant;
+
+    /**
      * The specified role of the connection.  This can be used to control the behavior and
      * capabilities of the connections.
      */
@@ -418,10 +398,55 @@ typedef struct qd_server_config_t {
     uint32_t max_frame_size;
 
     /**
+     * The max_sessions value is the number of sessions allowed on the Connection. 
+     */
+    uint32_t max_sessions;
+
+    /**
+     * The incoming capacity value is calculated to be (sessionMaxFrames * maxFrameSize).
+     * In a round about way the calculation forces the AMQP Begin/incoming-capacity value
+     * to equal the specified sessionMaxFrames value measured in units of transfer frames.
+     * This calculation is done to satisfy proton pn_session_set_incoming_capacity().
+     */
+    size_t incoming_capacity;
+
+    /**
      * The idle timeout, in seconds.  If the peer sends no data frames in this many seconds, the
      * connection will be automatically closed.
      */
     int idle_timeout_seconds;
+
+    /**
+     *  Holds comma separated list that indicates which components of the message should be logged.
+     *  Defaults to 'none' (log nothing). If you want all properties and application properties of the message logged use 'all'.
+     *  Specific components of the message can be logged by indicating the components via a comma separated list.
+     *  The components are
+     *  message-id
+     *   user-id
+     *   to
+     *   subject
+     *   reply-to
+     *   correlation-id
+     *   content-type
+     *   content-encoding
+     *   absolute-expiry-time
+     *   creation-time
+     *   group-id
+     *   group-sequence
+     *   reply-to-group-id
+     *   app-properties.
+     */
+    char *log_message;
+
+    /**
+     * A bitwise representation of which log components have been enabled in the log_message field.
+     */
+    qd_log_bits log_bits;
+
+    /**
+     * Configured failover list
+     */
+    qd_failover_list_t *failover_list;
 } qd_server_config_t;
 
 
@@ -459,6 +484,15 @@ typedef int (*qd_pn_event_handler_cb_t)(void *handler_context, void* conn_contex
 
 
 /**
+ * Post event process handler
+ * Invoke only after all proton events have been popped from the collector.
+ *
+ * @param conn The connection for which all proton events have been popped.
+ */
+typedef void (*qd_pn_event_complete_cb_t)(void *handler_context, qd_connection_t *conn);
+
+
+/**
  * Set the connection event handler callback.
  *
  * Set the connection handler callback for the server.  This callback is
@@ -469,7 +503,11 @@ typedef int (*qd_pn_event_handler_cb_t)(void *handler_context, void* conn_contex
  * @param pn_event_handler The handler for proton events.
  * @param handler_context Context data to associate with the handler.
  */
-void qd_server_set_conn_handler(qd_dispatch_t *qd, qd_conn_handler_cb_t conn_handler, qd_pn_event_handler_cb_t pn_event_handler, void *handler_context);
+void qd_server_set_conn_handler(qd_dispatch_t *qd,
+                                qd_conn_handler_cb_t conn_handler,
+                                qd_pn_event_handler_cb_t pn_event_handler,
+                                qd_pn_event_complete_cb_t pn_event_complete_handler,
+                                void *handler_context);
 
 
 /**
@@ -561,6 +599,7 @@ pn_connection_t *qd_connection_pn(qd_connection_t *conn);
 bool qd_connection_inbound(qd_connection_t *conn);
 
 
+/* FIXME aconway 2017-01-19: hide for batching */
 /**
  * Get the event collector for a connection.
  *
@@ -673,5 +712,7 @@ qd_error_t qd_register_display_name_service(qd_dispatch_t *qd, void *display_nam
 /**
  * @}
  */
+
+bool is_log_component_enabled(qd_log_bits log_message, char *component_name);
 
 #endif

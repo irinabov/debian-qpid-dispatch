@@ -45,6 +45,15 @@ class Config(object):
             self.entities = []
 
     @staticmethod
+    def transform_sections(sections):
+        for s in sections:
+            s[0] = camelcase(s[0])
+            s[1] = dict((camelcase(k), v) for k, v in s[1].iteritems())
+            if s[0] == "address":   s[0] = "router.config.address"
+            if s[0] == "linkRoute": s[0] = "router.config.linkRoute"
+            if s[0] == "autoLink":  s[0] = "router.config.autoLink"
+
+    @staticmethod
     def _parse(lines):
         """Parse config file format into a section list"""
         begin = re.compile(r'([\w-]+)[ \t]*{') # WORD {
@@ -64,12 +73,7 @@ class Config(object):
         js_text = re.sub(spare_comma, r'\1', js_text)
         # Convert dictionary keys to camelCase
         sections = json.loads(js_text)
-        for s in sections:
-            s[0] = camelcase(s[0])
-            s[1] = dict((camelcase(k), v) for k, v in s[1].iteritems())
-            if s[0] == "address":   s[0] = "router.config.address"
-            if s[0] == "linkRoute": s[0] = "router.config.linkRoute"
-            if s[0] == "autoLink":  s[0] = "router.config.autoLink"
+        Config.transform_sections(sections)
         return sections
 
     @staticmethod
@@ -81,6 +85,7 @@ class Config(object):
             return line
         js_text = "%s"%("\n".join([sub(l) for l in lines]))
         sections = json.loads(js_text)
+        Config.transform_sections(sections)
         return sections
 
     def get_config_types(self):
@@ -154,7 +159,7 @@ def configure_dispatch(dispatch, lib_handle, filename):
     agent.activate("$_management_internal")
 
     from qpid_dispatch_internal.display_name.display_name import DisplayNameService
-    displayname_service = DisplayNameService("$displayname")
+    displayname_service = DisplayNameService()
     qd.qd_dispatch_register_display_name_service(dispatch, displayname_service)
     policyDir = config.by_type('policy')[0]['policyDir']
     policyDefaultVhost = config.by_type('policy')[0]['defaultVhost']

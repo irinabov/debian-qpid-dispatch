@@ -39,6 +39,7 @@ add_custom_command (
 include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_BINARY_DIR}
+  ${LIBWEBSOCKETS_INCLUDE_DIRS}
   )
 
 # Build the qpid-dispatch library.
@@ -53,6 +54,7 @@ set(qpid_dispatch_SOURCES
   dispatch.c
   entity.c
   entity_cache.c
+  failoverlist.c
   hash.c
   iovec.c
   iterator.c
@@ -69,8 +71,10 @@ set(qpid_dispatch_SOURCES
   router_core/agent_address.c
   router_core/agent_config_address.c
   router_core/agent_config_auto_link.c
+  router_core/agent_connection.c
   router_core/agent_config_link_route.c
   router_core/agent_link.c
+  router_core/agent_router.c
   router_core/connections.c
   router_core/error.c
   router_core/forwarder.c
@@ -89,17 +93,26 @@ set(qpid_dispatch_SOURCES
   trace_mask.c
   )
 
+if(USE_LIBWEBSOCKETS)
+  set(qpid_dispatch_SOURCES ${qpid_dispatch_SOURCES} http-libwebsockets.c)
+else(USE_LIBWEBSOCKETS)
+  set(qpid_dispatch_SOURCES ${qpid_dispatch_SOURCES} http-none.c)
+endif(USE_LIBWEBSOCKETS)
+
 if(USE_MEMORY_POOL)
   list(APPEND qpid_dispatch_SOURCES alloc_pool.c)
 endif()
 
-set_property(
-  SOURCE python_embedded.c router_pynode.c
-  PROPERTY COMPILE_FLAGS -Wno-strict-aliasing
-  )
+# strict aliasing optimization is only available in GCC
+if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    set_property(
+      SOURCE python_embedded.c router_pynode.c
+      PROPERTY COMPILE_FLAGS -Wno-strict-aliasing
+    )
+endif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
 
 add_library(qpid-dispatch SHARED ${qpid_dispatch_SOURCES})
-target_link_libraries(qpid-dispatch ${Proton_LIBRARIES} ${pthread_lib} ${rt_lib} ${dl_lib} ${PYTHON_LIBRARIES})
+target_link_libraries(qpid-dispatch ${Proton_LIBRARIES} ${pthread_lib} ${rt_lib} ${dl_lib} ${PYTHON_LIBRARIES} ${LIBWEBSOCKETS_LIBRARIES})
 set_target_properties(qpid-dispatch PROPERTIES
   LINK_FLAGS "${CATCH_UNDEFINED}"
   )

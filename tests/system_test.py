@@ -216,7 +216,7 @@ class Process(subprocess.Popen):
         self.name = name or os.path.basename(args[0])
         self.args, self.expect = args, expect
         self.outdir = os.getcwd()
-        self.outfile = self.unique(self.name)
+        self.outfile = os.path.abspath(self.unique(self.name))
         self.out = open(self.outfile + '.out', 'w')
         with open(self.outfile + '.cmd', 'w') as f: f.write("%s\n" % ' '.join(args))
         self.torndown = False
@@ -260,7 +260,7 @@ class Process(subprocess.Popen):
                 actual = "exit %s"%status
             assert condition, "Expected %s but %s: %s"%(expect, actual, self.name)
         assert not self.valgrind_error or status != self.valgrind_error, \
-            "Valgrind detected errors!  See log file %s/%s.vg" % (self.outdir, self.outfile)
+            "Valgrind errors (in %s)\n\n%s\n" % (self.outfile+".vg", open(self.outfile+".vg").read())
         if self.expect == Process.RUNNING:
             check(status is None, "still running")
         elif self.expect == Process.EXIT_OK:
@@ -292,7 +292,7 @@ class Qdrouterd(Process):
         DEFAULTS = {
             'listener': {'host':'0.0.0.0', 'saslMechanisms':'ANONYMOUS', 'idleTimeoutSeconds': '120', 'authenticatePeer': 'no'},
             'connector': {'host':'127.0.0.1', 'saslMechanisms':'ANONYMOUS', 'idleTimeoutSeconds': '120', 'role':'on-demand'},
-            'router': {'mode': 'standalone', 'id': 'QDR', 'debugDump': 'qddebug.txt',  'workerThreads': 1}
+            'router': {'mode': 'standalone', 'id': 'QDR', 'debugDump': 'qddebug.txt'}
         }
 
         def sections(self, name):
@@ -340,7 +340,6 @@ class Qdrouterd(Process):
         self._wait_ready = False
         if wait:
             self.wait_ready()
-
 
     @property
     def management(self):
@@ -414,11 +413,10 @@ class Qdrouterd(Process):
         try:
             ret_val = False
             response = self.management.query(type="org.apache.qpid.dispatch.connection")
-            index_name = response.attribute_names.index('name')
-            index_identity = response.attribute_names.index('identity')
+            index_host = response.attribute_names.index('host')
             for result in response.results:
-                outs = 'connection/%s:%s:%s' % (host, port, str(result[index_identity]))
-                if result[index_name] == outs:
+                outs = '%s:%s' % (host, port)
+                if result[index_host] == outs:
                     ret_val = True
             return ret_val
         except:
@@ -558,7 +556,7 @@ class Tester(object):
                         break
             except Exception, e:
                 errors.append(e)
-        assert not errors, "Errors during teardown: %s" % errors
+        assert not errors, "Errors during teardown: \n%s" % "\n----".join([str(e) for e in errors])
 
 
     def cleanup(self, x):

@@ -111,8 +111,8 @@ class QdSSLUseridTest(TestCase):
                              'keyFile': cls.ssl_file('server-private-key.pem'),
                              'password': 'server-password'}),
 
-            # one component of uidFormat is invalid (x), the unrecognized component will be ignored,
-            # this will be treated like 'uidFormat': '1'
+            # one component of uidFormat is invalid (x), this will result in an error in the fingerprint calculation.
+            # The user_id will fall back to proton's pn_transport_get_user
             ('sslProfile', {'name': 'server-ssl10',
                              'certDb': cls.ssl_file('ca-certificate.pem'),
                              'certFile': cls.ssl_file('server-certificate.pem'),
@@ -138,13 +138,15 @@ class QdSSLUseridTest(TestCase):
                              'password': 'server-password'}),
 
             # should translate a display name
+            # specifying both passwordFile and password, password takes precedence.
             ('sslProfile', {'name': 'server-ssl13',
                             'certDb': cls.ssl_file('ca-certificate.pem'),
                             'certFile': cls.ssl_file('server-certificate.pem'),
                             'keyFile': cls.ssl_file('server-private-key.pem'),
                             'uidFormat': '2',
                             'displayNameFile': ssl_profile2_json,
-                            'password': 'server-password'}),
+                            'password': 'server-password',
+                            'passwordFile': cls.ssl_file('server-password-file-bad.txt')}),
 
             ('sslProfile', {'name': 'server-ssl14',
                             'certDb': cls.ssl_file('ca-certificate.pem'),
@@ -152,7 +154,7 @@ class QdSSLUseridTest(TestCase):
                             'keyFile': cls.ssl_file('server-private-key.pem'),
                             'uidFormat': '1',
                             'displayNameFile': ssl_profile1_json,
-                            'password': 'server-password'}),
+                            'passwordFile': cls.ssl_file('server-password-file.txt')}),
 
             ('listener', {'port': cls.tester.get_port(), 'sslProfile': 'server-ssl1', 'authenticatePeer': 'yes',
                           'requireSsl': 'yes', 'saslMechanisms': 'EXTERNAL'}),
@@ -240,142 +242,73 @@ class QdSSLUseridTest(TestCase):
         addr = self.address(0).replace("amqp", "amqps")
 
         node = Node.connect(addr, ssl_domain=domain)
-        user_id = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[0][0]
-        self.assertEqual("60f5dbd7ed14a5ea243785e81745ac8463494298",
-                         user_id)
+        user_id = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[0][0]
+        self.assertEqual("3eccbf1a2f3e46da823c63a9da9158983cb495a3", user_id)
 
         addr = self.address(1).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
-        self.assertEqual("7c87f0c974f9e1aa5cb98f13fae9675625f240c98034b888753140da28094879",
-                         node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[1][0])
+        self.assertEqual("72d543690cb0a8fc2d0f4c704c65411b9ee8ad53839fced4c720d73e58e4f0d7",
+                         node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[1][0])
 
         addr = self.address(2).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
-        self.assertEqual("82244216b6d02ffdfb886c8da3c803e0f7a7b330a7b665dccabd30bd25d0f35e2a4fff5f0a2a01d56eb7dbae085c108e71a32b84bab16c9ec243a1f6d014900d",
-                         node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[2][0])
+        self.assertEqual("c6de3a340014b0f8a1d2b41d22e414fc5756494ffa3c8760bbff56f3aa9f179a5a6eae09413fd7a6afbf36b5fb4bad8795c2836774acfe00a701797cc2a3a9ab",
+                         node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[2][0])
 
         addr = self.address(3).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
-        self.assertEqual("7c87f0c974f9e1aa5cb98f13fae9675625f240c98034b888753140da28094879;127.0.0.1;Client;Dev;US;NC",
-        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[3][0])
+        self.assertEqual("72d543690cb0a8fc2d0f4c704c65411b9ee8ad53839fced4c720d73e58e4f0d7;127.0.0.1;Client;Dev;US;NC",
+                         node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[3][0])
 
         addr = self.address(4).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
-        self.assertEqual("60f5dbd7ed14a5ea243785e81745ac8463494298;US;NC",
-        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[4][0])
+        self.assertEqual("3eccbf1a2f3e46da823c63a9da9158983cb495a3;US;NC",
+        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[4][0])
 
         addr = self.address(5).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
-        self.assertEqual("US;NC;82244216b6d02ffdfb886c8da3c803e0f7a7b330a7b665dccabd30bd25d0f35e2a4fff5f0a2a01d56eb7dbae085c108e71a32b84bab16c9ec243a1f6d014900d",
-        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[5][0])
+        self.assertEqual("US;NC;c6de3a340014b0f8a1d2b41d22e414fc5756494ffa3c8760bbff56f3aa9f179a5a6eae09413fd7a6afbf36b5fb4bad8795c2836774acfe00a701797cc2a3a9ab",
+        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[5][0])
 
         addr = self.address(6).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
         self.assertEqual("127.0.0.1;NC;Dev;US;Client",
-        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[6][0])
+        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[6][0])
 
         addr = self.address(7).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
         self.assertEqual("NC;US;Client;Dev;127.0.0.1;Raleigh",
-        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[7][0])
+        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[7][0])
 
         addr = self.address(8).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
         self.assertEqual("C=US,ST=NC,L=Raleigh,OU=Dev,O=Client,CN=127.0.0.1",
-        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[8][0])
+        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[8][0])
 
         addr = self.address(9).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
         self.assertEqual("C=US,ST=NC,L=Raleigh,OU=Dev,O=Client,CN=127.0.0.1",
-        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[9][0])
+        node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[9][0])
 
         addr = self.address(10).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
-        user = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[10][0]
+        user = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[10][0]
         self.assertEqual("C=US,ST=NC,L=Raleigh,OU=Dev,O=Client,CN=127.0.0.1", str(user))
 
         addr = self.address(11).replace("amqp", "amqps")
         node = Node.connect(addr)
-        user = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[11][0]
+        user = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[11][0]
         self.assertEqual("anonymous", user)
 
         addr = self.address(12).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
-        user = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[12][0]
+        user = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[12][0]
         self.assertEqual("user12", str(user))
 
         addr = self.address(13).replace("amqp", "amqps")
         node = Node.connect(addr, ssl_domain=domain)
-        user_id = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=['user']).results[13][0]
+        user_id = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'user']).results[13][0]
         self.assertEqual("user13", user_id)
-
-        M1 = self.messenger()
-        M1.route("amqp:/*", self.address(14)+"/$1")
-
-        subscription = M1.subscribe("amqp:/#")
-
-        reply_to = subscription.address
-        addr = 'amqp:/_local/$displayname'
-
-        tm = Message()
-        rm = Message()
-        tm.address = addr
-        tm.reply_to = reply_to
-        tm.body = {'profilename': 'server-ssl10', 'opcode': 'QUERY', 'userid': '94745961c5646ee0129536b3acef1eea0d8d2f26f8c353455233027bcd47'}
-        M1.put(tm)
-
-        M1.send()
-        M1.recv(1)
-        M1.get(rm)
-        self.assertEqual('elaine', rm.body['user_name'])
-
-        tm = Message()
-        rm = Message()
-        tm.address = addr
-        tm.reply_to = reply_to
-        tm.body =  {'profilename': 'server-ssl-unknown', 'opcode': 'QUERY', 'userid': '94745961c5646ee0129536b3acef1eea0d8d2f26f8c3ed08ece4f8f3027bcd48'}
-        M1.put(tm)
-        M1.send()
-        M1.recv(1)
-        M1.get(rm)
-        self.assertEqual('94745961c5646ee0129536b3acef1eea0d8d2f26f8c3ed08ece4f8f3027bcd48', rm.body['user_name'])
-
-        # The profile name, userid pair have a matching user name
-        tm = Message()
-        rm = Message()
-        tm.address = addr
-        tm.reply_to = reply_to
-        tm.body = {'profilename': 'server-ssl12', 'opcode': 'QUERY', 'userid': '94745961c5646ee0129536b3acef1eea0d8d2f26f8c3ed08ece4f8f3027bcd48'}
-        M1.put(tm)
-        M1.send()
-        M1.recv(1)
-        M1.get(rm)
-        self.assertEqual('johndoe', rm.body['user_name'])
-
-        tm = Message()
-        rm = Message()
-        tm.address = addr
-        tm.reply_to = reply_to
-        tm.body =  {'profilename': 'server-ssl10', 'opcode': 'QUERY', 'userid': '12345'}
-        M1.put(tm)
-        M1.send()
-        M1.recv(1)
-        M1.get(rm)
-        self.assertEqual('12345', rm.body['user_name'])
-
-        tm = Message()
-        rm = Message()
-        tm.address = addr
-        tm.reply_to = reply_to
-        tm.user_id = "bad-user-id" # policy is disabled; user proxy is allowed
-        tm.body = {'profilename': 'server-ssl10', 'opcode': 'QUERY', 'userid': '12345'}
-        M1.put(tm)
-        M1.send()
-        M1.recv(1)
-        M1.get(rm)
-        self.assertEqual('12345', rm.body['user_name'])
-
-        M1.stop()
 
         node.close()
 

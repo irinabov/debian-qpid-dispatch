@@ -26,10 +26,9 @@
 int tool_tests(void);
 int timer_tests(void);
 int alloc_tests(void);
-int server_tests(qd_dispatch_t *qd);
-int parse_tests(void);
 int compose_tests(void);
 int policy_tests(void);
+int failoverlist_tests(void);
 
 int main(int argc, char** argv)
 {
@@ -41,20 +40,26 @@ int main(int argc, char** argv)
 
     // Call qd_dispatch() first initialize allocator used by other tests.
     qd_dispatch_t *qd = qd_dispatch(0);
+
+    qd_dispatch_validate_config(argv[1]);
+    if (qd_error_code()) {
+        printf("Config failed: %s\n", qd_error_message());
+        return 1;
+    }
+
     qd_dispatch_load_config(qd, argv[1]);
     if (qd_error_code()) {
         printf("Config failed: %s\n", qd_error_message());
         return 1;
     }
     result += timer_tests();
-    result += server_tests(qd);
     result += tool_tests();
-    result += parse_tests();
     result += compose_tests();
 #if USE_MEMORY_POOL
     result += alloc_tests();
 #endif
     result += policy_tests();
+    result += failoverlist_tests();
     qd_dispatch_free(qd);       // dispatch_free last.
 
     return result;

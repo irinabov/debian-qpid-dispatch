@@ -1,0 +1,74 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License
+#
+os:
+- linux
+sudo: required
+language:
+- python
+python:
+- 2.7
+addons:
+  apt:
+    packages:
+    - cmake
+    - cmake-curses-gui
+    - uuid-dev
+    - libssl-dev
+    - sasl2-bin
+    - libsasl2-2
+    - libsasl2-dev
+    - sasl2-bin
+    - swig
+    - python-dev
+    - ruby-dev
+    - libperl-dev
+    - git
+    - make
+    - valgrind
+
+before_install:
+- git submodule add https://github.com/apache/qpid-proton.git
+- git submodule init
+- git submodule update
+before_script:
+- lsb_release -a
+- cd qpid-proton
+- mkdir build
+- cd build
+- cmake .. -DCMAKE_INSTALL_PREFIX=/usr
+# This builds and installs qpid-proton
+- sudo make install
+- pushd proton-c/bindings/python/dist
+- sudo python ./setup.py build install
+- popd
+- PYTHON_VER=`python -c "import sys; print ('python%s.%s' % (sys.version_info[0], sys.version_info[1]))"`
+- export PYTHONPATH=$PYTHONPATH:/usr/local/lib/$PYTHON_VER/dist-packages
+- cd ../..
+- mkdir build
+- cd build
+- PREFIX=`python -c "import sys; print(sys.prefix)"`
+- PYEXE=`python -c "import sys; print(sys.executable)"`
+- echo PYTHON_EXECUTABLE:FILEPATH=$PYEXE
+- echo PYTHON_INCLUDE_DIR:PATH=$PREFIX/include/$PYTHON_VER
+- cmake .. -DCMAKE_INSTALL_PREFIX=/usr -DPYTHON_EXECUTABLE:FILEPATH=$PYEXE -DPYTHON_INCLUDE_DIR:PATH=$PREFIX/include/$PYTHON_VER -DPYTHON_LIBRARY:FILEPATH=/opt/python/2.7.12/lib/libpython2.7.so
+# This build qpid-dispatch
+- sudo make install
+script:
+# Now run the unit tests
+- ctest -VV

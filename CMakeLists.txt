@@ -26,6 +26,8 @@ endif (CMAKE_BUILD_TYPE MATCHES "Deb")
 
 project(qpid-dispatch C)
 
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
+
 # Build time switch to turn off memory pooling.
 option(USE_MEMORY_POOL "Use per-thread memory pools" ON)
 option(QD_MEMORY_STATS "Track memory pool usage statistics" ON)
@@ -68,6 +70,11 @@ set(DOC_INSTALL_DIR ${SHARE_INSTALL_DIR}/doc CACHE PATH "Documentation directory
 set(QD_DOC_INSTALL_DIR ${SHARE_INSTALL_DIR}/doc/qpid-dispatch CACHE PATH "Qpid dispatch documentation directory")
 set(MAN_INSTALL_DIR share/man CACHE PATH "Manpage directory")
 set(QPID_DISPATCH_HOME_INSTALLED ${CMAKE_INSTALL_PREFIX}/${QPID_DISPATCH_HOME})
+
+set(CONSOLE_BASE_INSTALL_DIR "share/qpid-dispatch/console")
+set(CONSOLE_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/${CONSOLE_BASE_INSTALL_DIR}")
+set(CONSOLE_STAND_ALONE_INSTALL_DIR "${CONSOLE_INSTALL_DIR}/stand-alone")
+
 set(RUN ${PYTHON_EXECUTABLE} ${CMAKE_BINARY_DIR}/run.py)
 
 # define the configuration directory based on whether or not the install prefix is defined
@@ -81,13 +88,23 @@ endif()
 
 set(QPID_DISPATCH_CONFDIR ${SYSCONF_INSTALL_DIR}/qpid-dispatch)
 
+if (NOT COMMAND add_compile_options)
+  macro (add_compile_options option)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${option}")
+  endmacro (add_compile_options)
+endif (NOT COMMAND add_compile_options)
+
 ##
 ## Find dependencies
 ##
 find_library(pthread_lib pthread)
 find_library(dl_lib dl)
 find_library(rt_lib rt)
-find_package(Proton 0.13 REQUIRED)
+find_package(Proton 0.15 REQUIRED)
+
+## Optional dependencies
+include(FindLibWebSockets)
+option(USE_LIBWEBSOCKETS "Use libwebsockets for WebSocket support" ${LIBWEBSOCKETS_FOUND})
 
 ##
 ## Find Valgrind
@@ -107,18 +124,22 @@ include_directories(
     ${PYTHON_INCLUDE_PATH}
     )
 
-if (NOT COMMAND add_compile_options)
-  macro (add_compile_options option)
-    SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${option}")
-  endmacro (add_compile_options)
-endif (NOT COMMAND add_compile_options)
-
-add_compile_options(-pthread)
-add_compile_options(-Wall)
 if (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
-add_compile_options(-Werror)
+ add_compile_options(-Werror)
+ add_compile_options(-Wall)
+ include(CheckCCompilerFlag)
+ check_c_compiler_flag(-Wpedantic HAS_PEDANTIC_FLAG)
+ if (HAS_PEDANTIC_FLAG)
+    add_compile_options(-Wpedantic)
+ endif(HAS_PEDANTIC_FLAG)
+ add_compile_options(-std=gnu99)
+ add_compile_options(-pthread)
+else (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
+ add_compile_options(-xc99)
+ add_compile_options(-errwarn=%all)
+ add_compile_options(-lpthread)
 endif (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
-add_compile_options(-std=gnu99)
+
 set(CATCH_UNDEFINED "-Wl,-z,defs")
 
 ##

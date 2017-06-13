@@ -162,13 +162,6 @@ void qd_link_free(qd_link_t *link);
 void qd_link_set_context(qd_link_t *link, void *link_context);
 void *qd_link_get_context(qd_link_t *link);
 
-/**
- * Link context associated with the link's connection for storing state shared across
- * all links in a connection.
- */
-void qd_link_set_conn_context(qd_link_t *link, void *link_context);
-void *qd_link_get_conn_context(qd_link_t *link);
-
 void policy_notify_opened(void *container, qd_connection_t *conn, void *context);
 qd_direction_t qd_link_direction(const qd_link_t *link);
 pn_snd_settle_mode_t qd_link_remote_snd_settle_mode(const qd_link_t *link);
@@ -181,6 +174,7 @@ pn_terminus_t *qd_link_remote_source(qd_link_t *link);
 pn_terminus_t *qd_link_remote_target(qd_link_t *link);
 void qd_link_activate(qd_link_t *link);
 void qd_link_close(qd_link_t *link);
+void qd_link_detach(qd_link_t *link);
 bool qd_link_drain_changed(qd_link_t *link, bool *mode);
 void qd_link_free(qd_link_t *link);
 
