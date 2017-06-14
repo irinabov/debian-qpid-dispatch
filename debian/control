@@ -11,8 +11,7 @@ Build-Depends: debhelper (>= 9),
                dblatex,
                libqpid-proton10-dev (>= 0.17.0),
                python-qpid-proton (>= 0.17.0),
-               libssl-dev,
-               libwebsockets-dev
+               libssl-dev
 Standards-Version: 3.9.5
 Homepage: http://qpid.apache.org/components/dispatch-router
 
@@ -20,7 +19,6 @@ Package: qdrouterd
 Architecture: any
 Depends: libqpid-proton10,
          adduser,
-         libwebsockets7,
          ${shlibs:Depends}, ${misc:Depends}
 Pre-Depends: ${misc:Pre-Depends}
 Replaces:    libqpid-dispatch1, libqpid-dispatch1-dev
