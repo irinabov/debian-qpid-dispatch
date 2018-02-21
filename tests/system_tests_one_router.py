@@ -18,29 +18,30 @@
 #
 
 import unittest
-from proton import Condition, Message, Delivery, PENDING, ACCEPTED, REJECTED
-from system_test import TestCase, Qdrouterd, main_module
-from proton.handlers import MessagingHandler
+from proton import Condition, Message, Delivery, PENDING, ACCEPTED, REJECTED, Url
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT
+from proton.handlers import MessagingHandler, TransactionHandler
 from proton.reactor import Container, AtMostOnce, AtLeastOnce
 from proton.utils import BlockingConnection, SyncRequestResponse
 from qpid_dispatch.management.client import Node
 
 CONNECTION_PROPERTIES = {u'connection': u'properties', u'int_property': 6451}
 
-class RouterTest(TestCase):
+class OneRouterTest(TestCase):
     """System tests involving a single router"""
     @classmethod
     def setUpClass(cls):
         """Start a router and a messenger"""
-        super(RouterTest, cls).setUpClass()
+        super(OneRouterTest, cls).setUpClass()
         name = "test-router"
+        OneRouterTest.listen_port = cls.tester.get_port()
         config = Qdrouterd.Config([
-            ('router', {'mode': 'standalone', 'id': 'QDR'}),
+            ('router', {'mode': 'standalone', 'id': 'QDR', 'allowUnsettledMulticast': 'yes'}),
 
             # Setting the stripAnnotations to 'no' so that the existing tests will work.
             # Setting stripAnnotations to no will not strip the annotations and any tests that were already in this file
             # that were expecting the annotations to not be stripped will continue working.
-            ('listener', {'port': cls.tester.get_port(), 'maxFrameSize': '2048', 'stripAnnotations': 'no'}),
+            ('listener', {'port': OneRouterTest.listen_port, 'maxFrameSize': '2048', 'stripAnnotations': 'no'}),
 
             # The following listeners were exclusively added to test the stripAnnotations attribute in qdrouterd.conf file
             # Different listeners will be used to test all allowed values of stripAnnotations ('no', 'both', 'out', 'in')
@@ -52,10 +53,19 @@ class RouterTest(TestCase):
             ('address', {'prefix': 'closest', 'distribution': 'closest'}),
             ('address', {'prefix': 'spread', 'distribution': 'balanced'}),
             ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
+            ('address', {'prefix': 'unavailable', 'distribution': 'unavailable'})
         ])
         cls.router = cls.tester.qdrouterd(name, config)
         cls.router.wait_ready()
         cls.address = cls.router.addresses[0]
+
+    def test_listen_error(self):
+        """Make sure a router exits if a initial listener fails, doesn't hang"""
+        config = Qdrouterd.Config([
+            ('router', {'mode': 'standalone', 'id': 'bad'}),
+            ('listener', {'port': OneRouterTest.listen_port})])
+        r = Qdrouterd(name="expect_fail", config=config, wait=False)
+        self.assertEqual(1, r.wait())
 
     def test_01_pre_settled(self):
         addr = self.address+"/pre_settled/1"
@@ -1090,8 +1100,14 @@ class RouterTest(TestCase):
         test.run()
         self.assertEqual(None, test.error)
 
-    def test_17_multiframe_presettled(self):
-        test = MultiframePresettledTest(self.address)
+    # Will uncomment this test once https://issues.apache.org/jira/browse/PROTON-1514 is fixed
+    #def test_17_multiframe_presettled(self):
+    #    test = MultiframePresettledTest(self.address)
+    #    test.run()
+    #    self.assertEqual(None, test.error)
+
+    def test_16a_multicast_no_receivcer(self):
+        test = MulticastUnsettledNoReceiverTest(self.address)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1115,6 +1131,26 @@ class RouterTest(TestCase):
         test.run()
         self.assertEqual(None, test.error)
 
+    def test_27_create_unavailable_sender(self):
+        test = UnavailableSender(self.address)
+        test.run()
+        self.assertTrue(test.passed)
+
+    def test_28_create_unavailable_receiver(self):
+        test = UnavailableReceiver(self.address)
+        test.run()
+        self.assertTrue(test.passed)
+
+    def test_22_large_streaming_test(self):
+        test = LargeMessageStreamTest(self.address)
+        test.run()
+        self.assertEqual(None, test.error)
+
+    def test_25_reject_coordinator(self):
+        test = RejectCoordinatorTest(self.address)
+        test.run()
+        self.assertTrue(test.passed)
+
     def test_reject_disposition(self):
         test = RejectDispositionTest(self.address)
         test.run()
@@ -1130,9 +1166,14 @@ class RouterTest(TestCase):
 
         results = node.query(type='org.apache.qpid.dispatch.connection', attribute_names=[u'properties']).results
 
-        self.assertEqual(results[0][0][u'connection'], u'properties')
-        self.assertEqual(results[0][0][u'int_property'], 6451)
+        found = False
+        for result in results:
+            if u'connection' in result[0] and u'int_property' in result[0]:
+                found = True
+                self.assertEqual(result[0][u'connection'], u'properties')
+                self.assertEqual(result[0][u'int_property'], 6451)
 
+        self.assertTrue(found)
         client.connection.close()
 
 
@@ -1225,6 +1266,64 @@ class ExcessDeliveriesReleasedTest(MessagingHandler):
     def run(self):
         Container(self).run()
 
+class UnavailableBase(MessagingHandler):
+    def __init__(self, address):
+        super(UnavailableBase, self).__init__()
+        self.address = address
+        self.dest = "unavailable"
+        self.conn = None
+        self.sender = None
+        self.receiver = None
+        self.link_error = False
+        self.link_closed = False
+        self.passed = False
+        self.timer = None
+        self.link_name = "test_link"
+
+    def check_if_done(self):
+        if self.link_error and self.link_closed:
+            self.passed = True
+            self.conn.close()
+            self.timer.cancel()
+
+    def on_link_error(self, event):
+        link = event.link
+        if event.link.name == self.link_name and link.remote_condition.description \
+                == "Node not found":
+            self.link_error = True
+        self.check_if_done()
+
+    def on_link_remote_close(self, event):
+        if event.link.name == self.link_name:
+            self.link_closed = True
+            self.check_if_done()
+
+    def run(self):
+        Container(self).run()
+
+class UnavailableSender(UnavailableBase):
+    def __init__(self, address):
+        super(UnavailableSender, self).__init__(address)
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.conn = event.container.connect(self.address)
+        # Creating a sender to an address with unavailable distribution
+        # The router will not allow this link to be established. It will close the link with an error of
+        # "Node not found"
+        self.sender = event.container.create_sender(self.conn, self.dest, name=self.link_name)
+
+class UnavailableReceiver(UnavailableBase):
+    def __init__(self, address):
+        super(UnavailableReceiver, self).__init__(address)
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.conn = event.container.connect(self.address)
+        # Creating a receiver to an address with unavailable distribution
+        # The router will not allow this link to be established. It will close the link with an error of
+        # "Node not found"
+        self.receiver = event.container.create_receiver(self.conn, self.dest, name=self.link_name)
 
 class MulticastUnsettledTest(MessagingHandler):
     def __init__(self, address):
@@ -1247,7 +1346,7 @@ class MulticastUnsettledTest(MessagingHandler):
         self.conn.close()
 
     def on_start(self, event):
-        self.timer     = event.reactor.schedule(5, Timeout(self))
+        self.timer     = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn      = event.container.connect(self.address)
         self.sender    = event.container.create_sender(self.conn, self.dest)
         self.receiver1 = event.container.create_receiver(self.conn, self.dest, name="A")
@@ -1268,6 +1367,53 @@ class MulticastUnsettledTest(MessagingHandler):
     def on_message(self, event):
         if not event.delivery.settled:
             self.error = "Received unsettled delivery"
+        self.n_received += 1
+        self.check_if_done()
+
+    def run(self):
+        Container(self).run()
+
+class LargeMessageStreamTest(MessagingHandler):
+    def __init__(self, address):
+        super(LargeMessageStreamTest, self).__init__()
+        self.address = address
+        self.dest = "LargeMessageStreamTest"
+        self.error = None
+        self.count = 10
+        self.n_sent = 0
+        self.timer = None
+        self.conn = None
+        self.sender = None
+        self.receiver = None
+        self.n_received = 0
+        self.body = ""
+        for i in range(10000):
+            self.body += "0123456789101112131415"
+
+    def check_if_done(self):
+        if self.n_received == self.count:
+            self.timer.cancel()
+            self.conn.close()
+
+    def timeout(self):
+        self.error = "Timeout Expired: sent=%d, received=%d" % (self.n_sent, self.n_received)
+        self.conn.close()
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.conn = event.container.connect(self.address)
+        self.sender = event.container.create_sender(self.conn, self.dest)
+        self.receiver = event.container.create_receiver(self.conn, self.dest, name="A")
+        self.receiver.flow(self.count)
+
+    def on_sendable(self, event):
+        for i in range(self.count):
+            msg = Message(body=self.body)
+            # send(msg) calls the stream function which streams data from sender to the router
+            event.sender.send(msg)
+            self.n_sent += 1
+
+    def on_message(self, event):
         self.n_received += 1
         self.check_if_done()
 
@@ -1299,7 +1445,7 @@ class MultiframePresettledTest(MessagingHandler):
         self.conn.close()
 
     def on_start(self, event):
-        self.timer     = event.reactor.schedule(5, Timeout(self))
+        self.timer     = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn      = event.container.connect(self.address)
         self.sender    = event.container.create_sender(self.conn, self.dest)
         self.receiver  = event.container.create_receiver(self.conn, self.dest, name="A")
@@ -1316,6 +1462,59 @@ class MultiframePresettledTest(MessagingHandler):
         if not event.delivery.settled:
             self.error = "Received unsettled delivery"
         self.n_received += 1
+        self.check_if_done()
+
+    def run(self):
+        Container(self).run()
+
+class MulticastUnsettledNoReceiverTest(MessagingHandler):
+    """
+    Creates a sender to a multicast address. Router provides a credit of 'linkCapacity' to this sender even
+    if there are no receivers (The sender should be able to send messages to multicast addresses even when no receiver
+    is connected). The router will send a disposition of released back to the sender and will end up dropping
+    these messages since there is no receiver.
+    """
+    def __init__(self, address):
+        super(MulticastUnsettledNoReceiverTest, self).__init__(prefetch=0)
+        self.address = address
+        self.dest = "multicast.MulticastNoReceiverTest"
+        self.error = "Some error"
+        self.n_sent = 0
+        self.max_send = 250
+        self.n_released = 0
+        self.n_accepted = 0
+        self.timer = None
+        self.conn = None
+        self.sender = None
+
+    def check_if_done(self):
+        if self.n_accepted > 0:
+            self.error = "Messages should not be accepted as there are no receivers"
+            self.timer.cancel()
+            self.conn.close()
+        elif self.n_sent == self.n_released:
+            self.error = None
+            self.timer.cancel()
+            self.conn.close()
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.conn = event.container.connect(self.address)
+        self.sender = event.container.create_sender(self.conn, self.dest)
+
+    def on_sendable(self, event):
+        if self.n_sent >= self.max_send:
+            return
+        self.n_sent += 1
+        msg = Message(body=self.n_sent)
+        event.sender.send(msg)
+
+    def on_accepted(self, event):
+        self.n_accepted += 1
+        self.check_if_done()
+
+    def on_released(self, event):
+        self.n_released += 1
         self.check_if_done()
 
     def run(self):
@@ -1346,7 +1545,7 @@ class ReleasedVsModifiedTest(MessagingHandler):
         self.conn.close()
 
     def on_start(self, event):
-        self.timer     = event.reactor.schedule(5, Timeout(self))
+        self.timer     = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn      = event.container.connect(self.address)
         self.sender    = event.container.create_sender(self.conn, self.dest)
         self.receiver  = event.container.create_receiver(self.conn, self.dest, name="A")
@@ -1399,7 +1598,7 @@ class AppearanceOfBalanceTest(MessagingHandler):
         self.conn.close()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(5, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn       = event.container.connect(self.address)
         self.sender     = event.container.create_sender(self.conn, self.dest)
         self.receiver_a = event.container.create_receiver(self.conn, self.dest, name="A")
@@ -1456,7 +1655,7 @@ class BatchedSettlementTest(MessagingHandler):
         self.conn.close()
 
     def on_start(self, event):
-        self.timer    = event.reactor.schedule(10, Timeout(self))
+        self.timer    = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn     = event.container.connect(self.address)
         self.sender   = event.container.create_sender(self.conn, self.dest)
         self.receiver = event.container.create_receiver(self.conn, self.dest)
@@ -1485,6 +1684,59 @@ class BatchedSettlementTest(MessagingHandler):
         Container(self).run()
 
 
+class RejectCoordinatorTest(MessagingHandler, TransactionHandler):
+    def __init__(self, url):
+        super(RejectCoordinatorTest, self).__init__(prefetch=0)
+        self.url = Url(url)
+        self.error = "The router can't coordinate transactions by itself, a linkRoute to a coordinator must be " \
+                     "configured to use transactions."
+        self.container = None
+        self.conn = None
+        self.sender = None
+        self.timer = None
+        self.passed = False
+        self.link_error = False
+        self.link_remote_close = False
+
+    def timeout(self):
+        self.conn.close()
+
+    def check_if_done(self):
+        if self.link_remote_close and self.link_error:
+            self.passed = True
+            self.conn.close()
+            self.timer.cancel()
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.container = event.container
+        self.conn = self.container.connect(self.url)
+        self.sender = self.container.create_sender(self.conn, self.url.path)
+        # declare_transaction tries to create a link with name "txn-ctrl" to the
+        # transaction coordinator which has its own target, it has no address
+        # The router cannot coordinate transactions itself and so there will be a link error when this
+        # link is attempted to be created
+        self.container.declare_transaction(self.conn, handler=self)
+
+    def on_link_error(self, event):
+        link = event.link
+        # If the link name is 'txn-ctrl' and there is a link error and it matches self.error, then we know
+        # that the router has rejected the link because it cannot coordinate transactions itself
+        if link.name == "txn-ctrl" and link.remote_condition.description == self.error and \
+                        link.remote_condition.name == 'amqp:precondition-failed':
+            self.link_error = True
+            self.check_if_done()
+
+    def on_link_remote_close(self, event):
+        link = event.link
+        if link.name == "txn-ctrl":
+            self.link_remote_close = True
+            self.check_if_done()
+
+    def run(self):
+        Container(self).run()
+
+
 class PresettledOverflowTest(MessagingHandler):
     def __init__(self, address):
         super(PresettledOverflowTest, self).__init__(prefetch=0)
@@ -1501,7 +1753,7 @@ class PresettledOverflowTest(MessagingHandler):
         self.conn.close()
 
     def on_start(self, event):
-        self.timer    = event.reactor.schedule(5, Timeout(self))
+        self.timer    = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn     = event.container.connect(self.address)
         self.sender   = event.container.create_sender(self.conn, self.dest)
         self.receiver = event.container.create_receiver(self.conn, self.dest)

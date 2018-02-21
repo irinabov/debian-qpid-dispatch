@@ -36,6 +36,16 @@
  * @{
  */
 
+// DISPATCH-807 Queue depth limits
+// upper and lower limits for bang bang hysteresis control
+//
+// Q2 defines the number of buffers allowed in a message's buffer chain
+#define QD_QLIMIT_Q2_UPPER 256
+#define QD_QLIMIT_Q2_LOWER 128
+//
+// Q3 defines the number of bytes allowed in a session's outgoing_bytes
+#define QD_QLIMIT_Q3_UPPER (256 * 1000)
+
 // Callback for status change (confirmed persistent, loaded-in-memory, etc.)
 
 typedef struct qd_message_t qd_message_t;
@@ -133,16 +143,14 @@ void qd_message_free(qd_message_t *msg);
 qd_message_t *qd_message_copy(qd_message_t *msg);
 
 /**
- * Retrieve the message annotations from a message.
+ * Retrieve the message annotations from a message and place them in message storage.
  *
  * IMPORTANT: The pointer returned by this function remains owned by the message.
  *            The caller MUST NOT free the parsed field.
  *
  * @param msg Pointer to a received message.
- * @return Pointer to the parsed field for the message annotations.  If the message doesn't
- *         have message annotations, the return value shall be NULL.
  */
-qd_parsed_field_t *qd_message_message_annotations(qd_message_t *msg);
+void qd_message_message_annotations(qd_message_t *msg);
 
 /**
  * Set the value for the QD_MA_TRACE field in the outgoing message annotations
@@ -203,9 +211,9 @@ int  qd_message_get_phase_annotation(const qd_message_t *msg);
 void qd_message_set_ingress_annotation(qd_message_t *msg, qd_composed_field_t *ingress_field);
 
 /**
- * Receive message data via a delivery.  This function may be called more than once on the same
- * delivery if the message spans multiple frames.  Once a complete message has been received, this
- * function shall return the message.
+ * Receive message data frame by frame via a delivery.  This function may be called more than once on the same
+ * delivery if the message spans multiple frames. Always returns a message. The message buffers are filled up to the point with the data that was been received so far.
+ * The buffer keeps filling up on successive calls to this function.
  *
  * @param delivery An incoming delivery from a link
  * @return A pointer to the complete message or 0 if the message is not yet complete.
@@ -217,8 +225,11 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery);
  *
  * @param msg A pointer to a message to be sent.
  * @param link The outgoing link on which to send the message.
+ * @param strip_outbound_annotations [in] annotation control flag
+ * @param restart_rx [out] indication to wake up receive process
+ * @param q3_stalled [out] indicates that the link is stalled due to proton-buffer-full
  */
-void qd_message_send(qd_message_t *msg, qd_link_t *link, bool strip_outbound_annotations);
+void qd_message_send(qd_message_t *msg, qd_link_t *link, bool strip_outbound_annotations, bool *restart_rx, bool *q3_stalled);
 
 /**
  * Check that the message is well-formed up to a certain depth.  Any part of the message that is
@@ -257,6 +268,156 @@ char* qd_message_repr(qd_message_t *msg, char* buffer, size_t len, qd_log_bits l
 int qd_message_repr_len();
 
 qd_log_source_t* qd_message_log_source();
+
+/**
+ * Accessor for message field ingress
+ * 
+ * @param msg A pointer to the message
+ * @return the parsed field
+ */
+qd_parsed_field_t *qd_message_get_ingress    (qd_message_t *msg);
+
+/**
+ * Accessor for message field phase
+ * 
+ * @param msg A pointer to the message
+ * @return the parsed field
+ */
+qd_parsed_field_t *qd_message_get_phase      (qd_message_t *msg);
+
+/**
+ * Accessor for message field to_override
+ * 
+ * @param msg A pointer to the message
+ * @return the parsed field
+ */
+qd_parsed_field_t *qd_message_get_to_override(qd_message_t *msg);
+
+/**
+ * Accessor for message field trace
+ * 
+ * @param msg A pointer to the message
+ * @return the parsed field
+ */
+qd_parsed_field_t *qd_message_get_trace      (qd_message_t *msg);
+
+/**
+ * Accessor for message field phase
+ * 
+ * @param msg A pointer to the message
+ * @return the phase as an integer
+ */
+int                qd_message_get_phase_val  (qd_message_t *msg);
+
+/*
+ * Should the message be discarded.
+ * A message can be discarded if the disposition is released or rejected.
+ *
+ * @param msg A pointer to the message.
+ **/
+bool qd_message_is_discard(qd_message_t *msg);
+
+/**
+ *Set the discard field on the message to to the passed in boolean value.
+ *
+ * @param msg A pointer to the message.
+ * @param discard - the boolean value of discard.
+ */
+void qd_message_set_discard(qd_message_t *msg, bool discard);
+
+/**
+ * Has the message been completely received?
+ * Return true if the message is fully received
+ * Returns false if only the partial message has been received, if there is more of the message to be received.
+ *
+ * @param msg A pointer to the message.
+ */
+bool qd_message_receive_complete(qd_message_t *msg);
+
+/**
+ * Returns true if the message has been completely received AND the message has been completely sent.
+ */
+bool qd_message_send_complete(qd_message_t *msg);
+
+/**
+ * Returns true if the delivery tag has already been sent.
+ */
+bool qd_message_tag_sent(qd_message_t *msg);
+
+
+/**
+ * Sets if the delivery tag has already been sent out or not.
+ */
+void qd_message_set_tag_sent(qd_message_t *msg, bool tag_sent);
+
+/**
+ * Get the number of receivers for this message.
+ *
+ * @param msg A pointer to the message.
+ */
+size_t qd_message_fanout(qd_message_t *msg);
+
+/**
+ * Increase the fanout of the message by 1.
+ *
+ * @param msg A pointer to the message.
+ */
+void qd_message_add_fanout(qd_message_t *msg);
+
+/**
+ * Setter for message Q2 input_holdoff state
+ *
+ * @param msg A pointer to the message
+ */
+void qd_message_set_Q2_input_holdoff(qd_message_t *msg, bool holdoff);
+
+/**
+ * Accessor for message Q2 input_holdoff state
+ *
+ * @param msg A pointer to the message
+ * @return true if input is being held off
+ */
+bool qd_message_get_Q2_input_holdoff(qd_message_t *msg);
+
+/**
+ * Test if attempt to retreive message data through qd_message_recv should block
+ * due to Q2 input holdoff limit being exceeded. This message has enough
+ * buffers in the internal buffer chain and any calls to to qd_message_receive
+ * will not result in a call to pn_link_receive to retrieve more data.
+ *
+ * @param msg A pointer to the message
+ */
+bool qd_message_Q2_holdoff_should_block(qd_message_t *msg);
+
+/**
+ * Test if a message that is blocked by Q2 input holdoff has enough room
+ * to begin receiving again. This message has transmitted and disposed of
+ * enough buffers to begin receiving more data from the underlying proton link.
+ *
+ * @param msg A pointer to the message
+ */
+bool qd_message_Q2_holdoff_should_unblock(qd_message_t *msg);
+
+/**
+ * Return qd_link through which the message is being received.
+ * @param msg A pointer to the message
+ * @return the qd_link
+ */
+qd_link_t * qd_message_get_receiving_link(const qd_message_t *msg);
+
+/**
+ * Return message aborted state
+ * @param msg A pointer to the message
+ * @return true if the message has been aborted
+ */
+bool qd_message_aborted(const qd_message_t *msg);
+
+/**
+ * Set the aborted flag on the message.
+ * @param msg A pointer to the message
+ * @param aborted
+ */
+void qd_message_set_aborted(const qd_message_t *msg, bool aborted);
 
 ///@}
 

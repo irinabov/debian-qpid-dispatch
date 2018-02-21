@@ -23,9 +23,12 @@
 #include <qpid/dispatch/failoverlist.h>
 #include <proton/engine.h>
 #include <proton/event.h>
+#include <proton/ssl.h>
+
+struct qd_container_t;
 
 /**@file
- * Control server threads, signals and connections.
+ * Control server threads and connections.
  */
 
 /**
@@ -52,9 +55,8 @@ typedef void (*qd_deferred_t)(void *context, bool discard);
  * Run the server threads until completion - The blocking version.
  *
  * Start the operation of the server, including launching all of the worker
- * threads.  This function does not return until after the server has been
- * stopped.  The thread that calls qd_server_run is used as one of the worker
- * threads.
+ * threads.  Returns when all server threads have exited. The thread that calls
+ * qd_server_run is used as one of the worker threads.
  *
  * @param qd The dispatch handle returned by qd_dispatch.
  */
@@ -62,102 +64,15 @@ void qd_server_run(qd_dispatch_t *qd);
 
 
 /**
- * Start the server threads and return immediately - The non-blocking version.
+ * Tells the server to stop but doesn't wait for server to exit.
+ * The call to qd_server_run() will exit when all server threads have exited.
  *
- * Start the operation of the server, including launching all of the worker
- * threads.
- *
- * @param qd The dispatch handle returned by qd_dispatch.
- */
-void qd_server_start(qd_dispatch_t *qd);
-
-
-/**
- * Stop the server
- *
- * Stop the server and join all of its worker threads.  This function may be
- * called from any thread.  When this function returns, all of the other
- * server threads have been closed and joined.  The calling thread will be the
- * only running thread in the process.
+ * May be called from any thread or from a signal handler.
  *
  * @param qd The dispatch handle returned by qd_dispatch.
  */
+
 void qd_server_stop(qd_dispatch_t *qd);
-
-
-/**
- * Pause (quiesce) the server.
- *
- * This call blocks until all of the worker threads (except the one calling
- * this function) are finished processing and have been blocked.  When this
- * call returns, the calling thread is the only thread running in the process.
- *
- * If the calling process is *not* one of the server's worker threads, then
- * this function will block all of the worker threads before returning.
- *
- * @param qd The dispatch handle returned by qd_dispatch.
- */
-void qd_server_pause(qd_dispatch_t *qd);
-
-
-/**
- * Resume normal operation of a paused server.
- *
- * This call unblocks all of the worker threads so they can resume normal
- * connection processing.
- *
- * @param qd The dispatch handle returned by qd_dispatch.
- */
-void qd_server_resume(qd_dispatch_t *qd);
-
-
-/**
- * @}
- * @defgroup server_signal server_signal
- *
- * Server Signal Handling
- * 
- * @{
- */
-
-
-/**
- * Signal Handler
- *
- * Callback for signal handling.  This handler will be invoked on one of the
- * worker threads in an orderly fashion.  This callback is triggered by a call
- * to qd_server_signal.
- *
- * @param context The handler context supplied in qd_server_initialize.
- * @param signum The signal number that was passed into qd_server_signal.
- */
-typedef void (*qd_signal_handler_cb_t)(void* context, int signum);
-
-
-/**
- * Set the signal handler for the server.  The signal handler is invoked
- * cleanly on a worker thread after a call is made to qd_server_signal.  The
- * signal handler is optional and need not be set.
- *
- * @param qd The dispatch handle returned by qd_dispatch.
- * @param signal_handler The signal handler called when a registered signal is caught.
- * @param context Opaque context to be passed back in the callback function.
- */
-void qd_server_set_signal_handler(qd_dispatch_t *qd, qd_signal_handler_cb_t signal_handler, void *context);
-
-
-/**
- * Schedule the invocation of the Server's signal handler.
- *
- * This function is safe to call from any context, including an OS signal
- * handler or an Interrupt Service Routine.  It schedules the orderly
- * invocation of the Server's signal handler on one of the worker threads.
- *
- * @param qd The dispatch handle returned by qd_dispatch.
- * @param signum The signal number... TODO
- */
-void qd_server_signal(qd_dispatch_t *qd, int signum);
-
 
 /**
  * @}
@@ -236,6 +151,24 @@ typedef struct qd_server_config_t {
      * Space-separated list of SASL mechanisms to be accepted for the connection.
      */
     char *sasl_mechanisms;
+
+    /**
+     * Address, i.e. host:port, of remote authentication service to connect to.
+     * (listener only)
+     */
+    char *auth_service;
+    /**
+     * Hostname to set on sasl-init sent to authentication service.
+     */
+    char *sasl_init_hostname;
+    /**
+     * Ssl config for connecting to the authentication service.
+     */
+    pn_ssl_domain_t *auth_ssl_conf;
+    /**
+     * The name of the related sasl plugin config.
+     */
+    char *sasl_plugin;
 
     /**
      * If appropriate for the mechanism, the username for authentication
@@ -368,6 +301,11 @@ typedef struct qd_server_config_t {
     bool ssl_require_peer_authentication;
 
     /**
+     * Specifies the enabled ciphers so the SSL Ciphers can be hardened.
+     */
+    char *ciphers;
+
+    /**
      * Allow the connection to be redirected by the peer (via CLOSE->Redirect).  This is
      * meaningful for outgoing (connector) connections only.
      */
@@ -417,6 +355,13 @@ typedef struct qd_server_config_t {
     int idle_timeout_seconds;
 
     /**
+     * The timeout, in seconds, for the initial connection handshake.  If a connection is established
+     * inbound (via a listener) and the timeout expires before the OPEN frame arrives, the connection
+     * shall be closed.
+     */
+    int initial_handshake_timeout_seconds;
+
+    /**
      *  Holds comma separated list that indicates which components of the message should be logged.
      *  Defaults to 'none' (log nothing). If you want all properties and application properties of the message logged use 'all'.
      *  Specific components of the message can be logged by indicating the components via a comma separated list.
@@ -447,68 +392,27 @@ typedef struct qd_server_config_t {
      * Configured failover list
      */
     qd_failover_list_t *failover_list;
+
+    /**
+     * @name These fields are not primary configuration, they are computed.
+     * @{
+     */
+
+    /**
+     * Concatenated connect/listen address "host:port"
+     */
+    char *host_port;
+
+    /**
+     * @}
+     */
 } qd_server_config_t;
 
 
 /**
- * Connection Event Handler
- *
- * Callback invoked when processing is needed on a proton connection.  This
- * callback shall be invoked on one of the server's worker threads.  The
- * server guarantees that no two threads shall be allowed to process a single
- * connection concurrently.  The implementation of this handler may assume
- * that it has exclusive access to the connection and its subservient
- * components (sessions, links, deliveries, etc.).
- *
- * @param handler_context The handler context supplied in qd_server_set_conn_handler.
- * @param conn_context The handler context supplied in qd_server_{connect,listen}.
- * @param event The event/reason for the invocation of the handler.
- * @param conn The connection that requires processing by the handler.
- * @return A value greater than zero if the handler did any proton processing for
- *         the connection.  If no work was done, zero is returned.
+ * Set the container, must be set prior to the invocation of qd_server_run.
  */
-typedef int (*qd_conn_handler_cb_t)(void *handler_context, void* conn_context, qd_conn_event_t event, qd_connection_t *conn);
-
-/**
- * Proton Event Handler
- *
- * This callback is invoked when proton events for a connection require
- * processing.
- *
- * @param handler_context The handler context supplied in qd_server_set_conn_handler.
- * @param conn_context The handler context supplied in qd_server_{connect,listen}.
- * @param event The proton event being raised.
- * @param conn The connection associated with this proton event.
- */
-typedef int (*qd_pn_event_handler_cb_t)(void *handler_context, void* conn_context, pn_event_t *event, qd_connection_t *conn);
-
-
-/**
- * Post event process handler
- * Invoke only after all proton events have been popped from the collector.
- *
- * @param conn The connection for which all proton events have been popped.
- */
-typedef void (*qd_pn_event_complete_cb_t)(void *handler_context, qd_connection_t *conn);
-
-
-/**
- * Set the connection event handler callback.
- *
- * Set the connection handler callback for the server.  This callback is
- * mandatory and must be set prior to the invocation of qd_server_run.
- *
- * @param qd The dispatch handle returned by qd_dispatch.
- * @param conn_handler The handler for processing connection-related events.
- * @param pn_event_handler The handler for proton events.
- * @param handler_context Context data to associate with the handler.
- */
-void qd_server_set_conn_handler(qd_dispatch_t *qd,
-                                qd_conn_handler_cb_t conn_handler,
-                                qd_pn_event_handler_cb_t pn_event_handler,
-                                qd_pn_event_complete_cb_t pn_event_complete_handler,
-                                void *handler_context);
-
+void qd_server_set_container(qd_dispatch_t *qd, struct qd_container_t *container);
 
 /**
  * Set the user context for a connection.
@@ -576,9 +480,8 @@ void qd_connection_set_user(qd_connection_t *conn);
  * internal work list and be invoked for processing by a worker thread.
  *
  * @param conn The connection over which the application wishes to send data
- * @param awaken Iff true, wakeup the driver poll after the activation
  */
-void qd_server_activate(qd_connection_t *conn, bool awaken);
+void qd_server_activate(qd_connection_t *conn);
 
 
 /**
@@ -597,16 +500,6 @@ pn_connection_t *qd_connection_pn(qd_connection_t *conn);
  * @return true if connection came through a listener, false if through a connector.
  */
 bool qd_connection_inbound(qd_connection_t *conn);
-
-
-/* FIXME aconway 2017-01-19: hide for batching */
-/**
- * Get the event collector for a connection.
- *
- * @param conn Connection object supplied in QD_CONN_EVENT_{LISTENER,CONNETOR}_OPEN
- * @return The pn_collector associated with the connection.
- */
-pn_collector_t *qd_connection_collector(qd_connection_t *conn);
 
 
 /**
@@ -639,67 +532,14 @@ void qd_connection_invoke_deferred(qd_connection_t *conn, qd_deferred_t call, vo
 
 
 /**
- * Write accessor to the connection's proton-event stall flag.
- * When set no further events are processed on this connection.
- * Used during processing of policy decisions to hold off incoming
- * pipeline of amqp events.
- *
- * @param conn Connection object
- * @param stall Value of stall flag
+ * Listen for incoming connections, return true if listening succeeded.
  */
-void qd_connection_set_event_stall(qd_connection_t *conn, bool stall);
-
+bool qd_listener_listen(qd_listener_t *l);
 
 /**
- * Create a listener for incoming connections.
- *
- * @param qd The dispatch handle returned by qd_dispatch.
- * @param config Pointer to a configuration block for this listener.  This block will be
- *               referenced by the server, not copied.  The referenced record must remain
- *               in-scope for the life of the listener.
- * @param context User context passed back in the connection handler.
- * @return A pointer to the new listener, or NULL in case of failure.
+ * Initiate an outgoing connection. Returns true if successful.
  */
-qd_listener_t *qd_server_listen(qd_dispatch_t *qd, const qd_server_config_t *config, void *context);
-
-
-/**
- * Free the resources associated with a listener.
- *
- * @param li A listener pointer returned by qd_listen.
- */
-void qd_server_listener_free(qd_listener_t* li);
-
-
-/**
- * Close a listener so it will accept no more connections.
- *
- * @param li A listener pointer returned by qd_listen.
- */
-void qd_server_listener_close(qd_listener_t* li);
-
-
-/**
- * Create a connector for an outgoing connection.
- *
- * @param qd The dispatch handle returned by qd_dispatch.
- * @param config Pointer to a configuration block for this connector.  This block will be
- *               referenced by the server, not copied.  The referenced record must remain
- *               in-scope for the life of the connector..
- * @param context User context passed back in the connection handler.
- * @return A pointer to the new connector, or NULL in case of failure.
- */
-qd_connector_t *qd_server_connect(qd_dispatch_t *qd, const qd_server_config_t *config, void *context);
-
-
-/**
- * Free the resources associated with a connector.
- *
- * @param ct A connector pointer returned by qd_connect.
- */
-void qd_server_connector_free(qd_connector_t* ct);
-
-
+bool qd_connector_connect(qd_connector_t *ct);
 
 /**
  * Store address of display name service py object for C code use
@@ -710,9 +550,30 @@ void qd_server_connector_free(qd_connector_t* ct);
 qd_error_t qd_register_display_name_service(qd_dispatch_t *qd, void *display_name_service);
 
 /**
+ * Get the name of the connection, based on its IP address.
+ */
+const char* qd_connection_name(const qd_connection_t *c);
+
+
+/**
+ * Get the remote host IP address of the connection.
+ */
+const char* qd_connection_remote_ip(const qd_connection_t *c);
+
+/**
  * @}
  */
 
 bool is_log_component_enabled(qd_log_bits log_message, char *component_name);
+
+/**
+ * @}.
+ */
+bool qd_connection_strip_annotations_in(const qd_connection_t *c);
+
+/**
+ * @}
+ */
+void qd_connection_wake(qd_connection_t *ctx);
 
 #endif

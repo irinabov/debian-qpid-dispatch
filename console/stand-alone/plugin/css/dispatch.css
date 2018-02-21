@@ -40,7 +40,7 @@ path.link.selected {
 }
 
 path.link {
-  fill: none;
+  fill: #000;
   stroke: #000;
   stroke-width: 4px;
   cursor: default;
@@ -50,13 +50,6 @@ svg:not(.active):not(.ctrl) path.link {
   cursor: pointer;
 }
 
-path.link.temp {
-  opacity: 0.3;
-}
-path.link.temp.over {
-  opacity: 0.8;
-  stroke-dasharray: 10,2;
-}
 path.link.small {
   stroke-width: 2.5;
   stroke: darkgray;
@@ -119,11 +112,6 @@ circle.node.on-demand.artemis {
 circle.node.fixed {
     stroke-dasharray: 10,2;
 }
-circle.node.temp {
-    stroke: #f80;
-    fill: #f0f0ff;
-}
-
 text {
   font: 12px sans-serif;
   pointer-events: none;
@@ -479,7 +467,7 @@ div.boolean {
 .contextMenu ul {
 	width:300px;
 	margin:0;
-	/* padding:10px; */
+	padding-left:0;
 	list-style:none;
 	background:#fff;
 	color:#333;
@@ -707,3 +695,32 @@ div.topoGrid .ui-grid-viewport {
 .newChart {
   float: right;
 }
+
+select.unique, input.unique {
+  border: 2px solid blue;
+}
+select.required, input.required {
+  border: 2px solid black;
+}
+
+.required-indicator {
+  padding-left: 0.5em;
+  font-size: 0.85em;
+  vertical-align: super;
+}
+
+.required-indicator::before {
+  content: '(required)'
+}
+
+.unique-indicator {
+  padding-left: 0.5em;
+  font-size: 0.85em;
+  vertical-align: super;
+}
+
+.unique-indicator::before {
+  content: '(must be unique if supplied)'
+}
+
+.unique-indicator

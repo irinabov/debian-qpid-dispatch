@@ -18,7 +18,7 @@
  */
 
 #include <qpid/dispatch/ctools.h>
-#include "alloc.h"
+#include <qpid/dispatch/alloc.h>
 #include <qpid/dispatch/buffer.h>
 #include <qpid/dispatch/amqp.h>
 #include "compose_private.h"
@@ -35,6 +35,15 @@ static void bump_count(qd_composed_field_t *field)
     if (comp)
         comp->count++;
 }
+
+
+static void bump_count_by_n(qd_composed_field_t * field, uint32_t n)
+{
+    qd_composite_t *comp = DEQ_HEAD(field->fieldStack);
+    if (comp)
+        comp->count += n;
+}
+
 
 static void bump_length(qd_composed_field_t *field,
                         uint32_t length)
@@ -416,10 +425,8 @@ void qd_compose_insert_binary_buffers(qd_composed_field_t *field, qd_buffer_list
 }
 
 
-void qd_compose_insert_string(qd_composed_field_t *field, const char *value)
+void qd_compose_insert_string_n(qd_composed_field_t *field, const char *value, size_t len)
 {
-    uint32_t len = strlen(value);
-
     if (len < 256) {
         qd_insert_8(field, QD_AMQP_STR8_UTF8);
         qd_insert_8(field, (uint8_t) len);
@@ -429,6 +436,12 @@ void qd_compose_insert_string(qd_composed_field_t *field, const char *value)
     }
     qd_insert(field, (const uint8_t*) value, len);
     bump_count(field);
+}
+
+
+void qd_compose_insert_string(qd_composed_field_t *field, const char *value)
+{
+    qd_compose_insert_string_n(field, value, strlen(value));
 }
 
 
@@ -511,6 +524,7 @@ qd_buffer_list_t *qd_compose_buffers(qd_composed_field_t *field)
     return &field->buffers;
 }
 
+
 void qd_compose_take_buffers(qd_composed_field_t *field,
                              qd_buffer_list_t *list)
 {
@@ -519,6 +533,7 @@ void qd_compose_take_buffers(qd_composed_field_t *field,
     *list = *qd_compose_buffers(field);
     DEQ_INIT(field->buffers); // Zero out the linkage to the now moved buffers.
 }
+
 
 void qd_compose_insert_buffers(qd_composed_field_t *field,
                                qd_buffer_list_t *list)
@@ -531,3 +546,11 @@ void qd_compose_insert_buffers(qd_composed_field_t *field,
     }
 }
 
+
+void qd_compose_insert_opaque_elements(qd_composed_field_t *field,
+                                       uint32_t             count,
+                                       uint32_t             size)
+{
+    bump_count_by_n(field, count);
+    bump_length(field, size);
+}

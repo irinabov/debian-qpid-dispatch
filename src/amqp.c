@@ -18,6 +18,9 @@
  */
 
 #include <qpid/dispatch/amqp.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
 
 const char * const QD_MA_PREFIX  = "x-opt-qd.";
 const char * const QD_MA_INGRESS = "x-opt-qd.ingress";
@@ -25,6 +28,9 @@ const char * const QD_MA_TRACE   = "x-opt-qd.trace";
 const char * const QD_MA_TO      = "x-opt-qd.to";
 const char * const QD_MA_PHASE   = "x-opt-qd.phase";
 const char * const QD_MA_CLASS   = "x-opt-qd.class";
+const int          QD_MA_MAX_KEY_LEN = 16;
+const int          QD_MA_N_KEYS      = 4;  // max number of router annotations to send/receive
+const int          QD_MA_FILTER_LEN  = 5;  // N tailing inbound entries to search for stripping
 
 const char * const QD_CAPABILITY_ROUTER_CONTROL  = "qd.router";
 const char * const QD_CAPABILITY_ROUTER_DATA     = "qd.router-data";
@@ -64,4 +70,14 @@ const char * const QD_AMQP_COND_RESOURCE_DELETED = "amqp:resource-deleted";
 const char * const QD_AMQP_COND_ILLEGAL_STATE = "amqp:illegal-state";
 const char * const QD_AMQP_COND_FRAME_SIZE_TOO_SMALL = "amqp:frame-size-too-small";
 
-const char * const QD_COND_NAME = "router:error";
+const char * const QD_AMQP_PORT_STR = "5672";
+const char * const QD_AMQPS_PORT_STR = "5671";
+
+int qd_port_int(const char* port_str) {
+    if (!strcmp(port_str, QD_AMQP_PORT_STR)) return QD_AMQP_PORT_INT;
+    if (!strcmp(port_str, QD_AMQPS_PORT_STR)) return QD_AMQPS_PORT_INT;
+    errno = 0;
+    unsigned long n = strtoul(port_str, NULL, 10);
+    if (errno || n > 0xFFFF) return -1;
+    return n;
+}

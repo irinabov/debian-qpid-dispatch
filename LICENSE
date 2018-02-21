@@ -202,83 +202,35 @@
 
 
 ###############################################
-# Thrid Party Dependency Licensing Information:
+# Third Party Dependency Licensing Information:
 ###############################################
 
-console/stand-alone/plugin/lib/rhea-min.js is licensed under the above Apache License, Version 2.0
+The following 4 files are licensed under the above Apache License, Version 2.0
+1. console/stand-alone/plugin/lib/rhea-min.js
+2. console/hawtio/src/main/webapp/plugin/lib/rhea-min.js
+3. console/stand-alone/bower_components/angular-patternfly/dist/angular-patternfly.min.js
+4. console/stand-alone/bower_components/angular-patternfly/dist/styles/angular-patternfly.min.css
 
-console/hawtio/src/main/webapp/plugin/lib/rhea-min.js is licensed under the above Apache License, Version 2.0
+The following 3 files are licensed under the BSD license, for details see licenses/d3.js-license
+1. console/dispatch-dashboard/dispatch/static/dashboard/dispatch/lib/d3.v3.min.js
+2. console/hawtio/src/main/webapp/plugin/lib/d3.min.js
+3. console/hawtio/src/main/webapp/plugin/lib/zd3-queue.min.js
 
-console/stand-alone/bower_components/angular-patternfly/dist/angular-patternfly.min.js is licensed under the above Apache License, Version 2.0
+console/dispatch-dashboard/dispatch/static/dashboard/dispatch/jquery.dynatree.min.js is licensed under the MIT licence, for details see licenses/jquery.dynatree-license
 
-console/stand-alone/bower_components/angular-patternfly/dist/styles/angular-patternfly.min.css is licensed under the above Apache License, Version 2.0
+The following 2 files are covered by the MIT License, for details see licenses/angular-ui-license
+1. console/dispatch-dashboard/dispatch/static/dashboard/dispatch/lib/slider.js
+2. console/dispatch-dashboard/dispatch/static/dashboard/dispatch/lib/ui-grid.js
 
-console/dispatch-dashboard/dispatch/static/dashboard/dispatch/lib/d3.v3.min.js is licensed under the BSD licence
-Copyright 2010-2017 Mike Bostock
-All rights reserved.
+The following 2 files are covered by the MIT license, for details see licenses/jquery.tipsy-license
+1. console/hawtio/src/main/webapp/plugin/css/jquery.tipsy.css
+2. console/hawtio/src/main/webapp/plugin/lib/jquery.tipsy.js
 
-Redistribution and use in source and binary forms, with or without modification,
-are permitted provided that the following conditions are met:
+console/hawtio/src/main/webapp/plugin/css/jquery-ui.css is covered by the MIT License, for details see licenses/jquery-ui-license
+console/hawtio/src/main/webapp/plugin/lib/tooltipsy.min.js is licensed under the MIT license, for details see licenses/tooltipsy-license
 
-* Redistributions of source code must retain the above copyright notice, this
-  list of conditions and the following disclaimer.
+The following 3 files are covered by the SIL OFL 1.1, for details see licenses/fontawesome-license
+1. console/hawtio/src/main/webapp/plugin/fonts/fontawesome-webfont.woff
+2. console/hawtio/src/main/webapp/plugin/fonts/fontawesome-webfont.woff2
+3. console/hawtio/src/main/webapp/plugin/css/font-awesome.min.css
 
-* Redistributions in binary form must reproduce the above copyright notice,
-  this list of conditions and the following disclaimer in the documentation
-  and/or other materials provided with the distribution.
-
-* Neither the name of the author nor the names of contributors may be used to
-  endorse or promote products derived from this software without specific prior
-  written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-console/dispatch-dashboard/dispatch/static/dashboard/dispatch/jquery.dynatree.min.js is licensed under the following MIT licence
-
-Copyright (c) 2006-2015  Martin Wendt (http://wwWendt.de)
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
-and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of
-the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
-THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
-OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-The following two files are covered by the MIT License
-console/dispatch-dashboard/dispatch/static/dashboard/dispatch/lib/slider.js
-console/dispatch-dashboard/dispatch/static/dashboard/dispatch/lib/ui-grid.js
-Copyright (c) 2012 the AngularUI Team, http://angular-ui.github.com
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.

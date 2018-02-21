@@ -17,7 +17,7 @@
  * under the License.
  */
 
-#include "alloc.h"
+#include <qpid/dispatch/alloc.h>
 #include <qpid/dispatch/bitmask.h>
 #include <assert.h>
 #include <stdint.h>
@@ -149,6 +149,12 @@ int qd_bitmask_first_set(qd_bitmask_t *b, int *bitnum)
 int qd_bitmask_cardinality(const qd_bitmask_t *b)
 {
     return b->cardinality;
+}
+
+
+bool qd_bitmask_valid_bit_value(int bitnum)
+{
+    return (bitnum >= 0 && bitnum < QD_BITMASK_BITS);
 }
 
 

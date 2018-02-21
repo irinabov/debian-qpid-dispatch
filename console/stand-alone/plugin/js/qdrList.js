@@ -85,8 +85,8 @@ var QDR = (function(QDR) {
       }
     ];
     $scope.operations = []
-      $scope.currentMode = $scope.modes[0];
-      $scope.isModeSelected = function (mode) {
+    $scope.currentMode = $scope.modes[0];
+    $scope.isModeSelected = function (mode) {
       return mode === $scope.currentMode;
     }
     $scope.fetchingLog = false;
@@ -100,8 +100,8 @@ var QDR = (function(QDR) {
           $scope.fetchingLog = false;
           var statusCode = context.message.application_properties.statusCode;
           if (statusCode < 200 || statusCode >= 300) {
-            Core.notification('error', context.message.application_properties.statusDescription);
-            //QDR.log.debug(context.message.application_properties.statusDescription)
+            Core.notification('error', context.message.statusDescription);
+            QDR.log.info('Error ' + context.message.statusDescription)
             return;
           }
           $scope.logResults = response.filter( function (entry) {
@@ -141,11 +141,14 @@ var QDR = (function(QDR) {
       QDRService.redirectWhenConnected("list");
       return;
     }
+    var onDisconnect = function () {
+QDR.log.info("we were just disconnected while on the list page. Setting org to redirect back once we are connected again")
+      $timeout( function () {
+        QDRService.redirectWhenConnected("list")
+      })
+    }
     // we are currently connected. setup a handler to get notified if we are ever disconnected
-    QDRService.addDisconnectAction( function () {
-      QDRService.redirectWhenConnected("list")
-      $scope.$apply();
-    })
+    QDRService.addDisconnectAction( onDisconnect )
 
     $scope.nodes = []
     var excludedEntities = ["management", "org.amqp.management", "operationalEntity", "entity", "configurationEntity", "dummy", "console"];
@@ -226,8 +229,12 @@ var QDR = (function(QDR) {
       for (attr in schemaEntity.attributes) {
         var entity = schemaEntity.attributes[attr]
         var value = ""
-        if (angular.isDefined(entity['default']))
-          value = entity['default']
+        if (angular.isDefined(entity['default'])) {
+          if (entity['type'] === 'integer')
+            value = parseInt(entity['default']) // some default values that are marked as integer are passed as string
+          else
+            value = entity['default']
+        }
         row[attr] = {
           value: value,
           type: entity.type,
@@ -382,6 +389,7 @@ var QDR = (function(QDR) {
           input:          schemaEntity.input,
           type:           schemaEntity.type,
           required:       schemaEntity.required,
+          unique:         schemaEntity.unique,
           selected:       schemaEntity.selected,
           rawtype:        schemaEntity.rawtype,
           disabled:       schemaEntity.disabled,
@@ -626,6 +634,7 @@ var QDR = (function(QDR) {
       columnDefs: "detailCols",
       enableColumnResize: true,
       multiSelect: false,
+      jqueryUIDraggable: true,
       beforeSelectionChange: function() {
           return false;
       }
@@ -633,16 +642,18 @@ var QDR = (function(QDR) {
     $scope.$on("$destroy", function( event ) {
       //QDR.log.debug("scope destroyed for qdrList");
       stopUpdating();
+      QDRService.delDisconnectAction( onDisconnect )
     });
 
     function gotMethodResponse (nodeName, entity, response, context) {
       var statusCode = context.message.application_properties.statusCode;
       if (statusCode < 200 || statusCode >= 300) {
-        Core.notification('error', context.message.application_properties.statusDescription);
-        //QDR.log.debug(context.message.application_properties.statusDescription)
+        Core.notification('error', context.message.statusDescription);
+        QDR.log.info('Error ' + context.message.statusDescription)
       } else {
         var note = entity + " " + $filter('Pascalcase')($scope.currentMode.op) + "d"
         Core.notification('success', note);
+        QDR.log.info('Success ' + note)
         $scope.selectMode($scope.modes[0]);
         restartUpdate();
       }
@@ -737,10 +748,9 @@ var QDR = (function(QDR) {
       var sortedEntities = Object.keys(QDRService.schema.entityTypes).sort();
       sortedEntities.forEach( function (entity) {
         if (excludedEntities.indexOf(entity) == -1) {
-          if (!angular.isDefined($scope.selectedEntity)) {
+          if (!angular.isDefined($scope.selectedEntity))
             $scope.selectedEntity = entity;
-            $scope.operations = lookupOperations()
-          }
+          $scope.operations = lookupOperations()
           var e = new Folder(entity)
           e.typeName = "entity"
           e.key = entity
@@ -783,8 +793,6 @@ var QDR = (function(QDR) {
       QDRService.setUpdateEntities([".connection"])
       QDRService.startUpdating();
     })
-
-
   }]);
 
     return QDR;

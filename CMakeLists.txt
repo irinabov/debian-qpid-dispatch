@@ -100,7 +100,7 @@ endif (NOT COMMAND add_compile_options)
 find_library(pthread_lib pthread)
 find_library(dl_lib dl)
 find_library(rt_lib rt)
-find_package(Proton 0.15 REQUIRED)
+find_package(Proton REQUIRED Core Proactor)
 
 ## Optional dependencies
 include(FindLibWebSockets)
@@ -114,13 +114,32 @@ mark_as_advanced(VALGRIND_EXECUTABLE)
 find_package_handle_standard_args(VALGRIND DEFAULT_MSG VALGRIND_EXECUTABLE)
 option(USE_VALGRIND "Use valgrind when running tests" OFF)
 
+if (USE_VALGRIND)
+  set(TEST_RUNNER "${VALGRIND_EXECUTABLE} --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite --error-exitcode=42 --suppressions=${CMAKE_SOURCE_DIR}/tests/valgrind.supp")
+endif()
+
+option(USE_SANITIZERS "Compile with sanitizers (ASan, UBSan, TSan); incompatible with Valgrind" OFF)
+if (USE_SANITIZERS)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize=leak -fsanitize=undefined")
+  add_compile_options(-g)
+  add_compile_options(-fno-omit-frame-pointer)
+endif (USE_SANITIZERS)
+
+option(USE_TSAN "Compile with ThreadSanitizer (TSan); incompatible with Valgrind" OFF)
+if (USE_TSAN)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=thread")
+  add_compile_options(-g)
+  add_compile_options(-fno-omit-frame-pointer)
+endif (USE_TSAN)
+
 ##
 ## Include directories used by all sub-directories.
 ##
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_BINARY_DIR}/include
-    ${Proton_INCLUDE_DIRS}
+    ${Proton_Proactor_INCLUDE_DIRS}
+    ${Proton_Core_INCLUDE_DIRS}
     ${PYTHON_INCLUDE_PATH}
     )
 
@@ -140,7 +159,13 @@ else (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
  add_compile_options(-lpthread)
 endif (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
 
-set(CATCH_UNDEFINED "-Wl,-z,defs")
+if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wno-gnu-statement-expression)
+endif()
+
+if (NOT (USE_SANITIZERS OR USE_TSAN))
+  set(CATCH_UNDEFINED "-Wl,-z,defs")
+endif ()
 
 ##
 ## Header file installation
@@ -162,7 +187,6 @@ install(PROGRAMS
 install(FILES
   LICENSE
   README
-  TODO
   DESTINATION ${QD_DOC_INSTALL_DIR})
 
 

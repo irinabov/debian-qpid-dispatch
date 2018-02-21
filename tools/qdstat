@@ -55,8 +55,8 @@ def parse_args(argv):
 
     # This limit can be used to limit the number of output rows and can be used in conjunction with options
     # like -c, -l, -a, --autolinks, --linkroutes and --log.
-    # By default, the limit is set to 1000 rows.
-    parser.add_option("--limit", help="Limit number of output rows", type="int", default=1000)
+    # By default, the limit is set to 100 rows.
+    parser.add_option("--limit", help="Limit number of output rows", type="int", default=100)
 
     opts, args = parser.parse_args(args=argv)
 
@@ -104,10 +104,14 @@ class BusManager(Node):
         if not conn.isAuthenticated:
             return "no-auth"
         sasl = conn.sasl
-        if sasl == "GSSAPI":   sasl = "Kerberos"
-        if sasl == "EXTERNAL": sasl = "x.509"
-        if sasl == "ANONYMOUS":
+        if sasl == "GSSAPI":
+            sasl = "Kerberos"
+        elif sasl == "EXTERNAL":
+            sasl = "x.509"
+        elif sasl == "ANONYMOUS":
             return "anonymous-user"
+        if not conn.user:
+            return sasl
         return "%s(%s)" % (conn.user, sasl)
 
     def connSecurity(self, conn):
@@ -183,8 +187,8 @@ class BusManager(Node):
         if addr[0] == 'A' : return "area"
         if addr[0] == 'L' : return "local"
         if addr[0] == 'T' : return "topo"
-        if addr[0] == 'C' : return "link-in"
-        if addr[0] == 'D' : return "link-out"
+        if addr[0] in 'CE' : return "link-in"
+        if addr[0] in 'DF' : return "link-out"
         return "unknown: %s" % addr[0]
 
     def _addr_text(self, addr):
@@ -231,7 +235,7 @@ class BusManager(Node):
         rows.append(('Version',       router.version))
         rows.append(('Mode',          router.mode))
         rows.append(('Area',          router.area))
-        rows.append(('Router Id',     router.routerId))
+        rows.append(('Router Id',     router.id))
         rows.append(('Link Routes',   router.linkRouteCount))
         rows.append(('Auto Links',    router.autoLinkCount))
         rows.append(('Links',         router.linkCount))
@@ -428,24 +432,24 @@ class BusManager(Node):
     def displayLinkRoutes(self):
         disp = Display(prefix="  ")
         heads = []
-        heads.append(Header("prefix"))
+        heads.append(Header("address"))
         heads.append(Header("dir"))
         heads.append(Header("distrib"))
         heads.append(Header("status"))
         rows = []
-        cols = ('prefix', 'dir', 'distribution', 'operStatus')
+        cols = ('prefix', 'dir', 'distribution', 'operStatus', 'pattern')
 
         link_routes = self.query('org.apache.qpid.dispatch.router.config.linkRoute', cols, limit=self.opts.limit)
 
         for link_route in link_routes:
             row = []
-            row.append(link_route.prefix)
+            row.append(link_route.prefix if link_route.prefix else link_route.pattern)
             row.append(link_route.dir)
             row.append(link_route.distribution)
             row.append(link_route.operStatus)
             rows.append(row)
         title = "Link Routes"
-        sorter = Sorter(heads, rows, 'prefix', 0, True)
+        sorter = Sorter(heads, rows, 'address', 0, True)
         dispRows = sorter.getSorted()
         disp.formattedTable(title, heads, dispRows)
 

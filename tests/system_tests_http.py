@@ -19,10 +19,7 @@
 
 import unittest, os, json, threading, sys, ssl, urllib2
 import ssl
-import run
-from subprocess import PIPE, Popen, STDOUT
 from system_test import TestCase, Qdrouterd, main_module, DIR, TIMEOUT, Process
-from qpid_dispatch.management.client import Node
 
 class RouterTestHttp(TestCase):
 
@@ -50,7 +47,21 @@ class RouterTestHttp(TestCase):
     def assert_get_cert(self, url):
         self.assertEqual("HTTP test\n", self.get_cert("%s/system_tests_http.txt" % url))
 
+    def test_listen_error(self):
+        """Make sure a router exits if an initial HTTP listener fails, doesn't hang"""
+        listen_port = self.get_port()
+        config = Qdrouterd.Config([
+            ('router', {'mode': 'standalone', 'id': 'bad'}),
+            ('listener', {'port': listen_port, 'maxFrameSize': '2048', 'stripAnnotations': 'no'}),
+            ('listener', {'port': listen_port, 'http':True})])
+        r = Qdrouterd(name="expect_fail", config=config, wait=False);
+        self.assertEqual(1, r.wait())
+
     def test_http_get(self):
+
+        if not sys.version_info >= (2, 9):
+            return
+
         config = Qdrouterd.Config([
             ('router', {'id': 'QDR.HTTP'}),
             ('listener', {'port': self.get_port(), 'httpRoot': os.path.dirname(__file__)}),
@@ -83,7 +94,8 @@ class RouterTestHttp(TestCase):
         self.assertRaises(urllib2.URLError, urllib2.urlopen, "https://localhost:%d/nosuch" % r.ports[0])
 
     def test_https_get(self):
-        if run.use_valgrind(): self.skipTest("too slow for valgrind")
+        if not sys.version_info >= (2, 9):
+            return
 
         def listener(**kwargs):
             args = dict(kwargs)
@@ -96,6 +108,7 @@ class RouterTestHttp(TestCase):
                             'certDb': self.ssl_file('ca-certificate.pem'),
                             'certFile': self.ssl_file('server-certificate.pem'),
                             'keyFile': self.ssl_file('server-private-key.pem'),
+                            'ciphers': 'ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:RSA+AESGCM:RSA+AES:!aNULL:!MD5:!DSS',
                             'password': 'server-password'
             }),
             listener(sslProfile='simple-ssl', requireSsl=False, authenticatePeer=False),
