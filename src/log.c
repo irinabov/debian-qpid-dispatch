@@ -23,9 +23,10 @@
 #include "entity.h"
 #include "entity_cache.h"
 #include "aprintf.h"
+#include <qpid/dispatch/atomic.h>
 #include <qpid/dispatch/ctools.h>
 #include <qpid/dispatch/dispatch.h>
-#include "alloc.h"
+#include <qpid/dispatch/alloc.h>
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/log.h>
 #include <stdarg.h>
@@ -70,7 +71,7 @@ static void qd_log_entry_free_lh(qd_log_entry_t* entry) {
 
 // Ref-counted log sink, may be shared by several sources.
 typedef struct log_sink_t {
-    int refcount;
+    sys_atomic_t ref_count;
     char *name;
     bool syslog;
     FILE *file;
@@ -97,9 +98,9 @@ static log_sink_t* find_log_sink_lh(const char* name) {
 // Must hold the log_source_lock
 static void log_sink_free_lh(log_sink_t* sink) {
     if (!sink) return;
-    assert(sink->refcount);
+    assert(sink->ref_count);
 
-    if (--sink->refcount == 0) {
+    if (sys_atomic_dec(&sink->ref_count) == 1) {
         DEQ_REMOVE(sink_list, sink);
         free(sink->name);
         if (sink->file && sink->file != stderr)
@@ -113,7 +114,7 @@ static void log_sink_free_lh(log_sink_t* sink) {
 static log_sink_t* log_sink_lh(const char* name) {
     log_sink_t* sink = find_log_sink_lh(name);
     if (sink)
-        sink->refcount++;
+        sys_atomic_inc(&sink->ref_count);
     else {
 
         bool syslog = false;
@@ -142,7 +143,9 @@ static log_sink_t* log_sink_lh(const char* name) {
         }
 
         sink = NEW(log_sink_t);
-        *sink = (log_sink_t){ 1, strdup(name), };
+        ZERO(sink);
+        sys_atomic_init(&sink->ref_count, 1);
+        sink->name = strdup(name);
         sink->syslog = syslog;
         sink->file = file;
         DEQ_INSERT_TAIL(sink_list, sink);
@@ -373,7 +376,7 @@ qd_log_source_t *qd_log_source_reset(const char *module)
 }
 
 static void qd_log_source_free_lh(qd_log_source_t* src) {
-    DEQ_REMOVE_HEAD(source_list);
+    DEQ_REMOVE(source_list, src);
     log_sink_free_lh(src->sink);
     free(src->module);
     free(src);
@@ -519,7 +522,10 @@ qd_error_t qd_log_entity(qd_entity_t *entity) {
             log_sink_t* sink = log_sink_lh(output);
             QD_ERROR_BREAK();
 
-            log_sink_free_lh(src->sink); /* DEFAULT source may already have a sink, so free that sink first */
+            /* DEFAULT source may already have a sink, so free the old sink first */
+            if (src->sink) {
+                log_sink_free_lh(src->sink);
+            }
             src->sink = sink;           /* Assign the new sink   */
 
             if (src->sink->syslog) /* Timestamp off for syslog. */

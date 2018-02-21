@@ -18,7 +18,7 @@
 #
 
 import unittest
-from time import sleep
+from time import sleep, time
 from subprocess import PIPE, STDOUT
 
 from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, Process
@@ -31,24 +31,36 @@ from proton.utils import BlockingConnection, LinkDetached
 from system_tests_drain_support import DrainMessagesHandler, DrainOneMessageHandler, DrainNoMessagesHandler, DrainNoMoreMessagesHandler
 
 from qpid_dispatch.management.client import Node
+from qpid_dispatch.management.error import NotFoundStatus
 
 class LinkRouteTest(TestCase):
     """
     Tests the linkRoute property of the dispatch router.
 
-    Sets up 3 routers (one of which is acting as a broker(QDR.A)). 2 routers have linkRoute set to 'org.apache.'
+    Sets up 4 routers (two of which are acting as brokers (QDR.A, QDR.D)). The other two routers have linkRoutes
+    configured such that matching traffic will be directed to/from the 'fake' brokers.
+
     (please see configs in the setUpClass method to get a sense of how the routers and their connections are configured)
     The tests in this class send and receive messages across this network of routers to link routable addresses.
     Uses the Python Blocking API to send/receive messages. The blocking api plays neatly into the synchronous nature
     of system tests.
 
-        QDR.A acting broker
+        QDR.A acting broker #1
              +---------+         +---------+         +---------+     +-----------------+
              |         | <------ |         | <-----  |         |<----| blocking_sender |
              |  QDR.A  |         |  QDR.B  |         |  QDR.C  |     +-----------------+
              |         | ------> |         | ------> |         |     +-------------------+
              +---------+         +---------+         +---------+---->| blocking_receiver |
-                                                                     +-------------------+
+                                    ^  |                             +-------------------+
+                                    |  |
+                                    |  V
+                                 +---------+
+                                 |         |
+                                 |  QDR.D  |
+                                 |         |
+                                 +---------+
+                            QDR.D acting broker #2
+
     """
     @classmethod
     def get_router(cls, index):
@@ -72,6 +84,7 @@ class LinkRouteTest(TestCase):
         a_listener_port = cls.tester.get_port()
         b_listener_port = cls.tester.get_port()
         c_listener_port = cls.tester.get_port()
+        d_listener_port = cls.tester.get_port()
         test_tag_listener_port = cls.tester.get_port()
 
         router('A',
@@ -80,26 +93,40 @@ class LinkRouteTest(TestCase):
                ])
         router('B',
                [
+                   # Listener for clients, note that the tests assume this listener is first in this list:
                    ('listener', {'role': 'normal', 'host': '0.0.0.0', 'port': b_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
                    ('listener', {'name': 'test-tag', 'role': 'route-container', 'host': '0.0.0.0', 'port': test_tag_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
 
-                   # This is an on-demand connection made from QDR.B's ephemeral port to a_listener_port
+                   # This is an route-container connection made from QDR.B's ephemeral port to a_listener_port
                    ('connector', {'name': 'broker', 'role': 'route-container', 'host': '0.0.0.0', 'port': a_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
                    # Only inter router communication must happen on 'inter-router' connectors. This connector makes
                    # a connection from the router B's ephemeral port to c_listener_port
                    ('connector', {'name': 'routerC', 'role': 'inter-router', 'host': '0.0.0.0', 'port': c_listener_port}),
+                   # This is an on-demand connection made from QDR.B's ephemeral port to d_listener_port
+                   ('connector', {'name': 'routerD', 'role': 'route-container', 'host': '0.0.0.0', 'port': d_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
 
                    #('linkRoute', {'prefix': 'org.apache', 'connection': 'broker', 'dir': 'in'}),
                    ('linkRoute', {'prefix': 'org.apache', 'containerId': 'QDR.A', 'dir': 'in'}),
                    ('linkRoute', {'prefix': 'org.apache', 'containerId': 'QDR.A', 'dir': 'out'}),
 
                    ('linkRoute', {'prefix': 'pulp.task', 'connection': 'test-tag', 'dir': 'in'}),
-                   ('linkRoute', {'prefix': 'pulp.task', 'connection': 'test-tag', 'dir': 'out'})
-                ]
+                   ('linkRoute', {'prefix': 'pulp.task', 'connection': 'test-tag', 'dir': 'out'}),
+
+                   # addresses matching pattern 'a.*.toA.#' route to QDR.A
+                   ('linkRoute', {'pattern': 'a.*.toA.#', 'containerId': 'QDR.A', 'dir': 'in'}),
+                   ('linkRoute', {'pattern': 'a.*.toA.#', 'containerId': 'QDR.A', 'dir': 'out'}),
+
+                   # addresses matching pattern 'a.*.toD.#' route to QDR.D
+                   ('linkRoute', {'pattern': 'a.*.toD.#', 'containerId': 'QDR.D', 'dir': 'in'}),
+                   ('linkRoute', {'pattern': 'a.*.toD.#', 'containerId': 'QDR.D', 'dir': 'out'})
+
+               ]
                )
         router('C',
                [
-                   # The client will exclusively use the following listener to connect to QDR.C
+                   # The client will exclusively use the following listener to
+                   # connect to QDR.C, the tests assume this is the first entry
+                   # in the list
                    ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.tester.get_port(), 'saslMechanisms': 'ANONYMOUS'}),
                    ('listener', {'host': '0.0.0.0', 'role': 'inter-router', 'port': c_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
                    # The dot(.) at the end is ignored by the address hashing scheme.
@@ -108,15 +135,28 @@ class LinkRouteTest(TestCase):
                    ('linkRoute', {'prefix': 'org.apache.', 'dir': 'out'}),
 
                    ('linkRoute', {'prefix': 'pulp.task', 'dir': 'in'}),
-                   ('linkRoute', {'prefix': 'pulp.task', 'dir': 'out'})
+                   ('linkRoute', {'prefix': 'pulp.task', 'dir': 'out'}),
+
+                   ('linkRoute', {'pattern': 'a.*.toA.#', 'dir': 'in'}),
+                   ('linkRoute', {'pattern': 'a.*.toA.#', 'dir': 'out'}),
+
+                   ('linkRoute', {'pattern': 'a.*.toD.#', 'dir': 'in'}),
+                   ('linkRoute', {'pattern': 'a.*.toD.#', 'dir': 'out'})
+
                 ]
                )
+        router('D',  # sink for QDR.D routes
+               [
+                   ('listener', {'role': 'normal', 'host': '0.0.0.0', 'port': d_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
+               ])
 
-        # Wait for the routers to locate each other
+        # Wait for the routers to locate each other, and for route propagation
+        # to settle
         cls.routers[1].wait_router_connected('QDR.C')
         cls.routers[2].wait_router_connected('QDR.B')
+        cls.routers[2].wait_address("org.apache", remotes=1, delay=0.5)
 
-        # This is not a classic router network in the sense that one router is acting as a broker. We allow a little
+        # This is not a classic router network in the sense that QDR.A and D are acting as brokers. We allow a little
         # bit more time for the routers to stabilize.
         sleep(2)
 
@@ -202,16 +242,20 @@ class LinkRouteTest(TestCase):
 
     def test_bbb_qdstat_link_routes_routerB(self):
         """
-        Runs qdstat on router B to make sure that router B has two link routes, one 'in' and one 'out'
+        Runs qdstat on router B to make sure that router B has 4 link routes,
+        each having one 'in' and one 'out' entry
 
         """
         out = self.run_qdstat_linkRoute(self.routers[1].addresses[0])
+        for route in ['a.*.toA.#', 'a.*.toD.#', 'org.apache',  'pulp.task']:
+            self.assertTrue(route in out)
+
         out_list = out.split()
-        self.assertEqual(out_list.count('in'), 2)
-        self.assertEqual(out_list.count('out'), 2)
+        self.assertEqual(out_list.count('in'), 4)
+        self.assertEqual(out_list.count('out'), 4)
 
         parts = out.split("\n")
-        self.assertEqual(len(parts), 8)
+        self.assertEqual(len(parts), 12)
 
         out = self.run_qdstat_linkRoute(self.routers[1].addresses[0], args=['--limit=1'])
         parts = out.split("\n")
@@ -219,14 +263,15 @@ class LinkRouteTest(TestCase):
 
     def test_ccc_qdstat_link_routes_routerC(self):
         """
-        Runs qdstat on router C to make sure that router C has two link routes, one 'in' and one 'out'
+        Runs qdstat on router C to make sure that router C has 4 link routes,
+        each having one 'in' and one 'out' entry
 
         """
         out = self.run_qdstat_linkRoute(self.routers[2].addresses[0])
         out_list = out.split()
 
-        self.assertEqual(out_list.count('in'), 2)
-        self.assertEqual(out_list.count('out'), 2)
+        self.assertEqual(out_list.count('in'), 4)
+        self.assertEqual(out_list.count('out'), 4)
 
     def test_ddd_partial_link_route_match(self):
         """
@@ -357,6 +402,104 @@ class LinkRouteTest(TestCase):
 
         blocking_connection.close()
 
+    def _link_route_pattern_match(self, connect_node, include_host,
+                                  exclude_host, test_address,
+                                  expected_pattern):
+        """
+        This helper function ensures that messages sent to 'test_address' pass
+        through 'include_host', and are *not* routed to 'exclude_host'
+
+        """
+        hello_pattern = "Hello Pattern!"
+        route = 'M0' + test_address
+
+        # Connect to the two 'waypoints', ensure the route is not present on
+        # either
+
+        node_A = Node.connect(include_host, timeout=TIMEOUT)
+        node_B = Node.connect(exclude_host, timeout=TIMEOUT)
+
+        for node in [node_A, node_B]:
+            self.assertRaises(NotFoundStatus,
+                              node.read,
+                              type='org.apache.qpid.dispatch.router.address',
+                              name=route)
+
+        # wait until the host we're connecting to gets its next hop for the
+        # pattern we're connecting to
+        connect_node.wait_address(expected_pattern, remotes=1, delay=0.1)
+
+        # Connect to 'connect_node' and send message to 'address'
+
+        blocking_connection = BlockingConnection(connect_node.addresses[0])
+        blocking_receiver = blocking_connection.create_receiver(address=test_address)
+        blocking_sender = blocking_connection.create_sender(address=test_address,
+                                                            options=AtMostOnce())
+        msg = Message(body=hello_pattern)
+        blocking_sender.send(msg)
+        received_message = blocking_receiver.receive()
+        self.assertEqual(hello_pattern, received_message.body)
+
+        # verify test_address is only present on include_host and not on exclude_host
+
+        self.assertRaises(NotFoundStatus,
+                          node_B.read,
+                          type='org.apache.qpid.dispatch.router.address',
+                          name=route)
+
+        self.assertEqual(1, node_A.read(type='org.apache.qpid.dispatch.router.address',
+                                        name=route).deliveriesIngress)
+        self.assertEqual(1, node_A.read(type='org.apache.qpid.dispatch.router.address',
+                                        name=route).deliveriesIngress)
+
+        # drop the connection and verify that test_address is no longer on include_host
+
+        blocking_connection.close()
+
+        timeout = time() + TIMEOUT
+        while True:
+            try:
+                node_A.read(type='org.apache.qpid.dispatch.router.address',
+                            name=route)
+                if time() > timeout:
+                    raise Exception("Expected route '%s' to expire!" % route)
+                sleep(0.1)
+            except NotFoundStatus:
+                break;
+
+        node_A.close()
+        node_B.close()
+
+    def test_link_route_pattern_match(self):
+        """
+        Verify the addresses match the proper patterns and are routed to the
+        proper 'waypoint' only
+        """
+        qdr_A = self.routers[0].addresses[0]
+        qdr_D = self.routers[3].addresses[0]
+        qdr_C = self.routers[2]  # note: the node, not the address!
+
+        self._link_route_pattern_match(connect_node=qdr_C,
+                                       include_host=qdr_A,
+                                       exclude_host=qdr_D,
+                                       test_address='a.notD.toA',
+                                       expected_pattern='a.*.toA.#')
+        self._link_route_pattern_match(connect_node=qdr_C,
+                                       include_host=qdr_D,
+                                       exclude_host=qdr_A,
+                                       test_address='a.notA.toD',
+                                       expected_pattern='a.*.toD.#')
+        self._link_route_pattern_match(connect_node=qdr_C,
+                                       include_host=qdr_A,
+                                       exclude_host=qdr_D,
+                                       test_address='a.toD.toA.xyz',
+                                       expected_pattern='a.*.toA.#')
+        self._link_route_pattern_match(connect_node=qdr_C,
+                                       include_host=qdr_D,
+                                       exclude_host=qdr_A,
+                                       test_address='a.toA.toD.abc',
+                                       expected_pattern='a.*.toD.#')
+
     def test_custom_annotations_match(self):
         """
         The linkRoute on Routers C and B is set to org.apache.
@@ -438,23 +581,11 @@ class LinkRouteTest(TestCase):
         # First delete linkRoutes on QDR.B
         local_node = Node.connect(self.routers[1].addresses[0], timeout=TIMEOUT)
         result_list = local_node.query(type='org.apache.qpid.dispatch.router.config.linkRoute').results
+        self.assertEqual(8, len(result_list))
 
-        identity_1 = result_list[0][1]
-        identity_2 = result_list[1][1]
-        identity_3 = result_list[2][1]
-        identity_4 = result_list[3][1]
-
-        cmd = 'DELETE --type=linkRoute --identity=' + identity_1
-        self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
-
-        cmd = 'DELETE --type=linkRoute --identity=' + identity_2
-        self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
-
-        cmd = 'DELETE --type=linkRoute --identity=' + identity_3
-        self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
-
-        cmd = 'DELETE --type=linkRoute --identity=' + identity_4
-        self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
+        for rid in range(8):
+            cmd = 'DELETE --type=linkRoute --identity=' + result_list[rid][1]
+            self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
 
         cmd = 'QUERY --type=linkRoute'
         out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
@@ -472,23 +603,11 @@ class LinkRouteTest(TestCase):
         local_node = Node.connect(addr, timeout=TIMEOUT)
         result_list = local_node.query(type='org.apache.qpid.dispatch.router.config.linkRoute').results
 
-        identity_1 = result_list[0][1]
-        identity_2 = result_list[1][1]
-        identity_3 = result_list[2][1]
-        identity_4 = result_list[3][1]
-        identity_4 = result_list[3][1]
-
-        cmd = 'DELETE --type=linkRoute --identity=' + identity_1
-        self.run_qdmanage(cmd=cmd, address=addr)
-
-        cmd = 'DELETE --type=linkRoute --identity=' + identity_2
-        self.run_qdmanage(cmd=cmd, address=addr)
-
-        cmd = 'DELETE --type=linkRoute --identity=' + identity_3
-        self.run_qdmanage(cmd=cmd, address=addr)
-
-        cmd = 'DELETE --type=linkRoute --identity=' + identity_4
-        self.run_qdmanage(cmd=cmd, address=addr)
+        # QDR.C has 8 link routes configured, nuke 'em:
+        self.assertEqual(8, len(result_list))
+        for rid in range(8):
+            cmd = 'DELETE --type=linkRoute --identity=' + result_list[rid][1]
+            self.run_qdmanage(cmd=cmd, address=addr)
 
         cmd = 'QUERY --type=linkRoute'
         out = self.run_qdmanage(cmd=cmd, address=addr)
@@ -620,7 +739,7 @@ class DeliveryTagsTest(MessagingHandler):
             self.sender_connection.close()
 
     def on_start(self, event):
-        self.timer               = event.reactor.schedule(5, Timeout(self))
+        self.timer               = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.receiver_connection = event.container.connect(self.listening_address)
 
     def on_connection_remote_open(self, event):
@@ -692,7 +811,7 @@ class CloseWithUnsettledTest(MessagingHandler):
         self.conn_route.close()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(5, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn_route = event.container.connect(self.route_addr)
 
     def on_connection_opened(self, event):
@@ -740,7 +859,7 @@ class DynamicSourceTest(MessagingHandler):
         self.conn_route.close()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(5, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn_route = event.container.connect(self.route_addr)
 
     def on_connection_opened(self, event):
@@ -797,7 +916,7 @@ class DynamicTargetTest(MessagingHandler):
         self.conn_route.close()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(5, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn_route = event.container.connect(self.route_addr)
 
     def on_connection_opened(self, event):
@@ -850,9 +969,9 @@ class DetachNoCloseTest(MessagingHandler):
         self.conn_normal.close()
         self.conn_route.close()
         self.timer.cancel()
-        
+
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(5, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn_route = event.container.connect(self.route_addr)
 
     def on_connection_opened(self, event):
@@ -913,9 +1032,9 @@ class DetachMixedCloseTest(MessagingHandler):
         self.conn_normal.close()
         self.conn_route.close()
         self.timer.cancel()
-        
+
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(5, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.conn_route = event.container.connect(self.route_addr)
 
     def on_connection_opened(self, event):
@@ -1069,4 +1188,3 @@ class TerminusAddrTest(MessagingHandler):
 
 if __name__ == '__main__':
     unittest.main(main_module())
-

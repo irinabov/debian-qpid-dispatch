@@ -52,7 +52,6 @@ getting current information from the implementation object.
 
 ## Threading:
 
-
 The agent is locked to be thread safe, called in the following threads:
 - Reading configuration file in initialization thread (no contention).
 - Management requests arriving in multiple, concurrent connection threads.
@@ -61,9 +60,6 @@ The agent is locked to be thread safe, called in the following threads:
 When refreshing attributes, the agent must also read C implementation object
 data that may be updated in other threads.
 
-# FIXME aconway 2015-02-09:
-Temporary solution is to lock the entire dispatch router lock during full refresh.
-Better solution coming soon...
 """
 
 import traceback, json, pstats
@@ -208,7 +204,7 @@ class EntityAdapter(SchemaEntity):
         """Handle update request with new attributes from management client"""
         self.entity_type.update_check(request.body, self.attributes)
         newattrs = dict(self.attributes, **request.body)
-        self.entity_type.validate(newattrs, update=True)
+        self.entity_type.validate(newattrs)
         self.attributes = newattrs
         self._update()
         return (OK, self.attributes)
@@ -233,22 +229,6 @@ class EntityAdapter(SchemaEntity):
         return "Entity(%s)" % ", ".join("%s=%s" % (k, '*******' if self.entity_type.attribute(k).hidden else self.attributes[k]) for k in keys)
 
 
-class ContainerEntity(EntityAdapter):
-    """
-    The ContainerEntity has been deprecated. Use the the RouterEntity instead
-    """
-
-    def create(self):
-        self._qd.qd_dispatch_configure_container(self._dispatch, self)
-
-    def _identifier(self):
-        self.attributes.setdefault("containerName", "00000000-0000-0000-0000-000000000000")
-        return self.attributes["containerName"]
-
-    def __str__(self):
-        return super(ContainerEntity, self).__str__().replace("Entity(", "ContainerEntity(")
-
-
 class RouterEntity(EntityAdapter):
     def __init__(self, agent, entity_type, attributes=None):
         super(RouterEntity, self).__init__(agent, entity_type, attributes, validate=False)
@@ -257,15 +237,10 @@ class RouterEntity(EntityAdapter):
         self._add_implementation(
             CImplementation(agent.qd, entity_type, self._dispatch))
 
-    def _identifier(self): return self.attributes.get('id')
+    def _identifier(self):
+        return self.attributes.get('id')
 
     def create(self):
-        try:
-            if self.routerId:
-                self._agent.log(LOG_WARNING, "routerId is deprecated, use id instead")
-        except:
-            pass
-
         self._qd.qd_dispatch_configure_router(self._dispatch, self)
 
     def __str__(self):
@@ -356,17 +331,24 @@ class SslProfileEntity(EntityAdapter):
         return self._qd.qd_dispatch_configure_ssl_profile(self._dispatch, self)
 
     def _delete(self):
-        deleted = self._qd.qd_connection_manager_delete_ssl_profile(self._dispatch, self._implementations[0].key)
-        # SSL Profiles cannot be deleted if they are referenced by a connector/listener.
-        if not deleted:
-            raise ForbiddenStatus("SSL Profile is referenced by other listeners/connectors. Delete the associated "
-                                  "listeners/connectors before deleting the SSL Profile")
-
+        self._qd.qd_connection_manager_delete_ssl_profile(self._dispatch, self._implementations[0].key)
     def _identifier(self):
         return self.name
 
     def __str__(self):
         return super(SslProfileEntity, self).__str__().replace("Entity(", "SslProfileEntity(")
+
+class AuthServicePluginEntity(EntityAdapter):
+    def create(self):
+        return self._qd.qd_dispatch_configure_sasl_plugin(self._dispatch, self)
+
+    def _delete(self):
+        self._qd.qd_connection_manager_delete_sasl_plugin(self._dispatch, self._implementations[0].key)
+    def _identifier(self):
+        return self.name
+
+    def __str__(self):
+        return super(AuthServicePluginEntity, self).__str__().replace("Entity(", "AuthServicePluginEntity(")
 
 class ListenerEntity(EntityAdapter):
     def create(self):
@@ -398,29 +380,6 @@ class ConnectorEntity(EntityAdapter):
     def __str__(self):
         return super(ConnectorEntity, self).__str__().replace("Entity(", "ConnectorEntity(")
 
-class FixedAddressEntity(EntityAdapter):
-    def create(self):
-        self._qd.qd_dispatch_configure_fixed_address(self._dispatch, self)
-
-    def __str__(self):
-        return super(FixedAddressEntity, self).__str__().replace("Entity(", "FixedAddressEntity(")
-
-
-class WaypointEntity(EntityAdapter):
-    def create(self):
-        self._qd.qd_dispatch_configure_waypoint(self._dispatch, self)
-        #self._qd.qd_waypoint_activate_all(self._dispatch)
-
-    def __str__(self):
-        return super(WaypointEntity, self).__str__().replace("Entity(", "WaypointEntity(")
-
-class LinkRoutePatternEntity(EntityAdapter):
-    def create(self):
-        self._qd.qd_dispatch_configure_lrp(self._dispatch, self)
-
-    def __str__(self):
-        return super(LinkRoutePatternEntity, self).__str__().replace("Entity(", "LinkRoutePatternEntity(")
-
 class AddressEntity(EntityAdapter):
     def create(self):
         self._qd.qd_dispatch_configure_address(self._dispatch, self)
@@ -448,6 +407,7 @@ class ConsoleEntity(EntityAdapter):
 
     def create(self):
         # if a named listener is present, use its host:port
+        self._agent.log(LOG_WARNING, "Console entity is deprecated: Use http:yes on listener entity instead")
         name = self.attributes.get('listener')
         if name:
             listeners = self._agent.find_entity_by_type("listener")
@@ -561,7 +521,7 @@ class EntityCache(object):
         self.log(LOG_DEBUG, "Add entity: %s" % entity)
         entity.validate()       # Fill in defaults etc.
         # Validate in the context of the existing entities for uniqueness
-        self.schema.validate_full(chain(iter([entity]), iter(self.entities)))
+        self.schema.validate_add(entity, self.entities)
         self.entities.append(entity)
 
     def _add_implementation(self, implementation, adapter=None):
@@ -615,7 +575,6 @@ class EntityCache(object):
             for i in sorted(redundant, reverse=True):
                 events.pop(i)
 
-        # FIXME aconway 2014-10-23: locking is ugly, push it down into C code.
         self.qd.qd_dispatch_router_lock(self.agent.dispatch)
         try:
             events = []

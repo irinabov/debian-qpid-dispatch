@@ -32,15 +32,13 @@
 #include <qpid/dispatch/trace_mask.h>
 #include <qpid/dispatch/hash.h>
 #include <qpid/dispatch/log.h>
+#include "parse_tree.h"
 #include "dispatch_private.h"
 #include "entity.h"
 
 qd_error_t qd_router_python_setup(qd_router_t *router);
 void qd_router_python_free(qd_router_t *router);
 qd_error_t qd_pyrouter_tick(qd_router_t *router);
-qd_error_t qd_router_configure_fixed_address(qd_router_t *router, qd_entity_t *entity);
-qd_error_t qd_router_configure_waypoint(qd_router_t *router, qd_entity_t *entity);
-qd_error_t qd_router_configure_lrp(qd_router_t *router, qd_entity_t *entity);
 qd_error_t qd_router_configure_address(qd_router_t *router, qd_entity_t *entity);
 qd_error_t qd_router_configure_link_route(qd_router_t *router, qd_entity_t *entity);
 qd_error_t qd_router_configure_auto_link(qd_router_t *router, qd_entity_t *entity);
@@ -64,6 +62,13 @@ struct qd_router_t {
 
     sys_mutex_t              *lock;
     qd_timer_t               *timer;
+
+    //
+    // Store the "radius" of the current network topology.  This is defined as the
+    // distance in hops (not cost) from the local router to the most distant known
+    // router in the topology.
+    //
+    int topology_radius;
 };
 
 #endif

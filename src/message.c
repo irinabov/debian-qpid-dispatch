@@ -23,6 +23,7 @@
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/iterator.h>
 #include <qpid/dispatch/log.h>
+#include <qpid/dispatch/buffer.h>
 #include <proton/object.h>
 #include "message_private.h"
 #include "compose_private.h"
@@ -33,6 +34,10 @@
 #include <limits.h>
 #include <time.h>
 #include <inttypes.h>
+#include <assert.h>
+
+#define LOCK   sys_mutex_lock
+#define UNLOCK sys_mutex_unlock
 
 const char *STR_AMQP_NULL = "null";
 const char *STR_AMQP_TRUE = "T";
@@ -716,8 +721,6 @@ static qd_field_location_t *qd_message_properties_field(qd_message_t *msg, qd_me
         if (!qd_message_check(msg, QD_DEPTH_PROPERTIES) || !content->section_message_properties.parsed)
             return 0;
     }
-    if (field == QD_FIELD_PROPERTIES)
-        return &content->section_message_properties;
 
     const int index = field - QD_FIELD_MESSAGE_ID;
     qd_field_location_t *const location = (qd_field_location_t *)((char *)content + offsets[index]);
@@ -838,6 +841,13 @@ qd_message_t *qd_message()
     DEQ_INIT(msg->ma_trace);
     DEQ_INIT(msg->ma_ingress);
     msg->ma_phase = 0;
+    msg->ma_phase      = 0;
+    msg->sent_depth    = QD_DEPTH_NONE;
+    msg->cursor.buffer = 0;
+    msg->cursor.cursor = 0;
+    msg->send_complete = false;
+    msg->tag_sent      = false;
+
     msg->content = new_qd_message_content_t();
 
     if (msg->content == 0) {
@@ -849,7 +859,6 @@ qd_message_t *qd_message()
     msg->content->lock = sys_mutex();
     sys_atomic_init(&msg->content->ref_count, 1);
     msg->content->parse_depth = QD_DEPTH_NONE;
-    msg->content->parsed_message_annotations = 0;
 
     return (qd_message_t*) msg;
 }
@@ -870,8 +879,16 @@ void qd_message_free(qd_message_t *in_msg)
     rc = sys_atomic_dec(&content->ref_count) - 1;
 
     if (rc == 0) {
-        if (content->parsed_message_annotations)
-            qd_parse_free(content->parsed_message_annotations);
+        if (content->ma_field_iter_in)
+            qd_iterator_free(content->ma_field_iter_in);
+        if (content->ma_pf_ingress)
+            qd_parse_free(content->ma_pf_ingress);
+        if (content->ma_pf_phase)
+            qd_parse_free(content->ma_pf_phase);
+        if (content->ma_pf_to_override)
+            qd_parse_free(content->ma_pf_to_override);
+        if (content->ma_pf_trace)
+            qd_parse_free(content->ma_pf_trace);
 
         qd_buffer_t *buf = DEQ_HEAD(content->buffers);
         while (buf) {
@@ -879,6 +896,9 @@ void qd_message_free(qd_message_t *in_msg)
             qd_buffer_free(buf);
             buf = DEQ_HEAD(content->buffers);
         }
+
+        if (content->pending)
+            qd_buffer_free(content->pending);
 
         sys_mutex_free(content->lock);
         free_qd_message_content_t(content);
@@ -902,8 +922,15 @@ qd_message_t *qd_message_copy(qd_message_t *in_msg)
     qd_buffer_list_clone(&copy->ma_trace, &msg->ma_trace);
     qd_buffer_list_clone(&copy->ma_ingress, &msg->ma_ingress);
     copy->ma_phase = msg->ma_phase;
+    copy->strip_annotations_in  = msg->strip_annotations_in;
 
     copy->content = content;
+
+    copy->sent_depth    = QD_DEPTH_NONE;
+    copy->cursor.buffer = 0;
+    copy->cursor.cursor = 0;
+    copy->send_complete = false;
+    copy->tag_sent      = false;
 
     qd_message_message_annotations((qd_message_t*) copy);
 
@@ -912,30 +939,46 @@ qd_message_t *qd_message_copy(qd_message_t *in_msg)
     return (qd_message_t*) copy;
 }
 
-qd_parsed_field_t *qd_message_message_annotations(qd_message_t *in_msg)
+void qd_message_message_annotations(qd_message_t *in_msg)
 {
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
     qd_message_content_t *content = msg->content;
 
-    if (content->parsed_message_annotations)
-        return content->parsed_message_annotations;
+    if (content->ma_parsed)
+        return ;
+    content->ma_parsed = true;
 
-    qd_iterator_t *ma = qd_message_field_iterator(in_msg, QD_FIELD_MESSAGE_ANNOTATION);
-    if (ma == 0)
-        return 0;
+    content->ma_field_iter_in = qd_message_field_iterator(in_msg, QD_FIELD_MESSAGE_ANNOTATION);
+    if (content->ma_field_iter_in == 0)
+        return;
 
-    content->parsed_message_annotations = qd_parse(ma);
-    if (content->parsed_message_annotations == 0 ||
-        !qd_parse_ok(content->parsed_message_annotations) ||
-        !qd_parse_is_map(content->parsed_message_annotations)) {
-        qd_iterator_free(ma);
-        qd_parse_free(content->parsed_message_annotations);
-        content->parsed_message_annotations = 0;
-        return 0;
+    qd_parse_annotations(
+        msg->strip_annotations_in,
+        content->ma_field_iter_in,
+        &content->ma_pf_ingress,
+        &content->ma_pf_phase,
+        &content->ma_pf_to_override,
+        &content->ma_pf_trace,
+        &content->ma_user_annotation_blob,
+        &content->ma_count);
+
+    // Construct pseudo-field location of user annotations blob
+    // This holds all annotations if no router-specific annotations are present
+    if (content->ma_count > 0) {
+        qd_field_location_t   *cf  = &content->field_user_annotations;
+        qd_iterator_pointer_t *uab = &content->ma_user_annotation_blob;
+        cf->buffer = uab->buffer;
+        cf->offset = uab->cursor - qd_buffer_base(uab->buffer);
+        cf->length = uab->remaining;
+        cf->parsed = true;
     }
 
-    qd_iterator_free(ma);
-    return content->parsed_message_annotations;
+    // extract phase
+    if (content->ma_pf_phase) {
+        content->ma_int_phase = qd_parse_as_int(content->ma_pf_phase);
+    }
+
+    return;
 }
 
 
@@ -975,91 +1018,250 @@ void qd_message_set_ingress_annotation(qd_message_t *in_msg, qd_composed_field_t
     qd_compose_free(ingress_field);
 }
 
+bool qd_message_is_discard(qd_message_t *msg)
+{
+    if (!msg)
+        return false;
+    qd_message_pvt_t *pvt_msg = (qd_message_pvt_t*) msg;
+    return pvt_msg->content->discard;
+}
+
+void qd_message_set_discard(qd_message_t *msg, bool discard)
+{
+    if (!msg)
+        return;
+
+    qd_message_pvt_t *pvt_msg = (qd_message_pvt_t*) msg;
+    pvt_msg->content->discard = discard;
+}
+
+size_t qd_message_fanout(qd_message_t *in_msg)
+{
+    if (!in_msg)
+        return 0;
+    qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
+    return msg->content->fanout;
+}
+
+void qd_message_add_fanout(qd_message_t *in_msg)
+{
+    assert(in_msg);
+    qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
+    sys_atomic_inc(&msg->content->fanout);
+}
+
+bool qd_message_receive_complete(qd_message_t *in_msg)
+{
+    if (!in_msg)
+        return false;
+    qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
+    return msg->content->receive_complete;
+}
+
+bool qd_message_send_complete(qd_message_t *in_msg)
+{
+    if (!in_msg)
+        return false;
+
+    qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
+    return msg->send_complete;
+}
+
+bool qd_message_tag_sent(qd_message_t *in_msg)
+{
+    if (!in_msg)
+        return false;
+
+    qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
+    return msg->tag_sent;
+}
+
+void qd_message_set_tag_sent(qd_message_t *in_msg, bool tag_sent)
+{
+    if (!in_msg)
+        return;
+
+    qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
+    msg->tag_sent = tag_sent;
+}
+
+qd_iterator_pointer_t qd_message_cursor(qd_message_pvt_t *in_msg)
+{
+    qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
+    return msg->cursor;
+}
+
+
+/**
+ * Receive and discard large messages for which there is no destination.
+ * Don't waste resources by putting the message into internal buffers.
+ * Don't fiddle with locking as no sender is competing with reception.
+ */
+qd_message_t *discard_receive(pn_delivery_t *delivery,
+                              pn_link_t     *link,
+                              qd_message_t  *msg_in)
+{
+    qd_message_pvt_t *msg  = (qd_message_pvt_t*)msg_in;
+
+    while (1) {
+#define DISCARD_BUFFER_SIZE (128 * 1024)
+        char dummy[DISCARD_BUFFER_SIZE];
+        ssize_t rc = pn_link_recv(link, dummy, DISCARD_BUFFER_SIZE);
+
+        if (rc == 0) {
+            // have read all available pn_link incoming bytes
+            break;
+        } else if (rc == PN_EOS || rc < 0) {
+            // end of message or error. Call the message complete
+            msg->content->receive_complete = true;
+            msg->content->aborted = pn_delivery_aborted(delivery);
+            msg->content->input_link = 0;
+
+            pn_record_t *record = pn_delivery_attachments(delivery);
+            pn_record_set(record, PN_DELIVERY_CTX, 0);
+            break;
+        } else {
+            // rc was > 0. bytes were read and discarded.
+        }
+    }
+
+    return msg_in;
+}
+
+
 qd_message_t *qd_message_receive(pn_delivery_t *delivery)
 {
     pn_link_t        *link = pn_delivery_link(delivery);
     ssize_t           rc;
-    qd_buffer_t      *buf;
 
     pn_record_t *record    = pn_delivery_attachments(delivery);
     qd_message_pvt_t *msg  = (qd_message_pvt_t*) pn_record_get(record, PN_DELIVERY_CTX);
 
     //
-    // If there is no message associated with the delivery, this is the first time
-    // we've received anything on this delivery.  Allocate a message descriptor and
-    // link it and the delivery together.
+    // If there is no message associated with the delivery then this is the
+    // first time we've received anything on this delivery.
+    // Allocate a message descriptor and link it and the delivery together.
     //
     if (!msg) {
         msg = (qd_message_pvt_t*) qd_message();
+        qd_link_t       *qdl = (qd_link_t *)pn_link_get_context(link);
+        qd_connection_t *qdc = qd_link_connection(qdl);
+        msg->content->input_link = pn_link_get_context(link);
+        msg->strip_annotations_in  = qd_connection_strip_annotations_in(qdc);
         pn_record_def(record, PN_DELIVERY_CTX, PN_WEAKREF);
         pn_record_set(record, PN_DELIVERY_CTX, (void*) msg);
     }
 
     //
-    // Get a reference to the tail buffer on the message.  This is the buffer into which
-    // we will store incoming message data.  If there is no buffer in the message, allocate
-    // an empty one and add it to the message.
+    // The discard flag indicates we should keep reading the input stream
+    // but not process the message for delivery.
     //
-    buf = DEQ_TAIL(msg->content->buffers);
-    if (!buf) {
-        buf = qd_buffer();
-        DEQ_INSERT_TAIL(msg->content->buffers, buf);
+    if (qd_message_is_discard((qd_message_t*)msg)) {
+        return discard_receive(delivery, link, (qd_message_t *)msg);
     }
 
+    //
+    // If input is in holdoff then just exit. When enough buffers
+    // have been processed and freed by outbound processing then
+    // message holdoff is cleared and receiving may continue.
+    //
+    if (msg->content->q2_input_holdoff) {
+        return (qd_message_t*)msg;
+    }
+
+    // Loop until msg is complete, error seen, or incoming bytes are consumed
+    bool recv_error = false;
     while (1) {
         //
-        // Try to receive enough data to fill the remaining space in the tail buffer.
+        // handle EOS and clean up after pn receive errors
         //
-        rc = pn_link_recv(link, (char*) qd_buffer_cursor(buf), qd_buffer_capacity(buf));
+        bool at_eos = (pn_delivery_partial(delivery) == false) &&
+                      (pn_delivery_aborted(delivery) == false) &&
+                      (pn_delivery_pending(delivery) == 0);
 
-        //
-        // If we receive PN_EOS, we have come to the end of the message.
-        //
-        if (rc == PN_EOS) {
-            //
-            // Clear the value in the record with key PN_DELIVERY_CTX
-            //
-            pn_record_set(record, PN_DELIVERY_CTX, 0);
+        if (at_eos || recv_error) {
+            // Message is complete
+            LOCK(msg->content->lock);
+            {
+                // Append last buffer if any with data
+                if (msg->content->pending) {
+                    if (qd_buffer_size(msg->content->pending) > 0) {
+                        // pending buffer has bytes that are port of message
+                        DEQ_INSERT_TAIL(msg->content->buffers,
+                                        msg->content->pending);
+                    } else {
+                        // pending buffer is empty
+                        qd_buffer_free(msg->content->pending);
+                    }
+                    msg->content->pending = 0;
+                } else {
+                    // pending buffer is absent
+                }
 
-            //
-            // If the last buffer in the list is empty, remove it and free it.  This
-            // will only happen if the size of the message content is an exact multiple
-            // of the buffer size.
-            //
+                msg->content->receive_complete = true;
+                msg->content->aborted = pn_delivery_aborted(delivery);
+                msg->content->input_link = 0;
 
-            if (qd_buffer_size(buf) == 0) {
-                DEQ_REMOVE_TAIL(msg->content->buffers);
-                qd_buffer_free(buf);
+                // unlink message and delivery
+                pn_record_set(record, PN_DELIVERY_CTX, 0);
             }
-
-            return (qd_message_t*) msg;
+            UNLOCK(msg->content->lock);
+            break;
         }
 
-        if (rc > 0) {
+        //
+        // Handle a missing or full pending buffer
+        //
+        if (!msg->content->pending) {
+            // Pending buffer is absent: get a new one
+            msg->content->pending = qd_buffer();
+        } else {
+            // Pending buffer exists
+            if (qd_buffer_capacity(msg->content->pending) == 0) {
+                // Pending buffer is full
+                LOCK(msg->content->lock);
+                DEQ_INSERT_TAIL(msg->content->buffers, msg->content->pending);
+                msg->content->pending = 0;
+                if (qd_message_Q2_holdoff_should_block((qd_message_t *)msg)) {
+                    msg->content->q2_input_holdoff = true;
+                    UNLOCK(msg->content->lock);
+                    break;
+                }
+                UNLOCK(msg->content->lock);
+                msg->content->pending = qd_buffer();
+            } else {
+                // Pending buffer still has capacity
+            }
+        }
+
+        //
+        // Try to fill the remaining space in the pending buffer.
+        //
+        rc = pn_link_recv(link,
+                          (char*) qd_buffer_cursor(msg->content->pending),
+                          qd_buffer_capacity(msg->content->pending));
+
+        if (rc < 0) {
+            // error or eos seen. next pass breaks out of loop
+            recv_error = true;
+        } else if (rc > 0) {
             //
             // We have received a positive number of bytes for the message.  Advance
             // the cursor in the buffer.
             //
-            qd_buffer_insert(buf, rc);
-
-            //
-            // If the buffer is full, allocate a new empty buffer and append it to the
-            // tail of the message's list.
-            //
-            if (qd_buffer_capacity(buf) == 0) {
-                buf = qd_buffer();
-                DEQ_INSERT_TAIL(msg->content->buffers, buf);
-            }
-        } else
+            qd_buffer_insert(msg->content->pending, rc);
+        } else {
             //
             // We received zero bytes, and no PN_EOS.  This means that we've received
             // all of the data available up to this point, but it does not constitute
             // the entire message.  We'll be back later to finish it up.
+            // Return the message so that the caller can start sending out whatever we have received so far
             //
             break;
+        }
     }
 
-    return 0;
+    return (qd_message_t*) msg;
 }
 
 
@@ -1070,160 +1272,333 @@ static void send_handler(void *context, const unsigned char *start, int length)
 }
 
 
-// create a buffer chain holding the outgoing message annotations section
-static void compose_message_annotations(qd_message_pvt_t *msg, qd_buffer_list_t *out, bool strip_annotations)
+static void compose_message_annotations_v0(qd_message_pvt_t *msg, qd_buffer_list_t *out)
+{
+    if (msg->content->ma_count > 0) {
+        qd_composed_field_t *out_ma = qd_compose(QD_PERFORMATIVE_MESSAGE_ANNOTATIONS, 0);
+
+        qd_compose_start_map(out_ma);
+
+        // Bump the map size and count to reflect user's blob.
+        // Note that the blob is not inserted here. This code adjusts the
+        // size/count of the map that is under construction and the content
+        // is inserted by router-node
+        qd_compose_insert_opaque_elements(out_ma, msg->content->ma_count,
+                                          msg->content->field_user_annotations.length);
+        qd_compose_end_map(out_ma);
+        qd_compose_take_buffers(out_ma, out);
+
+        qd_compose_free(out_ma);
+    }
+}
+
+
+static void compose_message_annotations_v1(qd_message_pvt_t *msg, qd_buffer_list_t *out,
+                                           qd_buffer_list_t *out_trailer)
 {
     qd_composed_field_t *out_ma = qd_compose(QD_PERFORMATIVE_MESSAGE_ANNOTATIONS, 0);
 
     bool map_started = false;
 
-    //We will have to add the custom annotations
-    qd_parsed_field_t *in_ma = qd_parse_dup(msg->content->parsed_message_annotations);
-    if (in_ma) {
-        uint32_t count = qd_parse_sub_count(in_ma);
+    int field_count = 0;
+    qd_composed_field_t *field = qd_compose_subfield(0);
+    if (!field)
+        return;
 
-        for (uint32_t idx = 0; idx < count; idx++) {
-            qd_parsed_field_t *sub_key  = qd_parse_sub_key(in_ma, idx);
-            if (!sub_key)
-                continue;
+    // add dispatch router specific annotations if any are defined
+    if (!DEQ_IS_EMPTY(msg->ma_to_override) ||
+        !DEQ_IS_EMPTY(msg->ma_trace) ||
+        !DEQ_IS_EMPTY(msg->ma_ingress) ||
+        msg->ma_phase != 0) {
 
-            qd_iterator_t *iter = qd_parse_raw(sub_key);
-
-            if (!qd_iterator_prefix(iter, QD_MA_PREFIX)) {
-                if (!map_started) {
-                    qd_compose_start_map(out_ma);
-                    map_started = true;
-                }
-                qd_parsed_field_t *sub_value = qd_parse_sub_value(in_ma, idx);
-                qd_compose_insert_typed_iterator(out_ma, qd_parse_typed(sub_key));
-                qd_compose_insert_typed_iterator(out_ma, qd_parse_typed(sub_value));
-            }
+        if (!map_started) {
+            qd_compose_start_map(out_ma);
+            map_started = true;
         }
 
-        qd_parse_free(in_ma);
+        if (!DEQ_IS_EMPTY(msg->ma_to_override)) {
+            qd_compose_insert_symbol(field, QD_MA_TO);
+            qd_compose_insert_buffers(field, &msg->ma_to_override);
+            field_count++;
+        }
+
+        if (!DEQ_IS_EMPTY(msg->ma_trace)) {
+            qd_compose_insert_symbol(field, QD_MA_TRACE);
+            qd_compose_insert_buffers(field, &msg->ma_trace);
+            field_count++;
+        }
+
+        if (!DEQ_IS_EMPTY(msg->ma_ingress)) {
+            qd_compose_insert_symbol(field, QD_MA_INGRESS);
+            qd_compose_insert_buffers(field, &msg->ma_ingress);
+            field_count++;
+        }
+
+        if (msg->ma_phase != 0) {
+            qd_compose_insert_symbol(field, QD_MA_PHASE);
+            qd_compose_insert_int(field, msg->ma_phase);
+            field_count++;
+        }
+        // pad out to N fields
+        for  (; field_count < QD_MA_N_KEYS; field_count++) {
+            qd_compose_insert_symbol(field, QD_MA_PREFIX);
+            qd_compose_insert_string(field, "X");
+        }
     }
 
-    //Add the dispatch router specific annotations only if strip_annotations is false.
-    if (!strip_annotations) {
-        if (!DEQ_IS_EMPTY(msg->ma_to_override) ||
-            !DEQ_IS_EMPTY(msg->ma_trace) ||
-            !DEQ_IS_EMPTY(msg->ma_ingress) ||
-            msg->ma_phase != 0) {
-
-            if (!map_started) {
-                qd_compose_start_map(out_ma);
-                map_started = true;
-            }
-
-            if (!DEQ_IS_EMPTY(msg->ma_to_override)) {
-                qd_compose_insert_symbol(out_ma, QD_MA_TO);
-                qd_compose_insert_buffers(out_ma, &msg->ma_to_override);
-            }
-
-            if (!DEQ_IS_EMPTY(msg->ma_trace)) {
-                qd_compose_insert_symbol(out_ma, QD_MA_TRACE);
-                qd_compose_insert_buffers(out_ma, &msg->ma_trace);
-            }
-
-            if (!DEQ_IS_EMPTY(msg->ma_ingress)) {
-                qd_compose_insert_symbol(out_ma, QD_MA_INGRESS);
-                qd_compose_insert_buffers(out_ma, &msg->ma_ingress);
-            }
-
-            if (msg->ma_phase != 0) {
-                qd_compose_insert_symbol(out_ma, QD_MA_PHASE);
-                qd_compose_insert_int(out_ma, msg->ma_phase);
-            }
+    if (msg->content->ma_count > 0) {
+        // insert the incoming message user blob
+        if (!map_started) {
+            qd_compose_start_map(out_ma);
+            map_started = true;
         }
+
+        // Bump the map size and count to reflect user's blob.
+        // Note that the blob is not inserted here. This code adjusts the
+        // size/count of the map that is under construction and the content
+        // is inserted by router-node
+        qd_compose_insert_opaque_elements(out_ma, msg->content->ma_count,
+                                          msg->content->field_user_annotations.length);
+    }
+
+    if (field_count > 0) {
+        if (!map_started) {
+            qd_compose_start_map(out_ma);
+            map_started = true;
+        }
+        qd_compose_insert_opaque_elements(out_ma, field_count * 2,
+                                          qd_buffer_list_length(&field->buffers));
+
     }
 
     if (map_started) {
         qd_compose_end_map(out_ma);
         qd_compose_take_buffers(out_ma, out);
+        qd_compose_take_buffers(field, out_trailer);
     }
 
     qd_compose_free(out_ma);
+    qd_compose_free(field);
 }
+
+
+// create a buffer chain holding the outgoing message annotations section
+static void compose_message_annotations(qd_message_pvt_t *msg, qd_buffer_list_t *out,
+                                        qd_buffer_list_t *out_trailer,
+                                        bool strip_annotations)
+{
+    if (strip_annotations) {
+        compose_message_annotations_v0(msg, out);
+    } else {
+        compose_message_annotations_v1(msg, out, out_trailer);
+    }
+}
+
 
 void qd_message_send(qd_message_t *in_msg,
                      qd_link_t    *link,
-                     bool          strip_annotations)
+                     bool          strip_annotations,
+                     bool         *restart_rx,
+                     bool         *q3_stalled)
 {
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
     qd_message_content_t *content = msg->content;
-    qd_buffer_t          *buf     = DEQ_HEAD(content->buffers);
-    unsigned char        *cursor;
+    qd_buffer_t          *buf     = 0;
     pn_link_t            *pnl     = qd_link_pn(link);
 
-    qd_buffer_list_t new_ma;
-    DEQ_INIT(new_ma);
+    int                  fanout   = qd_message_fanout(in_msg);
+    *restart_rx                   = false;
+    *q3_stalled                   = false;
 
-    // Process  the message annotations if any
-    compose_message_annotations(msg, &new_ma, strip_annotations);
+    if (msg->sent_depth < QD_DEPTH_MESSAGE_ANNOTATIONS) {
 
-    //
-    // This is the case where the message annotations have been modified.
-    // The message send must be divided into sections:  The existing header;
-    // the new message annotations; the rest of the existing message.
-    // Note that the original message annotations that are still in the
-    // buffer chain must not be sent.
-    //
-    // Start by making sure that we've parsed the message sections through
-    // the message annotations
-    //
-    // ??? NO LONGER NECESSARY???
-    if (!qd_message_check(in_msg, QD_DEPTH_MESSAGE_ANNOTATIONS)) {
-        qd_log(log_source, QD_LOG_ERROR, "Cannot send: %s", qd_error_message);
-        return;
+        if (msg->content->aborted) {
+            // Message is aborted before any part of it has been sent.
+            // Declare the message to be sent,
+            msg->send_complete = true;
+            // the link has an outgoing deliver. abort it.
+            pn_delivery_abort(pn_link_current(pnl));
+            return;
+        }
+
+        qd_buffer_list_t new_ma;
+        qd_buffer_list_t new_ma_trailer;
+        DEQ_INIT(new_ma);
+        DEQ_INIT(new_ma_trailer);
+
+        // Process  the message annotations if any
+        compose_message_annotations(msg, &new_ma, &new_ma_trailer, strip_annotations);
+
+        //
+        // Start with the very first buffer;
+        //
+        buf = DEQ_HEAD(content->buffers);
+
+
+        //
+        // Send header if present
+        //
+        unsigned char *cursor = qd_buffer_base(buf);
+        int header_consume = content->section_message_header.length + content->section_message_header.hdr_length;
+        if (content->section_message_header.length > 0) {
+            buf    = content->section_message_header.buffer;
+            cursor = content->section_message_header.offset + qd_buffer_base(buf);
+            advance(&cursor, &buf, header_consume, send_handler, (void*) pnl);
+        }
+
+        //
+        // Send delivery annotation if present
+        //
+        int da_consume = content->section_delivery_annotation.length + content->section_delivery_annotation.hdr_length;
+        if (content->section_delivery_annotation.length > 0) {
+            buf    = content->section_delivery_annotation.buffer;
+            cursor = content->section_delivery_annotation.offset + qd_buffer_base(buf);
+            advance(&cursor, &buf, da_consume, send_handler, (void*) pnl);
+        }
+
+        //
+        // Send new message annotations map start if any
+        //
+        qd_buffer_t *da_buf = DEQ_HEAD(new_ma);
+        while (da_buf) {
+            char *to_send = (char*) qd_buffer_base(da_buf);
+            pn_link_send(pnl, to_send, qd_buffer_size(da_buf));
+            da_buf = DEQ_NEXT(da_buf);
+        }
+        qd_buffer_list_free_buffers(&new_ma);
+
+        //
+        // Annotations possibly include an opaque blob of user annotations
+        //
+        if (content->field_user_annotations.length > 0) {
+            qd_buffer_t *buf2      = content->field_user_annotations.buffer;
+            unsigned char *cursor2 = content->field_user_annotations.offset + qd_buffer_base(buf);
+            advance(&cursor2, &buf2,
+                    content->field_user_annotations.length,
+                    send_handler, (void*) pnl);
+        }
+
+        //
+        // Annotations may include the v1 new_ma_trailer
+        //
+        qd_buffer_t *ta_buf = DEQ_HEAD(new_ma_trailer);
+        while (ta_buf) {
+            char *to_send = (char*) qd_buffer_base(ta_buf);
+            pn_link_send(pnl, to_send, qd_buffer_size(ta_buf));
+            ta_buf = DEQ_NEXT(ta_buf);
+        }
+        qd_buffer_list_free_buffers(&new_ma_trailer);
+
+
+        //
+        // Skip over replaced message annotations
+        //
+        int ma_consume = content->section_message_annotation.hdr_length + content->section_message_annotation.length;
+        if (content->section_message_annotation.length > 0)
+            advance(&cursor, &buf, ma_consume, 0, 0);
+
+
+        msg->cursor.buffer = buf;
+
+        //
+        // If this message has no header and no delivery annotations and no message annotations, set the offset to 0.
+        //
+        if (header_consume == 0 && da_consume == 0 && ma_consume ==0)
+            msg->cursor.cursor = qd_buffer_base(buf);
+        else
+            msg->cursor.cursor = cursor;
+
+        msg->sent_depth = QD_DEPTH_MESSAGE_ANNOTATIONS;
+
     }
 
-    //
-    // Send header if present
-    //
-    cursor = qd_buffer_base(buf);
-    if (content->section_message_header.length > 0) {
-        buf    = content->section_message_header.buffer;
-        cursor = content->section_message_header.offset + qd_buffer_base(buf);
-        advance(&cursor, &buf,
-                content->section_message_header.length + content->section_message_header.hdr_length,
-                send_handler, (void*) pnl);
+    buf = msg->cursor.buffer;
+    assert (buf);
+
+    pn_session_t     *pns  = pn_link_session(pnl);
+
+    while (buf && pn_session_outgoing_bytes(pns) <= QD_QLIMIT_Q3_UPPER) {
+        if (msg->content->aborted) {
+            if (pn_link_current(pnl)) {
+                msg->send_complete = true;
+                pn_delivery_abort(pn_link_current(pnl));
+            }
+            break;
+        }
+
+        size_t buf_size = qd_buffer_size(buf);
+
+        // This will send the remaining data in the buffer if any.
+        int num_bytes_to_send = buf_size - (msg->cursor.cursor - qd_buffer_base(buf));
+        if (num_bytes_to_send > 0) {
+            // We are deliberately avoiding the return value of pn_link_send because we can't do anything nice with it.
+            (void) pn_link_send(pnl, (const char*)msg->cursor.cursor, num_bytes_to_send);
+        }
+
+        // If the entire message has already been received,  taking out this lock is not that expensive
+        // because there is no contention for this lock.
+        LOCK(msg->content->lock);
+
+        qd_buffer_t *next_buf = DEQ_NEXT(buf);
+        if (next_buf) {
+            // There is a next buffer, the previous buffer has been fully sent by now.
+            qd_buffer_add_fanout(buf);
+            if (fanout == qd_buffer_fanout(buf)) {
+                qd_buffer_t *local_buf = DEQ_HEAD(content->buffers);
+                while (local_buf && local_buf != next_buf) {
+                    DEQ_REMOVE_HEAD(content->buffers);
+                    qd_buffer_free(local_buf);
+                    local_buf = DEQ_HEAD(content->buffers);
+
+                    // by freeing a buffer there now may be room to restart a
+                    // stalled message receiver
+                    if (msg->content->q2_input_holdoff) {
+                        if (qd_message_Q2_holdoff_should_unblock((qd_message_t *)msg)) {
+                            // wake up receive side
+                            // Note: clearing holdoff here is easy compared to
+                            // clearing it in the deferred callback. Tracing
+                            // shows that rx_handler may run and subsequently
+                            // set input holdoff before the deferred handler
+                            // runs.
+                            msg->content->q2_input_holdoff = false;
+                            *restart_rx = true;
+                        }
+                    }
+                }
+            }
+            msg->cursor.buffer = next_buf;
+            msg->cursor.cursor = qd_buffer_base(next_buf);
+        }
+        else {
+            if (qd_message_receive_complete(in_msg)) {
+                //
+                // There is no next_buf and there is no more of the message coming, this means
+                // that we have completely sent out the message.
+                //
+                msg->send_complete = true;
+                msg->cursor.buffer = 0;
+                msg->cursor.cursor = 0;
+
+                if (msg->content->aborted) {
+                    pn_delivery_abort(pn_link_current(pnl));
+                }
+            }
+            else {
+                //
+                // There is more of the message to come, update your cursor pointers
+                // you will come back into this function to deliver more as bytes arrive
+                //
+                msg->cursor.buffer = buf;
+                msg->cursor.cursor = qd_buffer_at(buf, buf_size);
+            }
+        }
+
+        UNLOCK(msg->content->lock);
+
+        buf = next_buf;
     }
 
-    //
-    // Send new message annotations
-    //
-    qd_buffer_t *da_buf = DEQ_HEAD(new_ma);
-    while (da_buf) {
-        char *to_send = (char*) qd_buffer_base(da_buf);
-        pn_link_send(pnl, to_send, qd_buffer_size(da_buf));
-        da_buf = DEQ_NEXT(da_buf);
-    }
-    qd_buffer_list_free_buffers(&new_ma);
-
-    //
-    // Skip over replaced message annotations
-    //
-    if (content->section_message_annotation.length > 0)
-        advance(&cursor, &buf,
-                content->section_message_annotation.hdr_length + content->section_message_annotation.length,
-                0, 0);
-
-    //
-    // Send remaining partial buffer
-    //
-    if (buf) {
-        size_t len = qd_buffer_size(buf) - (cursor - qd_buffer_base(buf));
-        advance(&cursor, &buf, len, send_handler, (void*) pnl);
-    }
-
-    // Fall through to process the remaining buffers normally
-    // Note that 'advance' will have moved us to the next buffer in the chain.
-
-
-    while (buf) {
-        pn_link_send(pnl, (char*) qd_buffer_base(buf), qd_buffer_size(buf));
-        buf = DEQ_NEXT(buf);
-    }
+    *q3_stalled = (pn_session_outgoing_bytes(pns) > QD_QLIMIT_Q3_UPPER);
 }
 
 
@@ -1369,9 +1744,9 @@ int qd_message_check(qd_message_t *in_msg, qd_message_depth_t depth)
     qd_message_content_t *content = msg->content;
     int                   result;
 
-    sys_mutex_lock(content->lock);
+    LOCK(content->lock);
     result = qd_message_check_LH(content, depth);
-    sys_mutex_unlock(content->lock);
+    UNLOCK(content->lock);
     return result;
 }
 
@@ -1451,6 +1826,7 @@ void qd_message_compose_1(qd_message_t *msg, const char *to, qd_buffer_list_t *b
 {
     qd_composed_field_t  *field   = qd_compose(QD_PERFORMATIVE_HEADER, 0);
     qd_message_content_t *content = MSG_CONTENT(msg);
+    content->receive_complete     = true;
 
     qd_compose_start_list(field);
     qd_compose_insert_bool(field, 0);     // durable
@@ -1461,9 +1837,13 @@ void qd_message_compose_1(qd_message_t *msg, const char *to, qd_buffer_list_t *b
     qd_compose_end_list(field);
 
     qd_buffer_list_t out_ma;
+    qd_buffer_list_t out_ma_trailer;
     DEQ_INIT(out_ma);
-    compose_message_annotations((qd_message_pvt_t*)msg, &out_ma, false);
+    DEQ_INIT(out_ma_trailer);
+    compose_message_annotations((qd_message_pvt_t*)msg, &out_ma, &out_ma_trailer, false);
     qd_compose_insert_buffers(field, &out_ma);
+    // TODO: user annotation blob goes here
+    qd_compose_insert_buffers(field, &out_ma_trailer);
 
     field = qd_compose(QD_PERFORMATIVE_PROPERTIES, field);
     qd_compose_start_list(field);
@@ -1495,6 +1875,8 @@ void qd_message_compose_1(qd_message_t *msg, const char *to, qd_buffer_list_t *b
 void qd_message_compose_2(qd_message_t *msg, qd_composed_field_t *field)
 {
     qd_message_content_t *content       = MSG_CONTENT(msg);
+    content->receive_complete     = true;
+
     qd_buffer_list_t     *field_buffers = qd_compose_buffers(field);
 
     content->buffers = *field_buffers;
@@ -1505,6 +1887,7 @@ void qd_message_compose_2(qd_message_t *msg, qd_composed_field_t *field)
 void qd_message_compose_3(qd_message_t *msg, qd_composed_field_t *field1, qd_composed_field_t *field2)
 {
     qd_message_content_t *content        = MSG_CONTENT(msg);
+    content->receive_complete     = true;
     qd_buffer_list_t     *field1_buffers = qd_compose_buffers(field1);
     qd_buffer_list_t     *field2_buffers = qd_compose_buffers(field2);
 
@@ -1519,3 +1902,76 @@ void qd_message_compose_3(qd_message_t *msg, qd_composed_field_t *field1, qd_com
     }
 }
 
+
+qd_parsed_field_t *qd_message_get_ingress    (qd_message_t *msg)
+{
+    return ((qd_message_pvt_t*)msg)->content->ma_pf_ingress;
+}
+
+
+qd_parsed_field_t *qd_message_get_phase      (qd_message_t *msg)
+{
+    return ((qd_message_pvt_t*)msg)->content->ma_pf_phase;
+}
+
+
+qd_parsed_field_t *qd_message_get_to_override(qd_message_t *msg)
+{
+    return ((qd_message_pvt_t*)msg)->content->ma_pf_to_override;
+}
+
+
+qd_parsed_field_t *qd_message_get_trace      (qd_message_t *msg)
+{
+    return ((qd_message_pvt_t*)msg)->content->ma_pf_trace;
+}
+
+
+int qd_message_get_phase_val(qd_message_t *msg)
+{
+    return ((qd_message_pvt_t*)msg)->content->ma_int_phase;
+}
+
+
+void qd_message_set_Q2_input_holdoff(qd_message_t *msg, bool holdoff)
+{
+    ((qd_message_pvt_t*)msg)->content->q2_input_holdoff = holdoff;
+}
+
+
+bool qd_message_get_Q2_input_holdoff(qd_message_t *msg)
+{
+    return ((qd_message_pvt_t*)msg)->content->q2_input_holdoff;
+}
+
+
+bool qd_message_Q2_holdoff_should_block(qd_message_t *msg)
+{
+    return DEQ_SIZE(((qd_message_pvt_t*)msg)->content->buffers) >= QD_QLIMIT_Q2_UPPER;
+}
+
+
+bool qd_message_Q2_holdoff_should_unblock(qd_message_t *msg)
+{
+    return DEQ_SIZE(((qd_message_pvt_t*)msg)->content->buffers) < QD_QLIMIT_Q2_LOWER;
+}
+
+
+qd_link_t * qd_message_get_receiving_link(const qd_message_t *msg)
+{
+    return ((qd_message_pvt_t *)msg)->content->input_link;
+}
+
+
+bool qd_message_aborted(const qd_message_t *msg)
+{
+    return ((qd_message_pvt_t *)msg)->content->aborted;
+}
+
+void qd_message_set_aborted(const qd_message_t *msg, bool aborted)
+{
+    if (!msg)
+        return;
+    qd_message_pvt_t * msg_pvt = (qd_message_pvt_t *)msg;
+    msg_pvt->content->aborted = aborted;
+}

@@ -18,6 +18,7 @@
  */
 
 #include "router_core_private.h"
+#include "route_control.h"
 #include <stdio.h>
 #include <strings.h>
 
@@ -51,6 +52,11 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     //
     core->log       = qd_log_source("ROUTER_CORE");
     core->agent_log = qd_log_source("AGENT");
+
+    //
+    // Report on the configuration for unsettled multicasts
+    //
+    qd_log(core->log, QD_LOG_INFO, "Allow Unsettled Multicast: %s", qd->allow_unsettled_multicast ? "yes" : "no");
 
     //
     // Set up the threading support
@@ -98,6 +104,9 @@ void qdr_core_free(qdr_core_t *core)
     sys_cond_signal(core->action_cond);
     sys_thread_join(core->thread);
 
+    // Drain the general work lists
+    qdr_general_handler(core);
+
     //
     // Free the core resources
     //
@@ -107,6 +116,8 @@ void qdr_core_free(qdr_core_t *core)
     sys_mutex_free(core->work_lock);
     sys_mutex_free(core->id_lock);
     qd_timer_free(core->work_timer);
+
+
     //we can't call qdr_core_unsubscribe on the subscriptions because the action processing thread has
     //already been shut down. But, all the action would have done at this point is free the subscriptions
     //so we just do that directly.
@@ -119,6 +130,11 @@ void qdr_core_free(qdr_core_t *core)
         }
     }
 
+    qdr_link_route_t *link_route = 0;
+    while ( (link_route = DEQ_HEAD(core->link_routes))) {
+        qdr_core_delete_link_route(core, link_route);
+    }
+
     qdr_address_t *addr = 0;
     while ( (addr = DEQ_HEAD(core->addrs)) ) {
         qdr_core_remove_address(core, addr);
@@ -128,13 +144,22 @@ void qdr_core_free(qdr_core_t *core)
         qdr_core_remove_address_config(core, addr_config);
     }
     qd_hash_free(core->addr_hash);
-
+    qd_parse_tree_free(core->addr_parse_tree);
+    qd_parse_tree_free(core->link_route_tree[QD_INCOMING]);
+    qd_parse_tree_free(core->link_route_tree[QD_OUTGOING]);
     qd_hash_free(core->conn_id_hash);
     //TODO what about the actual connection identifier objects?
 
     qdr_node_t *rnode = 0;
     while ( (rnode = DEQ_HEAD(core->routers)) ) {
         qdr_router_node_free(core, rnode);
+    }
+
+    qdr_connection_t *conn = DEQ_HEAD(core->open_connections);
+    while (conn) {
+        DEQ_REMOVE_HEAD(core->open_connections);
+        qdr_connection_free(conn);
+        conn = DEQ_HEAD(core->open_connections);
     }
 
     if (core->query_lock)                sys_mutex_free(core->query_lock);
@@ -264,6 +289,8 @@ void qdr_action_enqueue(qdr_core_t *core, qdr_action_t *action)
 
 qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment)
 {
+    if (treatment == QD_TREATMENT_UNAVAILABLE)
+        return 0;
     qdr_address_t *addr = new_qdr_address_t();
     ZERO(addr);
     addr->treatment = treatment;
@@ -285,23 +312,50 @@ qdr_address_t *qdr_add_local_address_CT(qdr_core_t *core, char aclass, const cha
     qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
     if (!addr) {
         addr = qdr_address_CT(core, treatment);
-        qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
-        DEQ_INSERT_TAIL(core->addrs, addr);
-        addr->block_deletion = true;
-        addr->local = (aclass == 'L');
+        if (addr) {
+            qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
+            DEQ_INSERT_TAIL(core->addrs, addr);
+            addr->block_deletion = true;
+            addr->local = (aclass == 'L');
+        }
     }
     qd_iterator_free(iter);
     return addr;
 }
 
+bool qdr_is_addr_treatment_multicast(qdr_address_t *addr)
+{
+    if (addr) {
+        if (addr->treatment == QD_TREATMENT_MULTICAST_FLOOD || addr->treatment == QD_TREATMENT_MULTICAST_ONCE)
+            return true;
+    }
+    return false;
+}
+
+void qdr_core_delete_link_route(qdr_core_t *core, qdr_link_route_t *lr)
+{
+    DEQ_REMOVE(core->link_routes, lr);
+    free(lr->name);
+    free(lr->pattern);
+    free_qdr_link_route_t(lr);
+}
+
 void qdr_core_remove_address(qdr_core_t *core, qdr_address_t *addr)
 {
-    // Remove the address from the list and hash index
-    qd_hash_remove_by_handle(core->addr_hash, addr->hash_handle);
+    // Remove the address from the list, hash index, and parse tree
     DEQ_REMOVE(core->addrs, addr);
+    if (addr->hash_handle) {
+        const char *a_str = (const char *)qd_hash_key_by_handle(addr->hash_handle);
+        if (QDR_IS_LINK_ROUTE(a_str[0])) {
+            qd_iterator_t *iter = qd_iterator_string(a_str, ITER_VIEW_ALL);
+            qdr_link_route_unmap_pattern_CT(core, iter);
+            qd_iterator_free(iter);
+        }
+        qd_hash_remove_by_handle(core->addr_hash, addr->hash_handle);
+        qd_hash_handle_free(addr->hash_handle);
+    }
 
     // Free resources associated with this address
-    qd_hash_handle_free(addr->hash_handle);
     qd_bitmask_free(addr->rnodes);
     if (addr->treatment == QD_TREATMENT_ANYCAST_CLOSEST) {
         qd_bitmask_free(addr->closest_remotes);
@@ -314,15 +368,18 @@ void qdr_core_remove_address(qdr_core_t *core, qdr_address_t *addr)
 
 void qdr_core_remove_address_config(qdr_core_t *core, qdr_address_config_t *addr)
 {
-    // Remove the address from the list and the hash index.
-    qd_hash_remove_by_handle(core->addr_hash, addr->hash_handle);
+    qd_iterator_t *pattern = qd_iterator_string(addr->pattern, ITER_VIEW_ALL);
+
+    // Remove the address from the list and the parse tree
     DEQ_REMOVE(core->addr_config, addr);
+    qd_parse_tree_remove_pattern(core->addr_parse_tree, pattern);
 
     // Free resources associated with this address.
     if (addr->name) {
         free(addr->name);
     }
-    qd_hash_handle_free(addr->hash_handle);
+    qd_iterator_free(pattern);
+    free(addr->pattern);
     free_qdr_address_config_t(addr);
 }
 
@@ -372,7 +429,7 @@ void qdr_del_connection_ref(qdr_connection_ref_list_t *ref_list, qdr_connection_
 }
 
 
-void qdr_add_delivery_ref(qdr_delivery_ref_list_t *list, qdr_delivery_t *dlv)
+void qdr_add_delivery_ref_CT(qdr_delivery_ref_list_t *list, qdr_delivery_t *dlv)
 {
     qdr_delivery_ref_t *ref = new_qdr_delivery_ref_t();
     DEQ_ITEM_INIT(ref);

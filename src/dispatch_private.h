@@ -25,14 +25,10 @@
 //
 typedef struct qd_server_t           qd_server_t;
 typedef struct qd_container_t        qd_container_t;
-typedef struct qd_waypoint_t         qd_waypoint_t;
-typedef struct qd_lrp_container_t    qd_lrp_container_t;
-typedef struct qd_lrp_t              qd_lrp_t;
 typedef struct qd_router_link_t      qd_router_link_t;
 typedef struct qd_router_node_t      qd_router_node_t;
 typedef struct qd_router_ref_t       qd_router_ref_t;
 typedef struct qd_router_link_ref_t  qd_router_link_ref_t;
-typedef struct qd_router_lrp_ref_t   qd_router_lrp_ref_t;
 typedef struct qd_router_conn_t      qd_router_conn_t;
 typedef struct qd_config_phase_t     qd_config_phase_t;
 typedef struct qd_config_address_t   qd_config_address_t;
@@ -52,22 +48,17 @@ struct qd_dispatch_t {
     qd_connection_manager_t *connection_manager;
     qd_policy_t             *policy;
     void                    *dl_handle;
+    qd_address_treatment_t   default_treatment;
 
     int    thread_count;
     char  *sasl_config_path;
     char  *sasl_config_name;
+    char  *auth_service;
     char  *router_area;
     char  *router_id;
     qd_router_mode_t  router_mode;
+    bool   allow_unsettled_multicast;
 };
-
-/**
- * Configure the AMQP container from a configuration entity.
- *
- * @param qd The dispatch handle returned by qd_dispatch
- * @param entity The configuration entity.
- */
-qd_error_t qd_dispatch_configure_container(qd_dispatch_t *qd, qd_entity_t *entity);
 
 /**
  * Configure the router node from a configuration entity.
@@ -90,16 +81,6 @@ qd_error_t qd_dispatch_prepare(qd_dispatch_t *qd);
  * Configure an address, must be called after qd_dispatch_prepare
  */
 qd_error_t qd_dispatch_configure_address(qd_dispatch_t *qd, qd_entity_t *entity);
-
-/**
- * Configure a waypoint, must be called after qd_dispatch_prepare
- */
-qd_error_t qd_dispatch_configure_waypoint(qd_dispatch_t *qd, qd_entity_t *entity);
-
-/**
- * Configure a link-route-pattern, must be called after qd_dispatch_prepare
- */
-qd_error_t qd_dispatch_configure_lrp(qd_dispatch_t *qd, qd_entity_t *entity);
 
 /**
  * Configure a route, must be called after qd_dispatch_prepare
@@ -140,17 +121,5 @@ void qd_dispatch_unregister_entity(qd_dispatch_t *qd, void *impl);
 
 /** Set the agent */
 void qd_dispatch_set_agent(qd_dispatch_t *qd, void *agent);
-
-/**
- * Set a new router id, freeing the prior id string
- * TAKES OWNERSHIP OF THE POINTER PASSED TO IT
- */
-void qd_dispatch_set_router_id(qd_dispatch_t *qd, char *_id);
-
-/**
- * Set a new router area, freeing the prior area string
- * TAKES OWNERSHIP OF THE POINTER PASSED TO IT
- */
-void qd_dispatch_set_router_area(qd_dispatch_t *qd, char *_area);
 
 #endif

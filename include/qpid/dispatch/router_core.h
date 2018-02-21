@@ -140,6 +140,8 @@ typedef enum {
     QDR_ROLE_ON_DEMAND
 } qdr_connection_role_t;
 
+typedef void (*qdr_connection_bind_context_t) (qdr_connection_t *context, void* token);
+
 /**
  * qdr_connection_opened
  *
@@ -170,7 +172,9 @@ qdr_connection_t *qdr_connection_opened(qdr_core_t            *core,
                                         bool                   strip_annotations_out,
                                         int                    link_capacity,
                                         const char            *vhost,
-                                        qdr_connection_info_t *connection_info);
+                                        qdr_connection_info_t *connection_info,
+                                        qdr_connection_bind_context_t context_binder,
+                                        void* bind_token);
 
 /**
  * qdr_connection_closed
@@ -220,18 +224,17 @@ int qdr_connection_process(qdr_connection_t *conn);
 /**
  * qdr_connection_activate_t callback
  *
- * Activate a connection for transmission (socket write).  This is called whenever
- * the core has deliveries on links, disposition updates on deliveries, or flow updates
- * to be sent across the connection.
+ * Activate a connection with pending work from the core to ensure it will be processed by
+ * the proactor: the core has deliveries on links, disposition updates on deliveries, or
+ * flow updates to be sent across the connection.
  *
  * IMPORTANT: This function will be invoked on the core thread.  It must never block,
  * delay, or do any lenghty computation.
  *
  * @param context The context supplied when the callback was registered
  * @param conn The connection object to be activated
- * @param awaken Iff true, awaken the driver poll loop after the activation
  */
-typedef void (*qdr_connection_activate_t) (void *context, qdr_connection_t *conn, bool awaken);
+typedef void (*qdr_connection_activate_t) (void *context, qdr_connection_t *conn);
 
 /**
  ******************************************************************************
@@ -303,6 +306,15 @@ bool qdr_terminus_has_capability(qdr_terminus_t *term, const char *capability);
  * @return true iff the terminus is anonymous
  */
 bool qdr_terminus_is_anonymous(qdr_terminus_t *term);
+
+/**
+ * qdr_terminus_is_coordinator
+ *
+ * Indicates if the terminus is a coordinator.
+ * @param term A qdr_terminus pointer returned by qdr_terminus()
+ * @return true iff the terminus is a coordinator
+ */
+bool qdr_terminus_is_coordinator(qdr_terminus_t *term);
 
 /**
  * qdr_terminus_is_dynamic
@@ -462,6 +474,14 @@ bool qdr_link_strip_annotations_in(const qdr_link_t *link);
 bool qdr_link_strip_annotations_out(const qdr_link_t *link);
 
 /**
+ * qdr_link_stalled_outbound
+ *
+ * Tell the link that it has been stalled outbound due to back-pressure from the
+ * transport buffers.  Stalling is undone during link-flow processing.
+ */
+void qdr_link_stalled_outbound(qdr_link_t *link);
+
+/**
  * qdr_link_name
  *
  * Retrieve the name of the link.
@@ -516,6 +536,15 @@ void qdr_link_second_attach(qdr_link_t *link, qdr_terminus_t *source, qdr_termin
 void qdr_link_detach(qdr_link_t *link, qd_detach_type_t dt, qdr_error_t *error);
 
 /**
+ * qdr_link_delete
+ *
+ * Request that the router-core delete this link and free all its associated resources.
+ *
+ * @param link The link pointer returned by qdr_link_first_attach or in a FIRST_ATTACH event.
+ */
+void qdr_link_delete(qdr_link_t *link);
+
+/**
  * qdr_link_deliver
  *
  * Deliver a message to the router core for forwarding.  This function is used in cases where
@@ -542,8 +571,9 @@ qdr_delivery_t *qdr_link_deliver_to(qdr_link_t *link, qd_message_t *msg,
 qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *msg, bool settled,
                                                 const uint8_t *tag, int tag_length,
                                                 uint64_t disposition, pn_data_t* disposition_state);
+qdr_delivery_t *qdr_deliver_continue(qdr_delivery_t *delivery);
 
-void qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit);
+int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit);
 
 void qdr_link_flow(qdr_core_t *core, qdr_link_t *link, int credit, bool drain_mode);
 
@@ -560,7 +590,7 @@ typedef int  (*qdr_link_push_t)          (void *context, qdr_link_t *link, int l
 typedef void (*qdr_link_deliver_t)       (void *context, qdr_link_t *link, qdr_delivery_t *delivery, bool settled);
 typedef void (*qdr_delivery_update_t)    (void *context, qdr_delivery_t *dlv, uint64_t disp, bool settled);
 
-void qdr_connection_handlers(qdr_core_t                *core,
+void qdr_connection_handlers(qdr_core_t             *core,
                              void                      *context,
                              qdr_connection_activate_t  activate,
                              qdr_link_first_attach_t    first_attach,
@@ -584,12 +614,19 @@ void qdr_delivery_update_disposition(qdr_core_t *core, qdr_delivery_t *delivery,
 
 void qdr_delivery_set_context(qdr_delivery_t *delivery, void *context);
 void *qdr_delivery_get_context(qdr_delivery_t *delivery);
-void qdr_delivery_incref(qdr_delivery_t *delivery);
-void qdr_delivery_decref(qdr_core_t *core, qdr_delivery_t *delivery);
+qdr_link_t *qdr_delivery_link(const qdr_delivery_t *delivery);
+void qdr_delivery_incref(qdr_delivery_t *delivery, const char *label);
+void qdr_delivery_decref(qdr_core_t *core, qdr_delivery_t *delivery, const char *label);
 void qdr_delivery_tag(const qdr_delivery_t *delivery, const char **tag, int *length);
 qd_message_t *qdr_delivery_message(const qdr_delivery_t *delivery);
 qdr_error_t *qdr_delivery_error(const qdr_delivery_t *delivery);
 void qdr_delivery_write_extension_state(qdr_delivery_t *dlv, pn_delivery_t* pdlv, bool update_disposition);
+bool qdr_delivery_send_complete(const qdr_delivery_t *delivery);
+bool qdr_delivery_tag_sent(const qdr_delivery_t *delivery);
+void qdr_delivery_set_tag_sent(const qdr_delivery_t *delivery, bool tag_sent);
+bool qdr_delivery_receive_complete(const qdr_delivery_t *delivery);
+void qdr_delivery_set_aborted(const qdr_delivery_t *delivery, bool aborted);
+bool qdr_delivery_is_aborted(const qdr_delivery_t *delivery);
 
 /**
  ******************************************************************************

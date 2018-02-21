@@ -22,6 +22,7 @@
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/atomic.h>
 #include <qpid/dispatch/failoverlist.h>
+#include <proton/listener.h>
 #include "dispatch_private.h"
 #include "connection_manager_private.h"
 #include "server_private.h"
@@ -31,8 +32,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
-
-static char* HOST_ADDR_DEFAULT = "127.0.0.1";
 
 struct qd_config_ssl_profile_t {
     DEQ_LINKS(qd_config_ssl_profile_t);
@@ -45,39 +44,29 @@ struct qd_config_ssl_profile_t {
     char        *ssl_display_name_file;
     char        *ssl_certificate_file;
     char        *ssl_private_key_file;
-    sys_atomic_t ref_count;
+    char        *ciphers;
 };
 
-struct qd_config_listener_t {
-    bool                     is_connector;
-    qd_bind_state_t          state;
-    qd_listener_t           *listener;
-    qd_config_ssl_profile_t *ssl_profile;
-    qd_server_config_t       configuration;
-    DEQ_LINKS(qd_config_listener_t);
-};
-
-DEQ_DECLARE(qd_config_listener_t, qd_config_listener_list_t);
 DEQ_DECLARE(qd_config_ssl_profile_t, qd_config_ssl_profile_list_t);
 
-
-struct qd_config_connector_t {
-    bool is_connector;
-    DEQ_LINKS(qd_config_connector_t);
-    qd_connector_t          *connector;
-    qd_server_config_t       configuration;
-    qd_config_ssl_profile_t *ssl_profile;
+struct qd_config_sasl_plugin_t {
+    DEQ_LINKS(qd_config_sasl_plugin_t);
+    uint64_t     identity;
+    char        *name;
+    char        *auth_service;
+    char        *sasl_init_hostname;
+    char        *auth_ssl_profile;
 };
 
-DEQ_DECLARE(qd_config_connector_t, qd_config_connector_list_t);
+DEQ_DECLARE(qd_config_sasl_plugin_t, qd_config_sasl_plugin_list_t);
 
 struct qd_connection_manager_t {
     qd_log_source_t              *log_source;
     qd_server_t                  *server;
-    qd_config_listener_list_t     config_listeners;
-    qd_config_connector_list_t    config_connectors;
+    qd_listener_list_t            listeners;
+    qd_connector_list_t           connectors;
     qd_config_ssl_profile_list_t  config_ssl_profiles;
-    sys_mutex_t                  *ssl_profile_lock;
+    qd_config_sasl_plugin_list_t  config_sasl_plugins;
 };
 
 const char *qd_log_message_components[] =
@@ -115,11 +104,27 @@ static qd_config_ssl_profile_t *qd_find_ssl_profile(qd_connection_manager_t *cm,
     return 0;
 }
 
-static void qd_server_config_free(qd_server_config_t *cf)
+/**
+ * Search the list of config_sasl_plugins for an sasl-profile that matches the passed in name
+ */
+static qd_config_sasl_plugin_t *qd_find_sasl_plugin(qd_connection_manager_t *cm, char *name)
+{
+    qd_config_sasl_plugin_t *sasl_plugin = DEQ_HEAD(cm->config_sasl_plugins);
+    while (sasl_plugin) {
+        if (strcmp(sasl_plugin->name, name) == 0)
+            return sasl_plugin;
+        sasl_plugin = DEQ_NEXT(sasl_plugin);
+    }
+
+    return 0;
+}
+
+void qd_server_config_free(qd_server_config_t *cf)
 {
     if (!cf) return;
     free(cf->host);
     free(cf->port);
+    free(cf->host_port);
     free(cf->role);
     if (cf->http_root)       free(cf->http_root);
     if (cf->name)            free(cf->name);
@@ -127,14 +132,26 @@ static void qd_server_config_free(qd_server_config_t *cf)
     if (cf->sasl_username)   free(cf->sasl_username);
     if (cf->sasl_password)   free(cf->sasl_password);
     if (cf->sasl_mechanisms) free(cf->sasl_mechanisms);
+    if (cf->auth_service)    free(cf->auth_service);
+    if (cf->sasl_init_hostname)    free(cf->sasl_init_hostname);
+    if (cf->auth_ssl_conf)   pn_ssl_domain_free(cf->auth_ssl_conf);
     if (cf->ssl_profile)     free(cf->ssl_profile);
     if (cf->failover_list)   qd_failover_list_free(cf->failover_list);
     if (cf->log_message)     free(cf->log_message);
 
+    if (cf->ssl_certificate_file)       free(cf->ssl_certificate_file);
+    if (cf->ssl_private_key_file)       free(cf->ssl_private_key_file);
+    if (cf->ciphers)                    free(cf->ciphers);
+    if (cf->ssl_password)               free(cf->ssl_password);
+    if (cf->ssl_trusted_certificate_db) free(cf->ssl_trusted_certificate_db);
+    if (cf->ssl_trusted_certificates)   free(cf->ssl_trusted_certificates);
+    if (cf->ssl_uid_format)             free(cf->ssl_uid_format);
+    if (cf->ssl_display_name_file)      free(cf->ssl_display_name_file);
     memset(cf, 0, sizeof(*cf));
 }
 
 #define CHECK() if (qd_error_code()) goto error
+#define SSTRDUP(S) ((S) ? strdup(S) : NULL)
 
 /**
  * Private function to set the values of booleans strip_inbound_annotations and strip_outbound_annotations
@@ -174,33 +191,14 @@ static void load_strip_annotations(qd_server_config_t *config, const char* strip
  */
 static void set_config_host(qd_server_config_t *config, qd_entity_t* entity)
 {
-    char *host = qd_entity_opt_string(entity, "host", 0);
-    char *addr = qd_entity_opt_string(entity, "addr", 0);
-
-    if (strcmp(host, HOST_ADDR_DEFAULT) == 0 && strcmp(addr, HOST_ADDR_DEFAULT) == 0) {
-        config->host = host;
-        free(addr);
-    }
-    else if (strcmp(host, addr) == 0) {
-        config->host = host;
-        free(addr);
-    }
-    else if (strcmp(host, HOST_ADDR_DEFAULT) == 0 && strcmp(addr, HOST_ADDR_DEFAULT) != 0) {
-         config->host = addr;
-         free(host);
-    }
-    else if (strcmp(host, HOST_ADDR_DEFAULT) != 0 && strcmp(addr, HOST_ADDR_DEFAULT) == 0) {
-         config->host = host;
-         free(addr);
-    }
-    else {
-        free(host);
-        free(addr);
-    }
+    config->host = qd_entity_opt_string(entity, "host", 0);
 
     assert(config->host);
-}
 
+    int hplen = strlen(config->host) + strlen(config->port) + 2;
+    config->host_port = malloc(hplen);
+    snprintf(config->host_port, hplen, "%s:%s", config->host, config->port);
+}
 
 static void qd_config_ssl_profile_process_password(qd_config_ssl_profile_t* ssl_profile)
 {
@@ -287,7 +285,7 @@ static qd_log_bits populate_log_message(const qd_server_config_t *config)
 }
 
 
-static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *config, qd_entity_t* entity, qd_config_ssl_profile_t **ssl_profile)
+static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *config, qd_entity_t* entity, bool is_listener)
 {
     qd_error_clear();
 
@@ -295,8 +293,6 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
     bool verifyHostName     = qd_entity_opt_bool(entity, "verifyHostName",    true);     CHECK();
     bool requireEncryption  = qd_entity_opt_bool(entity, "requireEncryption", false);    CHECK();
     bool requireSsl         = qd_entity_opt_bool(entity, "requireSsl",        false);    CHECK();
-    bool depRequirePeerAuth = qd_entity_opt_bool(entity, "requirePeerAuth",   false);    CHECK();
-    bool depAllowUnsecured  = qd_entity_opt_bool(entity, "allowUnsecured", !requireSsl); CHECK();
 
     memset(config, 0, sizeof(*config));
     config->log_message          = qd_entity_opt_string(entity, "logMessage", 0);     CHECK();
@@ -313,10 +309,14 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
     config->max_sessions         = qd_entity_get_long(entity, "maxSessions");         CHECK();
     uint64_t ssn_frames          = qd_entity_opt_long(entity, "maxSessionFrames", 0); CHECK();
     config->idle_timeout_seconds = qd_entity_get_long(entity, "idleTimeoutSeconds");  CHECK();
+    if (is_listener) {
+        config->initial_handshake_timeout_seconds = qd_entity_get_long(entity, "initialHandshakeTimeoutSeconds");  CHECK();
+    }
     config->sasl_username        = qd_entity_opt_string(entity, "saslUsername", 0);   CHECK();
     config->sasl_password        = qd_entity_opt_string(entity, "saslPassword", 0);   CHECK();
     config->sasl_mechanisms      = qd_entity_opt_string(entity, "saslMechanisms", 0); CHECK();
     config->ssl_profile          = qd_entity_opt_string(entity, "sslProfile", 0);     CHECK();
+    config->sasl_plugin          = qd_entity_opt_string(entity, "saslPlugin", 0);   CHECK();
     config->link_capacity        = qd_entity_opt_long(entity, "linkCapacity", 0);     CHECK();
     config->multi_tenant         = qd_entity_opt_bool(entity, "multiTenant", false);  CHECK();
     set_config_host(config, entity);
@@ -373,25 +373,68 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
     stripAnnotations = 0;
     CHECK();
 
-    config->requireAuthentication = authenticatePeer || depRequirePeerAuth;
-    config->requireEncryption     = requireEncryption || !depAllowUnsecured;
+    config->requireAuthentication = authenticatePeer;
+    config->requireEncryption     = requireEncryption || requireSsl;
 
     if (config->ssl_profile) {
-        config->ssl_required = requireSsl || !depAllowUnsecured;
+        config->ssl_required = requireSsl;
         config->ssl_require_peer_authentication = config->sasl_mechanisms &&
             strstr(config->sasl_mechanisms, "EXTERNAL") != 0;
 
-        *ssl_profile = qd_find_ssl_profile(qd->connection_manager, config->ssl_profile);
-        if (*ssl_profile) {
-            config->ssl_certificate_file = (*ssl_profile)->ssl_certificate_file;
-            config->ssl_private_key_file = (*ssl_profile)->ssl_private_key_file;
-            config->ssl_password = (*ssl_profile)->ssl_password;
-            config->ssl_trusted_certificate_db = (*ssl_profile)->ssl_trusted_certificate_db;
-            config->ssl_trusted_certificates = (*ssl_profile)->ssl_trusted_certificates;
-            config->ssl_uid_format = (*ssl_profile)->ssl_uid_format;
-            config->ssl_display_name_file = (*ssl_profile)->ssl_display_name_file;
+        qd_config_ssl_profile_t *ssl_profile =
+            qd_find_ssl_profile(qd->connection_manager, config->ssl_profile);
+        if (ssl_profile) {
+            config->ssl_certificate_file = SSTRDUP(ssl_profile->ssl_certificate_file);
+            config->ssl_private_key_file = SSTRDUP(ssl_profile->ssl_private_key_file);
+            config->ciphers = SSTRDUP(ssl_profile->ciphers);
+            config->ssl_password = SSTRDUP(ssl_profile->ssl_password);
+            config->ssl_trusted_certificate_db = SSTRDUP(ssl_profile->ssl_trusted_certificate_db);
+            config->ssl_trusted_certificates = SSTRDUP(ssl_profile->ssl_trusted_certificates);
+            config->ssl_uid_format = SSTRDUP(ssl_profile->ssl_uid_format);
+            config->ssl_display_name_file = SSTRDUP(ssl_profile->ssl_display_name_file);
         }
-        sys_atomic_inc(&(*ssl_profile)->ref_count);
+    }
+
+    if (config->sasl_plugin) {
+        qd_config_sasl_plugin_t *sasl_plugin =
+            qd_find_sasl_plugin(qd->connection_manager, config->sasl_plugin);
+        if (sasl_plugin) {
+            config->auth_service = SSTRDUP(sasl_plugin->auth_service);
+            config->sasl_init_hostname = SSTRDUP(sasl_plugin->sasl_init_hostname);
+            qd_log(qd->connection_manager->log_source, QD_LOG_INFO, "Using auth service %s from  SASL Plugin %s", config->auth_service, config->sasl_plugin);
+
+            if (sasl_plugin->auth_ssl_profile) {
+                qd_config_ssl_profile_t *auth_ssl_profile =
+                    qd_find_ssl_profile(qd->connection_manager, sasl_plugin->auth_ssl_profile);
+                config->auth_ssl_conf = pn_ssl_domain(PN_SSL_MODE_CLIENT);
+
+                if (auth_ssl_profile->ssl_certificate_file) {
+                    if (pn_ssl_domain_set_credentials(config->auth_ssl_conf,
+                                                      auth_ssl_profile->ssl_certificate_file,
+                                                      auth_ssl_profile->ssl_private_key_file,
+                                                      auth_ssl_profile->ssl_password)) {
+                        qd_error(QD_ERROR_RUNTIME, "Cannot set SSL credentials for authentication service"); CHECK();
+                    }
+                }
+                if (auth_ssl_profile->ssl_trusted_certificate_db) {
+                    if (pn_ssl_domain_set_trusted_ca_db(config->auth_ssl_conf, auth_ssl_profile->ssl_trusted_certificate_db)) {
+                        qd_error(QD_ERROR_RUNTIME, "Cannot set trusted SSL certificate db for authentication service" ); CHECK();
+                    } else {
+                        if (pn_ssl_domain_set_peer_authentication(config->auth_ssl_conf, PN_SSL_VERIFY_PEER, auth_ssl_profile->ssl_trusted_certificate_db)) {
+                            qd_error(QD_ERROR_RUNTIME, "Cannot set SSL peer verification for authentication service"); CHECK();
+                        }
+                    }
+                }
+                if (auth_ssl_profile->ciphers) {
+                    if (pn_ssl_domain_set_ciphers(config->auth_ssl_conf, auth_ssl_profile->ciphers)) {
+                        return qd_error(QD_ERROR_RUNTIME, "Cannot set ciphers. The ciphers string might be invalid. Use openssl ciphers -v <ciphers> to validate");
+                    }
+                }
+
+            }
+        } else {
+            qd_error(QD_ERROR_RUNTIME, "Cannot find sasl plugin %s", config->sasl_plugin); CHECK();
+        }
     }
 
     return QD_ERROR_NONE;
@@ -400,6 +443,7 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
     qd_server_config_free(config);
     return qd_error_code();
 }
+
 
 bool is_log_component_enabled(qd_log_bits log_message, char *component_name) {
 
@@ -412,6 +456,38 @@ bool is_log_component_enabled(qd_log_bits log_message, char *component_name) {
     }
 
     return 0;
+}
+
+
+static bool config_ssl_profile_free(qd_connection_manager_t *cm, qd_config_ssl_profile_t *ssl_profile)
+{
+    DEQ_REMOVE(cm->config_ssl_profiles, ssl_profile);
+
+    free(ssl_profile->name);
+    free(ssl_profile->ssl_password);
+    free(ssl_profile->ssl_trusted_certificate_db);
+    free(ssl_profile->ssl_trusted_certificates);
+    free(ssl_profile->ssl_uid_format);
+    free(ssl_profile->ssl_display_name_file);
+    free(ssl_profile->ssl_certificate_file);
+    free(ssl_profile->ssl_private_key_file);
+    free(ssl_profile->ciphers);
+    free(ssl_profile);
+    return true;
+
+}
+
+static bool config_sasl_plugin_free(qd_connection_manager_t *cm, qd_config_sasl_plugin_t *sasl_plugin)
+{
+    DEQ_REMOVE(cm->config_sasl_plugins, sasl_plugin);
+
+    free(sasl_plugin->name);
+    free(sasl_plugin->auth_service);
+    free(sasl_plugin->sasl_init_hostname);
+    free(sasl_plugin->auth_ssl_profile);
+    free(sasl_plugin);
+    return true;
+
 }
 
 
@@ -458,7 +534,7 @@ qd_config_ssl_profile_t *qd_dispatch_configure_ssl_profile(qd_dispatch_t *qd, qd
         }
         free(password_file);
     }
-
+    ssl_profile->ciphers = qd_entity_opt_string(entity, "ciphers", 0); CHECK();
     ssl_profile->ssl_trusted_certificate_db = qd_entity_opt_string(entity, "certDb", 0); CHECK();
     ssl_profile->ssl_trusted_certificates   = qd_entity_opt_string(entity, "trustedCerts", 0); CHECK();
     ssl_profile->ssl_uid_format             = qd_entity_opt_string(entity, "uidFormat", 0); CHECK();
@@ -469,57 +545,73 @@ qd_config_ssl_profile_t *qd_dispatch_configure_ssl_profile(qd_dispatch_t *qd, qd
     //
     qd_config_ssl_profile_process_password(ssl_profile); CHECK();
 
-    sys_atomic_init(&ssl_profile->ref_count, 0);
     qd_log(cm->log_source, QD_LOG_INFO, "Created SSL Profile with name %s ", ssl_profile->name);
     return ssl_profile;
 
     error:
         qd_log(cm->log_source, QD_LOG_ERROR, "Unable to create ssl profile: %s", qd_error_message());
-        qd_config_ssl_profile_free(cm, ssl_profile);
+        config_ssl_profile_free(cm, ssl_profile);
         return 0;
 }
 
-
-qd_config_listener_t *qd_dispatch_configure_listener(qd_dispatch_t *qd, qd_entity_t *entity)
+qd_config_sasl_plugin_t *qd_dispatch_configure_sasl_plugin(qd_dispatch_t *qd, qd_entity_t *entity)
 {
     qd_error_clear();
     qd_connection_manager_t *cm = qd->connection_manager;
-    qd_config_listener_t *cl = NEW(qd_config_listener_t);
-    cl->is_connector = false;
-    cl->state = QD_BIND_NONE;
-    cl->listener = 0;
-    cl->ssl_profile = 0;
-    qd_config_ssl_profile_t *ssl_profile = 0;
-    if (load_server_config(qd, &cl->configuration, entity, &ssl_profile) != QD_ERROR_NONE) {
-        qd_log(cm->log_source, QD_LOG_ERROR, "Unable to create config listener: %s", qd_error_message());
-        qd_config_listener_free(qd->connection_manager, cl);
+
+    qd_config_sasl_plugin_t *sasl_plugin = NEW(qd_config_sasl_plugin_t);
+    DEQ_ITEM_INIT(sasl_plugin);
+    DEQ_INSERT_TAIL(cm->config_sasl_plugins, sasl_plugin);
+    sasl_plugin->name                       = qd_entity_opt_string(entity, "name", 0); CHECK();
+    sasl_plugin->auth_service               = qd_entity_opt_string(entity, "authService", 0); CHECK();
+    sasl_plugin->sasl_init_hostname         = qd_entity_opt_string(entity, "saslInitHostname", 0); CHECK();
+    sasl_plugin->auth_ssl_profile           = qd_entity_opt_string(entity, "authSslProfile", 0); CHECK();
+
+    qd_log(cm->log_source, QD_LOG_INFO, "Created SASL plugin config with name %s", sasl_plugin->name);
+    return sasl_plugin;
+
+    error:
+        qd_log(cm->log_source, QD_LOG_ERROR, "Unable to create SASL plugin config: %s", qd_error_message());
+        config_sasl_plugin_free(cm, sasl_plugin);
+        return 0;
+}
+
+static void log_config(qd_log_source_t *log, qd_server_config_t *c, const char *what) {
+    qd_log(log, QD_LOG_INFO, "Configured %s: %s proto=%s, role=%s%s%s%s",
+           what, c->host_port, c->protocol_family ? c->protocol_family : "any",
+           c->role,
+           c->http ? ", http" : "",
+           c->ssl_profile ? ", sslProfile=":"",
+           c->ssl_profile ? c->ssl_profile:"");
+}
+
+
+qd_listener_t *qd_dispatch_configure_listener(qd_dispatch_t *qd, qd_entity_t *entity)
+{
+    qd_connection_manager_t *cm = qd->connection_manager;
+    qd_listener_t *li = qd_server_listener(qd->server);
+    if (!li || load_server_config(qd, &li->config, entity, true) != QD_ERROR_NONE) {
+        qd_log(cm->log_source, QD_LOG_ERROR, "Unable to create listener: %s", qd_error_message());
+        qd_listener_decref(li);
         return 0;
     }
-    cl->ssl_profile = ssl_profile;
     char *fol = qd_entity_opt_string(entity, "failoverList", 0);
     if (fol) {
-        const char *fol_error = 0;
-        cl->configuration.failover_list = qd_failover_list(fol, &fol_error);
+        li->config.failover_list = qd_failover_list(fol);
         free(fol);
-        if (cl->configuration.failover_list == 0) {
-            qd_log(cm->log_source, QD_LOG_ERROR, "Error parsing failover list: %s", fol_error);
-            qd_config_listener_free(qd->connection_manager, cl);
+        if (li->config.failover_list == 0) {
+            qd_log(cm->log_source, QD_LOG_ERROR, "Unable to create listener, bad failover list: %s",
+                   qd_error_message());
+            qd_listener_decref(li);
             return 0;
         }
-    } else
-        cl->configuration.failover_list = 0;
-    DEQ_ITEM_INIT(cl);
-    DEQ_INSERT_TAIL(cm->config_listeners, cl);
-
-    qd_log(cm->log_source, QD_LOG_INFO, "Configured Listener: %s:%s proto=%s, role=%s%s%s%s",
-           cl->configuration.host, cl->configuration.port,
-           cl->configuration.protocol_family ? cl->configuration.protocol_family : "any",
-           cl->configuration.role,
-           cl->configuration.http ? ", http" : "",
-           cl->ssl_profile ? ", sslProfile=":"",
-           cl->ssl_profile ? cl->ssl_profile->name:"");
-
-    return cl;
+    } else {
+        li->config.failover_list = 0;
+    }
+    DEQ_ITEM_INIT(li);
+    DEQ_INSERT_TAIL(cm->listeners, li);
+    log_config(cm->log_source, &li->config, "Listener");
+    return li;
 }
 
 
@@ -529,37 +621,111 @@ qd_error_t qd_entity_refresh_listener(qd_entity_t* entity, void *impl)
 }
 
 
+static int get_failover_info_length(qd_failover_item_list_t   conn_info_list)
+{
+    int arr_length = 0;
+    qd_failover_item_t *item = DEQ_HEAD(conn_info_list);
+
+    item = DEQ_NEXT(item);
+    while(item) {
+        if (item->scheme) {
+            // The +3 is for the '://'
+            arr_length += strlen(item->scheme) + 3;
+        }
+        if (item->host_port) {
+            arr_length += strlen(item->host_port);
+        }
+        item = DEQ_NEXT(item);
+        if (item) {
+            // This is for the comma between the items
+            arr_length += 2;
+        }
+    }
+
+    if (arr_length > 0)
+        // This is for the final '\0'
+        arr_length += 1;
+
+    return arr_length;
+}
+
 qd_error_t qd_entity_refresh_connector(qd_entity_t* entity, void *impl)
 {
-    return QD_ERROR_NONE;
+    qd_connector_t *ct = (qd_connector_t*) impl;
+
+    if (DEQ_SIZE(ct->conn_info_list) > 1) {
+        qd_failover_item_list_t   conn_info_list = ct->conn_info_list;
+
+        qd_failover_item_t *item = DEQ_HEAD(conn_info_list);
+
+        //
+        // As you can see we are skipping the head of the list. The
+        // first item in the list is always the original connection information
+        // and we dont want to display that information as part of the failover list.
+        //
+        int arr_length = get_failover_info_length(conn_info_list);
+        char failover_info[arr_length];
+        memset(failover_info, 0, sizeof(failover_info));
+
+        item = DEQ_NEXT(item);
+
+        while(item) {
+            if (item->scheme) {
+                strcat(failover_info, item->scheme);
+                strcat(failover_info, "://");
+            }
+            if (item->host_port) {
+                strcat(failover_info, item->host_port);
+            }
+            item = DEQ_NEXT(item);
+            if (item) {
+                strcat(failover_info, ", ");
+            }
+        }
+
+        if (qd_entity_set_string(entity, "failoverList", failover_info) == 0)
+            return QD_ERROR_NONE;
+    }
+    else {
+        if (qd_entity_clear(entity, "failoverList") == 0)
+            return QD_ERROR_NONE;
+    }
+
+    return qd_error_code();
 }
 
 
-qd_config_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_entity_t *entity)
+qd_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_entity_t *entity)
 {
-    qd_error_clear();
     qd_connection_manager_t *cm = qd->connection_manager;
-    qd_config_connector_t *cc = NEW(qd_config_connector_t);
-    ZERO(cc);
+    qd_connector_t *ct = qd_server_connector(qd->server);
+    if (ct && load_server_config(qd, &ct->config, entity, false) == QD_ERROR_NONE) {
+        DEQ_ITEM_INIT(ct);
+        DEQ_INSERT_TAIL(cm->connectors, ct);
+        log_config(cm->log_source, &ct->config, "Connector");
 
-    cc->is_connector = true;
-    qd_config_ssl_profile_t *ssl_profile = 0;
-    if (load_server_config(qd, &cc->configuration, entity, &ssl_profile) != QD_ERROR_NONE) {
-        qd_log(cm->log_source, QD_LOG_ERROR, "Unable to create config connector: %s", qd_error_message());
-        qd_config_connector_free(qd->connection_manager, cc);
-        return 0;
+        //
+        // Add the first item to the ct->conn_info_list
+        // The initial connection information and any backup connection information is stored in the conn_info_list
+        //
+        qd_failover_item_t *item = NEW(qd_failover_item_t);
+        ZERO(item);
+        item->scheme   = 0;
+        item->host     = strdup(ct->config.host);
+        item->port     = strdup(ct->config.port);
+        item->hostname = 0;
+
+        int hplen = strlen(item->host) + strlen(item->port) + 2;
+        item->host_port = malloc(hplen);
+        snprintf(item->host_port, hplen, "%s:%s", item->host , item->port);
+
+        DEQ_INSERT_TAIL(ct->conn_info_list, item);
+
+        return ct;
     }
-    cc->ssl_profile = ssl_profile;
-    DEQ_ITEM_INIT(cc);
-    DEQ_INSERT_TAIL(cm->config_connectors, cc);
-    qd_log(cm->log_source, QD_LOG_INFO, "Configured Connector: %s:%s proto=%s, role=%s %s%s",
-            cc->configuration.host, cc->configuration.port,
-            cc->configuration.protocol_family ? cc->configuration.protocol_family : "any",
-            cc->configuration.role,
-            cc->ssl_profile ? ", sslProfile=":"",
-            cc->ssl_profile ? cc->ssl_profile->name:"");
-
-    return cc;
+    qd_log(cm->log_source, QD_LOG_ERROR, "Unable to create connector: %s", qd_error_message());
+    qd_connector_decref(ct);
+    return 0;
 }
 
 
@@ -570,11 +736,11 @@ qd_connection_manager_t *qd_connection_manager(qd_dispatch_t *qd)
         return 0;
 
     cm->log_source = qd_log_source("CONN_MGR");
-    cm->ssl_profile_lock = sys_mutex();
     cm->server     = qd->server;
-    DEQ_INIT(cm->config_listeners);
-    DEQ_INIT(cm->config_connectors);
+    DEQ_INIT(cm->listeners);
+    DEQ_INIT(cm->connectors);
     DEQ_INIT(cm->config_ssl_profiles);
+    DEQ_INIT(cm->config_sasl_plugins);
 
     return cm;
 }
@@ -583,155 +749,115 @@ qd_connection_manager_t *qd_connection_manager(qd_dispatch_t *qd)
 void qd_connection_manager_free(qd_connection_manager_t *cm)
 {
     if (!cm) return;
-    qd_config_listener_t *cl = DEQ_HEAD(cm->config_listeners);
-    while (cl) {
-        DEQ_REMOVE_HEAD(cm->config_listeners);
-        qd_server_config_free(&cl->configuration);
-        qd_config_listener_free(cm, cl);
-        cl = DEQ_HEAD(cm->config_listeners);
+    qd_listener_t *li = DEQ_HEAD(cm->listeners);
+    while (li) {
+        DEQ_REMOVE_HEAD(cm->listeners);
+        qd_listener_decref(li);
+        li = DEQ_HEAD(cm->listeners);
     }
 
-    qd_config_connector_t *cc = DEQ_HEAD(cm->config_connectors);
-    while (cc) {
-        DEQ_REMOVE_HEAD(cm->config_connectors);
-        qd_server_config_free(&cc->configuration);
-        qd_config_connector_free(cm, cc);
-        cc = DEQ_HEAD(cm->config_connectors);
+    qd_connector_t *c = DEQ_HEAD(cm->connectors);
+    while (c) {
+        DEQ_REMOVE_HEAD(cm->connectors);
+        qd_connector_decref(c);
+        c = DEQ_HEAD(cm->connectors);
     }
 
     qd_config_ssl_profile_t *sslp = DEQ_HEAD(cm->config_ssl_profiles);
     while (sslp) {
-        qd_config_ssl_profile_free(cm, sslp);
+        config_ssl_profile_free(cm, sslp);
         sslp = DEQ_HEAD(cm->config_ssl_profiles);
     }
 
-    sys_mutex_free(cm->ssl_profile_lock);
+    qd_config_sasl_plugin_t *saslp = DEQ_HEAD(cm->config_sasl_plugins);
+    while (saslp) {
+        config_sasl_plugin_free(cm, saslp);
+        saslp = DEQ_HEAD(cm->config_sasl_plugins);
+    }
 }
+
+
+/** NOTE: non-static qd_connection_manager_* functions are called from the python agent */
 
 
 void qd_connection_manager_start(qd_dispatch_t *qd)
 {
     static bool first_start = true;
-    qd_config_listener_t  *cl = DEQ_HEAD(qd->connection_manager->config_listeners);
-    qd_config_connector_t *cc = DEQ_HEAD(qd->connection_manager->config_connectors);
+    qd_listener_t  *li = DEQ_HEAD(qd->connection_manager->listeners);
+    qd_connector_t *ct = DEQ_HEAD(qd->connection_manager->connectors);
 
-    while (cl) {
-        if (cl->listener == 0 )
-            if (cl->state == QD_BIND_NONE) { //Try to start listening only if we have never tried to listen on that port before
-                cl->listener = qd_server_listen(qd, &cl->configuration, cl);
-                if (cl->listener)
-                    cl->state = QD_BIND_SUCCESSFUL;
-                else {
-                    cl->state = QD_BIND_FAILED;
-                    if (first_start) {
-                        qd_log(qd->connection_manager->log_source, QD_LOG_CRITICAL,
-                               "Socket bind failed during initial configuration - process exiting");
-                        exit(1);
-                    }
-                }
+    while (li) {
+        if (!li->pn_listener) {
+            if (!qd_listener_listen(li) && first_start) {
+                qd_log(qd->connection_manager->log_source, QD_LOG_CRITICAL,
+                       "Listen on %s failed during initial config", li->config.host_port);
+                exit(1);
+            } else {
+                li->exit_on_error = first_start;
             }
-        cl = DEQ_NEXT(cl);
+        }
+        li = DEQ_NEXT(li);
     }
 
-    while (cc) {
-        if (cc->connector == 0)
-            cc->connector = qd_server_connect(qd, &cc->configuration, cc);
-        cc = DEQ_NEXT(cc);
+    while (ct) {
+        qd_connector_connect(ct);
+        ct = DEQ_NEXT(ct);
     }
 
     first_start = false;
 }
 
 
-void qd_config_connector_free(qd_connection_manager_t *cm, qd_config_connector_t *cc)
-{
-    if (cc->connector)
-        qd_server_connector_free(cc->connector);
-
-    if (cc->ssl_profile) {
-        sys_atomic_dec(&cc->ssl_profile->ref_count);
-    }
-
-    free(cc);
-}
-
-
-void qd_config_listener_free(qd_connection_manager_t *cm, qd_config_listener_t *cl)
-{
-    if (cl->listener) {
-        qd_server_listener_close(cl->listener);
-        qd_server_listener_free(cl->listener);
-        cl->listener = 0;
-    }
-
-    if (cl->ssl_profile) {
-        sys_atomic_dec(&cl->ssl_profile->ref_count);
-    }
-
-    free(cl);
-}
-
-
-bool qd_config_ssl_profile_free(qd_connection_manager_t *cm, qd_config_ssl_profile_t *ssl_profile)
-{
-    if (sys_atomic_get(&ssl_profile->ref_count) != 0) {
-        return false;
-    }
-
-    DEQ_REMOVE(cm->config_ssl_profiles, ssl_profile);
-
-    free(ssl_profile->name);
-    free(ssl_profile->ssl_password);
-    free(ssl_profile->ssl_trusted_certificate_db);
-    free(ssl_profile->ssl_trusted_certificates);
-    free(ssl_profile->ssl_uid_format);
-    free(ssl_profile->ssl_display_name_file);
-    free(ssl_profile->ssl_certificate_file);
-    free(ssl_profile->ssl_private_key_file);
-    free(ssl_profile);
-    return true;
-
-}
-
-
 void qd_connection_manager_delete_listener(qd_dispatch_t *qd, void *impl)
 {
-    qd_config_listener_t *cl = (qd_config_listener_t*) impl;
-
-    if (cl) {
-        qd_server_listener_close(cl->listener);
-        DEQ_REMOVE(qd->connection_manager->config_listeners, cl);
-        qd_config_listener_free(qd->connection_manager, cl);
+    qd_listener_t *li = (qd_listener_t*) impl;
+    if (li) {
+        if (li->pn_listener) {
+            pn_listener_close(li->pn_listener);
+        }
+        DEQ_REMOVE(qd->connection_manager->listeners, li);
+        qd_listener_decref(li);
     }
 }
 
 
-/**
- * Only those SSL Profiles that are not being referenced from other
- * listeners/connectors can be deleted
- */
-bool qd_connection_manager_delete_ssl_profile(qd_dispatch_t *qd, void *impl)
+void qd_connection_manager_delete_ssl_profile(qd_dispatch_t *qd, void *impl)
 {
     qd_config_ssl_profile_t *ssl_profile = (qd_config_ssl_profile_t*) impl;
-    if (ssl_profile)
-        return qd_config_ssl_profile_free(qd->connection_manager, ssl_profile);
-    return false;
+    config_ssl_profile_free(qd->connection_manager, ssl_profile);
+}
+
+void qd_connection_manager_delete_sasl_plugin(qd_dispatch_t *qd, void *impl)
+{
+    qd_config_sasl_plugin_t *sasl_plugin = (qd_config_sasl_plugin_t*) impl;
+    config_sasl_plugin_free(qd->connection_manager, sasl_plugin);
+}
+
+
+static void deferred_close(void *context, bool discard) {
+    if (!discard) {
+        pn_connection_close((pn_connection_t*)context);
+    }
 }
 
 
 void qd_connection_manager_delete_connector(qd_dispatch_t *qd, void *impl)
 {
-    qd_config_connector_t *cc = (qd_config_connector_t*) impl;
-
-    if (cc) {
-        DEQ_REMOVE(qd->connection_manager->config_connectors, cc);
-        qd_config_connector_free(qd->connection_manager, cc);
+    qd_connector_t *ct = (qd_connector_t*) impl;
+    if (ct) {
+        sys_mutex_lock(ct->lock);
+        if (ct->ctx && ct->ctx->pn_conn) {
+            qd_connection_invoke_deferred(ct->ctx, deferred_close, ct->ctx->pn_conn);
+        }
+        sys_mutex_unlock(ct->lock);
+        DEQ_REMOVE(qd->connection_manager->connectors, ct);
+        qd_connector_decref(ct);
     }
 }
 
 
-const char *qd_config_connector_name(qd_config_connector_t *cc)
+const char *qd_connector_name(qd_connector_t *ct)
 {
-    return cc ? cc->configuration.name : 0;
+    return ct ? ct->config.name : 0;
 }
 

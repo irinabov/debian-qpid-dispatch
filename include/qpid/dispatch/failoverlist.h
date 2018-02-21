@@ -1,5 +1,6 @@
 #ifndef __failoverlist_h__
 #define __failoverlist_h__ 1
+#include <qpid/dispatch/ctools.h>
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -24,6 +25,17 @@
  */
 typedef struct qd_failover_list_t qd_failover_list_t;
 
+typedef struct qd_failover_item_t {
+    DEQ_LINKS(struct qd_failover_item_t);
+    char *scheme;
+    char *host;
+    char *port;
+    char *hostname;
+    char *host_port;
+} qd_failover_item_t;
+
+DEQ_DECLARE(qd_failover_item_t, qd_failover_item_list_t);
+
 /**
  * qd_failover_list
  *
@@ -38,8 +50,10 @@ typedef struct qd_failover_list_t qd_failover_list_t;
  *
  * If scheme is not supplied, it defaults to _not present_.
  * If port is not specified, it defaults to "5672".
+ *
+ * Sets qd_error() if text cannot be parsed.
  */
-qd_failover_list_t *qd_failover_list(const char *text, const char **error);
+qd_failover_list_t *qd_failover_list(const char *text);
 
 /**
  * qd_failover_list_free

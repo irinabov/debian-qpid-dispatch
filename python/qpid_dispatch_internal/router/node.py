@@ -148,10 +148,16 @@ class NodeTracker(object):
             collection = {self.my_id : self.link_state}
             for node_id, node in self.nodes.items():
                 collection[node_id] = node.link_state
-            next_hops, costs, valid_origins = self.container.path_engine.calculate_routes(collection)
+            next_hops, costs, valid_origins, radius = self.container.path_engine.calculate_routes(collection)
             self.container.log_ls(LOG_INFO, "Computed next hops: %r" % next_hops)
             self.container.log_ls(LOG_INFO, "Computed costs: %r" % costs)
             self.container.log_ls(LOG_INFO, "Computed valid origins: %r" % valid_origins)
+            self.container.log_ls(LOG_INFO, "Computed radius: %d" % radius)
+
+            ##
+            ## Update the topology radius
+            ##
+            self.container.router_adapter.set_radius(radius)
 
             ##
             ## Update the next hops and valid origins for each node
@@ -431,7 +437,7 @@ class RouterNode(object):
         self.next_hop_router = None
         self.adapter.set_link(self.maskbit, link_id)
         self.adapter.remove_next_hop(self.maskbit)
-        self.log(LOG_TRACE, "Node %s link set: link_id=%r" % (self.id, link_id))
+        self.log(LOG_TRACE, "Node %s link set: link_id=%r (removed next hop)" % (self.id, link_id))
         return True
 
 
@@ -452,6 +458,11 @@ class RouterNode(object):
 
     def set_next_hop(self, next_hop):
         if self.id == next_hop.id:
+            ##
+            ## If the next hop is self (destination is a neighbor) and there
+            ## was a next hop in place, explicitly remove the next hop (DISPATCH-873).
+            ##
+            self.remove_next_hop()
             return
         if self.next_hop_router and self.next_hop_router.id == next_hop.id:
             return
@@ -533,8 +544,8 @@ class RouterNode(object):
 
     def unmap_all_addresses(self):
         self.mobile_address_sequence = 0
-        for addr in self.mobile_addresses:
-            self.unmap_address(addr)
+        while self.mobile_addresses:
+            self.unmap_address(self.mobile_addresses[0])
 
 
     def overwrite_addresses(self, addrs):
