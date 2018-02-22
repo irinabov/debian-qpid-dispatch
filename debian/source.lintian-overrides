@@ -5,3 +5,4 @@ qpid-dispatch source: source-is-missing console/dispatch-dashboard/dispatch/stat
 qpid-dispatch source: source-is-missing console/hawtio/src/main/webapp/plugin/lib/d3.min.js
 qpid-dispatch source: source-is-missing console/hawtio/src/main/webapp/plugin/lib/tooltipsy.min.js
 qpid-dispatch source: source-is-missing console/hawtio/src/main/webapp/plugin/lib/zd3-queue.min.js
+qpid-dispatch source: source-is-missing console/stand-alone/plugin/lib/rhea-min.js
