@@ -47,146 +47,33 @@ static void qdi_router_configure_body(qdr_core_t              *core,
     qd_iterator_free(name_iter);
 }
 
-qd_error_t qd_router_configure_fixed_address(qd_router_t *router, qd_entity_t *entity)
-{
-    static bool deprecate_warning = true;
-    if (deprecate_warning) {
-        deprecate_warning = false;
-        qd_log(router->log_source, QD_LOG_WARNING, "fixedAddress configuration is deprecated, switch to using address instead.");
-    }
-
-    qd_error_clear();
-    int                             phase  = qd_entity_opt_long(entity, "phase", -1); QD_ERROR_RET();
-    qd_schema_fixedAddress_fanout_t fanout = qd_entity_get_long(entity, "fanout");    QD_ERROR_RET();
-    qd_schema_fixedAddress_bias_t   bias   = qd_entity_get_long(entity, "bias");      QD_ERROR_RET();
-    char                           *prefix = qd_entity_get_string(entity, "prefix");  QD_ERROR_RET();
-
-    if (phase != -1) {
-        qd_log(router->log_source, QD_LOG_WARNING,
-               "Address phases deprecated: Ignoring address configuration for '%s', phase %d", prefix, phase);
-        free(prefix);
-        return qd_error_code();
-    }
-
-    if (prefix[0] == '/' && prefix[1] == '\0') {
-        qd_log(router->log_source, QD_LOG_WARNING, "Ignoring address configuration for '/'");
-        free(prefix);
-        return qd_error_code();
-    }
-
-    //
-    // Convert fanout + bias to distribution
-    //
-    const char *distrib;
-
-    if (fanout == QD_SCHEMA_FIXEDADDRESS_FANOUT_MULTIPLE)
-        distrib = "multicast";
-    else {
-        if (bias == QD_SCHEMA_FIXEDADDRESS_BIAS_CLOSEST)
-            distrib = "closest";
-        else
-            distrib = "balanced";
-    }
-
-    //
-    // Formulate this configuration as a router.config.address and create it through the core management API.
-    //
-    qd_composed_field_t *body = qd_compose_subfield(0);
-    qd_compose_start_map(body);
-    qd_compose_insert_string(body, "prefix");
-    qd_compose_insert_string(body, prefix);
-
-    qd_compose_insert_string(body, "distribution");
-    qd_compose_insert_string(body, distrib);
-    qd_compose_end_map(body);
-
-    qdi_router_configure_body(router->router_core, body, QD_ROUTER_CONFIG_ADDRESS, 0);
-    qd_compose_free(body);
-
-    free(prefix);
-    return qd_error_code();
-}
-
-qd_error_t qd_router_configure_waypoint(qd_router_t *router, qd_entity_t *entity)
-{
-    static bool deprecate_warning = true;
-    if (deprecate_warning) {
-        deprecate_warning = false;
-        qd_log(router->log_source, QD_LOG_WARNING, "waypoint configuration is deprecated, switch to using autoLink instead.");
-    }
-
-    return qd_error_code();
-}
-
-
-static void qd_router_add_link_route(qdr_core_t *core, const char *prefix, const char *connector, const char* dir)
-{
-    //
-    // Formulate this configuration as a router.config.linkRoute and create it through the core management API.
-    //
-    qd_composed_field_t *body = qd_compose_subfield(0);
-    qd_compose_start_map(body);
-    qd_compose_insert_string(body, "prefix");
-    qd_compose_insert_string(body, prefix);
-
-    qd_compose_insert_string(body, "dir");
-    qd_compose_insert_string(body, dir);
-
-    if (connector) {
-        qd_compose_insert_string(body, "connection");
-        qd_compose_insert_string(body, connector);
-    }
-
-    qd_compose_end_map(body);
-
-    qdi_router_configure_body(core, body, QD_ROUTER_CONFIG_LINK_ROUTE, 0);
-    qd_compose_free(body);
-}
-
-
-qd_error_t qd_router_configure_lrp(qd_router_t *router, qd_entity_t *entity)
-{
-    static bool deprecate_warning = true;
-    if (deprecate_warning) {
-        deprecate_warning = false;
-        qd_log(router->log_source, QD_LOG_WARNING, "linkRoutePrefix configuration is deprecated, switch to using linkRoute instead.");
-    }
-
-    char *prefix    = 0;
-    char *connector = 0;
-    char *direction = 0;
-
-    do {
-        prefix    = qd_entity_get_string(entity, "prefix");    QD_ERROR_BREAK();
-        connector = qd_entity_get_string(entity, "connector"); QD_ERROR_BREAK();
-        direction = qd_entity_get_string(entity, "dir");       QD_ERROR_BREAK();
-
-        if (strcmp("in", direction) == 0 || strcmp("both", direction) == 0)
-            qd_router_add_link_route(router->router_core, prefix, connector, "in");
-
-        if (strcmp("out", direction) == 0 || strcmp("both", direction) == 0)
-            qd_router_add_link_route(router->router_core, prefix, connector, "out");
-
-    } while (0);
-
-    free(prefix);
-    free(connector);
-    free(direction);
-
-    return qd_error_code();
-}
-
 
 qd_error_t qd_router_configure_address(qd_router_t *router, qd_entity_t *entity)
 {
     char *name    = 0;
-    char *prefix  = 0;
+    char *pattern = 0;
     char *distrib = 0;
+    char *prefix  = 0;
 
     do {
         name = qd_entity_opt_string(entity, "name", 0);             QD_ERROR_BREAK();
-        prefix = qd_entity_get_string(entity, "prefix");            QD_ERROR_BREAK();
         distrib = qd_entity_opt_string(entity, "distribution", 0);  QD_ERROR_BREAK();
+
+        pattern = qd_entity_opt_string(entity, "pattern", 0);
+        prefix = qd_entity_opt_string(entity, "prefix", 0);
+
+        if (prefix && pattern) {
+            qd_log(router->log_source, QD_LOG_WARNING,
+                   "Cannot set both 'prefix' and 'pattern': ignoring"
+                   " configured address %s, %s",
+                   prefix, pattern);
+            break;
+        } else if (!prefix && !pattern) {
+            qd_log(router->log_source, QD_LOG_WARNING,
+                   "Must set either 'prefix' or 'pattern' attribute:"
+                   " ignoring configured address");
+            break;
+        }
 
         bool  waypoint  = qd_entity_opt_bool(entity, "waypoint", false);
         long  in_phase  = qd_entity_opt_long(entity, "ingressPhase", -1);
@@ -206,6 +93,11 @@ qd_error_t qd_router_configure_address(qd_router_t *router, qd_entity_t *entity)
         if (prefix) {
             qd_compose_insert_string(body, "prefix");
             qd_compose_insert_string(body, prefix);
+        }
+
+        if (pattern) {
+            qd_compose_insert_string(body, "pattern");
+            qd_compose_insert_string(body, pattern);
         }
 
         if (distrib) {
@@ -235,6 +127,7 @@ qd_error_t qd_router_configure_address(qd_router_t *router, qd_entity_t *entity)
     free(name);
     free(prefix);
     free(distrib);
+    free(pattern);
 
     return qd_error_code();
 }
@@ -245,6 +138,7 @@ qd_error_t qd_router_configure_link_route(qd_router_t *router, qd_entity_t *enti
 
     char *name      = 0;
     char *prefix    = 0;
+    char *pattern   = 0;
     char *container = 0;
     char *c_name    = 0;
     char *distrib   = 0;
@@ -252,11 +146,25 @@ qd_error_t qd_router_configure_link_route(qd_router_t *router, qd_entity_t *enti
 
     do {
         name      = qd_entity_opt_string(entity, "name", 0);         QD_ERROR_BREAK();
-        prefix    = qd_entity_get_string(entity, "prefix");          QD_ERROR_BREAK();
         container = qd_entity_opt_string(entity, "containerId", 0);  QD_ERROR_BREAK();
         c_name    = qd_entity_opt_string(entity, "connection", 0);   QD_ERROR_BREAK();
         distrib   = qd_entity_opt_string(entity, "distribution", 0); QD_ERROR_BREAK();
         dir       = qd_entity_opt_string(entity, "dir", 0);          QD_ERROR_BREAK();
+
+        prefix    = qd_entity_opt_string(entity, "prefix", 0);
+        pattern   = qd_entity_opt_string(entity, "pattern", 0);
+
+        if (prefix && pattern) {
+            qd_log(router->log_source, QD_LOG_WARNING,
+                   "Cannot set both 'prefix' and 'pattern': ignoring link route %s, %s",
+                   prefix, pattern);
+            break;
+        } else if (!prefix && !pattern) {
+            qd_log(router->log_source, QD_LOG_WARNING,
+                   "Must set either 'prefix' or 'pattern' attribute:"
+                   " ignoring link route address");
+            break;
+        }
 
         //
         // Formulate this configuration as a route and create it through the core management API.
@@ -272,6 +180,11 @@ qd_error_t qd_router_configure_link_route(qd_router_t *router, qd_entity_t *enti
         if (prefix) {
             qd_compose_insert_string(body, "prefix");
             qd_compose_insert_string(body, prefix);
+        }
+
+        if (pattern) {
+            qd_compose_insert_string(body, "pattern");
+            qd_compose_insert_string(body, pattern);
         }
 
         if (container) {
@@ -306,6 +219,7 @@ qd_error_t qd_router_configure_link_route(qd_router_t *router, qd_entity_t *enti
     free(c_name);
     free(distrib);
     free(dir);
+    free(pattern);
 
     return qd_error_code();
 }

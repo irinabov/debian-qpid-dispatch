@@ -33,6 +33,7 @@
 #include <qpid/dispatch/dispatch.h>
 #include <qpid/dispatch/server.h>
 #include <qpid/dispatch/ctools.h>
+#include <qpid/dispatch/alloc.h>
 
 typedef uint8_t qd_dist_mode_t;
 #define QD_DIST_COPY 0x01
@@ -70,7 +71,8 @@ typedef enum {
 typedef struct qd_node_t     qd_node_t;
 typedef struct qd_link_t     qd_link_t;
 
-typedef void (*qd_container_delivery_handler_t)    (void *node_context, qd_link_t *link, pn_delivery_t *delivery);
+typedef void (*qd_container_delivery_handler_t)    (void *node_context, qd_link_t *link);
+typedef void (*qd_container_disposition_handler_t) (void *node_context, qd_link_t *link, pn_delivery_t *pnd);
 typedef int  (*qd_container_link_handler_t)        (void *node_context, qd_link_t *link);
 typedef int  (*qd_container_link_detach_handler_t) (void *node_context, qd_link_t *link, qd_detach_type_t dt);
 typedef void (*qd_container_node_handler_t)        (void *type_context, qd_node_t *node);
@@ -88,11 +90,11 @@ typedef struct {
      * @{
      */
 
-    /** Invoked when a new received delivery is avaliable for processing. */
+    /** Invoked when a new or existing received delivery is avaliable for processing. */
     qd_container_delivery_handler_t rx_handler;
 
     /** Invoked when an existing delivery changes disposition or settlement state. */
-    qd_container_delivery_handler_t disp_handler;
+    qd_container_disposition_handler_t disp_handler;
 
     /** Invoked when an attach for a new incoming link is received. */
     qd_container_link_handler_t incoming_handler;
@@ -157,6 +159,19 @@ qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, c
 void qd_link_free(qd_link_t *link);
 
 /**
+ * List of reference in the qd_link used to track abandoned deliveries
+ */
+typedef struct qd_link_ref_t {
+    DEQ_LINKS(struct qd_link_ref_t);
+    void *ref;
+} qd_link_ref_t;
+
+ALLOC_DECLARE(qd_link_ref_t);
+DEQ_DECLARE(qd_link_ref_t, qd_link_ref_list_t);
+
+qd_link_ref_list_t *qd_link_get_ref_list(qd_link_t *link);
+
+/**
  * Context associated with the link for storing link-specific state.
  */
 void qd_link_set_context(qd_link_t *link, void *link_context);
@@ -177,6 +192,7 @@ void qd_link_close(qd_link_t *link);
 void qd_link_detach(qd_link_t *link);
 bool qd_link_drain_changed(qd_link_t *link, bool *mode);
 void qd_link_free(qd_link_t *link);
+void *qd_link_get_node_context(const qd_link_t *link);
 
 ///@}
 #endif

@@ -23,10 +23,10 @@
 #include <qpid/dispatch/server.h>
 #include <qpid/dispatch/ctools.h>
 #include <qpid/dispatch/static_assert.h>
+#include <qpid/dispatch/alloc.h>
 
 #include "config.h"
 #include "dispatch_private.h"
-#include "alloc.h"
 #include "http.h"
 #include "log_private.h"
 #include "router_private.h"
@@ -50,6 +50,13 @@ qd_router_t    *qd_router(qd_dispatch_t *qd, qd_router_mode_t mode, const char *
 void            qd_router_setup_late(qd_dispatch_t *qd);
 void            qd_router_free(qd_router_t *router);
 void            qd_error_initialize();
+static void qd_dispatch_set_router_id(qd_dispatch_t *qd, char *_id);
+static void qd_dispatch_set_router_area(qd_dispatch_t *qd, char *_area);
+
+const char     *CLOSEST_DISTRIBUTION   = "closest";
+const char     *MULTICAST_DISTRIBUTION = "multicast";
+const char     *BALANCED_DISTRIBUTION  = "balanced";
+const char     *UNAVAILABLE_DISTRIBUTION = "unavailable";
 
 qd_dispatch_t *qd_dispatch(const char *python_pkgdir)
 {
@@ -76,6 +83,7 @@ qd_dispatch_t *qd_dispatch(const char *python_pkgdir)
     qd_dispatch_set_router_area(qd, strdup("0"));
     qd_dispatch_set_router_id(qd, strdup("0"));
     qd->router_mode = QD_ROUTER_MODE_ENDPOINT;
+    qd->default_treatment   = QD_TREATMENT_LINK_BALANCED;
 
     qd_python_initialize(qd, python_pkgdir);
     if (qd_error_code()) { qd_dispatch_free(qd); return 0; }
@@ -144,32 +152,29 @@ qd_error_t qd_dispatch_validate_config(const char *config_path)
 	return validation_error;
 }
 
-
-/**
- * The Container Entity has been deprecated and will be removed in the future. Use the RouterEntity instead.
- */
-qd_error_t qd_dispatch_configure_container(qd_dispatch_t *qd, qd_entity_t *entity)
+// Takes ownership of distribution string.
+static void qd_dispatch_set_router_default_distribution(qd_dispatch_t *qd, char *distribution)
 {
-    // Add a log warning. Check to see if too early
-    qd->thread_count   = qd_entity_opt_long(entity, "workerThreads", 4); QD_ERROR_RET();
-    qd->sasl_config_path = qd_entity_opt_string(entity, "saslConfigPath", 0); QD_ERROR_RET();
-    qd->sasl_config_name = qd_entity_opt_string(entity, "saslConfigName", 0); QD_ERROR_RET();
-    char *dump_file = qd_entity_opt_string(entity, "debugDump", 0); QD_ERROR_RET();
-    if (dump_file) {
-        qd_alloc_debug_dump(dump_file); QD_ERROR_RET();
-        free(dump_file);
+    if (distribution) {
+        if (strcmp(distribution, MULTICAST_DISTRIBUTION) == 0)
+            qd->default_treatment = QD_TREATMENT_MULTICAST_ONCE;
+        else if (strcmp(distribution, CLOSEST_DISTRIBUTION) == 0)
+            qd->default_treatment = QD_TREATMENT_ANYCAST_CLOSEST;
+        else if (strcmp(distribution, BALANCED_DISTRIBUTION) == 0)
+            qd->default_treatment = QD_TREATMENT_ANYCAST_BALANCED;
+        else if (strcmp(distribution, UNAVAILABLE_DISTRIBUTION) == 0)
+            qd->default_treatment = QD_TREATMENT_UNAVAILABLE;
     }
-
-    return QD_ERROR_NONE;
+    else
+        // The default for the router defaultDistribution field is QD_TREATMENT_ANYCAST_BALANCED
+        qd->default_treatment = QD_TREATMENT_ANYCAST_BALANCED;
+    free(distribution);
 }
-
 
 qd_error_t qd_dispatch_configure_router(qd_dispatch_t *qd, qd_entity_t *entity)
 {
-    qd_dispatch_set_router_id(qd, qd_entity_opt_string(entity, "routerId", 0)); QD_ERROR_RET();
-    if (! qd->router_id) {
-        qd_dispatch_set_router_id(qd, qd_entity_opt_string(entity, "id", 0)); QD_ERROR_RET();
-    }
+    qd_dispatch_set_router_default_distribution(qd, qd_entity_opt_string(entity, "defaultDistribution", 0)); QD_ERROR_RET();
+    qd_dispatch_set_router_id(qd, qd_entity_opt_string(entity, "id", 0)); QD_ERROR_RET();
     if (!qd->router_id) {
         qd_log_source_t *router_log = qd_log_source("ROUTER");
         qd_log(router_log, QD_LOG_CRITICAL, "Router Id not specified - process exiting");
@@ -178,6 +183,7 @@ qd_error_t qd_dispatch_configure_router(qd_dispatch_t *qd, qd_entity_t *entity)
 
     qd->router_mode = qd_entity_get_long(entity, "mode"); QD_ERROR_RET();
     qd->thread_count = qd_entity_opt_long(entity, "workerThreads", 4); QD_ERROR_RET();
+    qd->allow_unsettled_multicast = qd_entity_opt_bool(entity, "allowUnsettledMulticast", false); QD_ERROR_RET();
 
     if (! qd->sasl_config_path) {
         qd->sasl_config_path = qd_entity_opt_string(entity, "saslConfigPath", 0); QD_ERROR_RET();
@@ -185,6 +191,7 @@ qd_error_t qd_dispatch_configure_router(qd_dispatch_t *qd, qd_entity_t *entity)
     if (! qd->sasl_config_name) {
         qd->sasl_config_name = qd_entity_opt_string(entity, "saslConfigName", "qdrouterd"); QD_ERROR_RET();
     }
+    qd->auth_service = qd_entity_opt_string(entity, "authService", 0); QD_ERROR_RET();
 
     char *dump_file = qd_entity_opt_string(entity, "debugDump", 0); QD_ERROR_RET();
     if (dump_file) {
@@ -194,24 +201,6 @@ qd_error_t qd_dispatch_configure_router(qd_dispatch_t *qd, qd_entity_t *entity)
 
     return QD_ERROR_NONE;
 
-}
-
-qd_error_t qd_dispatch_configure_fixed_address(qd_dispatch_t *qd, qd_entity_t *entity) {
-    if (!qd->router) return qd_error(QD_ERROR_NOT_FOUND, "No router available");
-    qd_router_configure_fixed_address(qd->router, entity);
-    return qd_error_code();
-}
-
-qd_error_t qd_dispatch_configure_waypoint(qd_dispatch_t *qd, qd_entity_t *entity) {
-    if (!qd->router) return qd_error(QD_ERROR_NOT_FOUND, "No router available");
-    qd_router_configure_waypoint(qd->router, entity);
-    return qd_error_code();
-}
-
-qd_error_t qd_dispatch_configure_lrp(qd_dispatch_t *qd, qd_entity_t *entity) {
-    if (!qd->router) return qd_error(QD_ERROR_NOT_FOUND, "No router available");
-    qd_router_configure_lrp(qd->router, entity);
-    return qd_error_code();
 }
 
 qd_error_t qd_dispatch_configure_address(qd_dispatch_t *qd, qd_entity_t *entity) {
@@ -286,14 +275,16 @@ void qd_dispatch_set_agent(qd_dispatch_t *qd, void *agent) {
     qd->agent = agent;
 }
 
-void qd_dispatch_set_router_id(qd_dispatch_t *qd, char *_id) {
+// Takes ownership of _id
+static void qd_dispatch_set_router_id(qd_dispatch_t *qd, char *_id) {
     if (qd->router_id) {
         free(qd->router_id);
     }
     qd->router_id = _id;
 }
 
-void qd_dispatch_set_router_area(qd_dispatch_t *qd, char *_area) {
+// Takes ownership of _area
+static void qd_dispatch_set_router_area(qd_dispatch_t *qd, char *_area) {
     if (qd->router_area) {
         free(qd->router_area);
     }

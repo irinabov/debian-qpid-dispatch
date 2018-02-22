@@ -19,3 +19,7 @@ listener {
 The router will serve the console's html/js/css from the install directory.
 The cosole will automatically connect to the router at localhost:5673
 
+Note: An internet connection is required on the machine that is running the console in order to retrieve the 3rd party javascript / css files.
+
+
+

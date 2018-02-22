@@ -61,6 +61,17 @@ static void set_content(qd_message_content_t *content, size_t len)
 }
 
 
+static void set_content_bufs(qd_message_content_t *content, int nbufs)
+{
+    for (; nbufs > 0; nbufs--) {
+        qd_buffer_t *buf = qd_buffer();
+        size_t segment   = qd_buffer_capacity(buf);
+        qd_buffer_insert(buf, segment);
+        DEQ_INSERT_TAIL(content->buffers, buf);
+    }
+}
+
+
 static char* test_send_to_messenger(void *context)
 {
     qd_message_t         *msg     = qd_message();
@@ -110,7 +121,7 @@ static char* test_receive_from_messenger(void *context)
     }
     qd_iterator_free(iter);
 
-    size_t test_len = (size_t)qd_message_field_length(msg, QD_FIELD_TO);
+    ssize_t  test_len = (size_t)qd_message_field_length(msg, QD_FIELD_TO);
     if (test_len != 11)
         return "Incorrect field length";
 
@@ -120,6 +131,11 @@ static char* test_receive_from_messenger(void *context)
     if (test_len - hdr_length != 11)
         return "Incorrect length returned from field_copy";
 
+    if (test_len < 0) {
+        pn_message_free(pn_msg);
+        qd_message_free(msg);
+        return "test_len cannot be less than zero";
+    }
     test_field[test_len] = '\0';
     if (strcmp(test_field + hdr_length, "test_addr_1") != 0) {
         pn_message_free(pn_msg);
@@ -161,8 +177,13 @@ static char* test_message_properties(void *context)
     set_content(content, size);
 
     qd_iterator_t *iter = qd_message_field_iterator(msg, QD_FIELD_CORRELATION_ID);
-    if (!iter) return "Expected iterator for the 'correlation-id' field";
-    if (qd_iterator_length(iter) != 13) return "Bad length for correlation-id";
+    if (!iter) {
+        return "Expected iterator for the 'correlation-id' field";
+    }
+    if (qd_iterator_length(iter) != 13) {
+        qd_iterator_free(iter);
+        return "Bad length for correlation-id";
+    }
     if (!qd_iterator_equal(iter, (const unsigned char *)"correlationId")) {
         qd_iterator_free(iter);
         return "Invalid correlation-id";
@@ -178,8 +199,12 @@ static char* test_message_properties(void *context)
     qd_iterator_free(iter);
 
     iter = qd_message_field_iterator(msg, QD_FIELD_MESSAGE_ID);
-    if (!iter) return "Expected iterator for the 'message-id' field";
-    if (qd_iterator_length(iter) != 9) return "Bad length for message-id";
+    if (!iter)
+        return "Expected iterator for the 'message-id' field";
+    if (qd_iterator_length(iter) != 9) {
+        qd_iterator_free(iter);
+        return "Bad length for message-id";
+    }
     if (!qd_iterator_equal(iter, (const unsigned char *)"messageId")) {
         qd_iterator_free(iter);
         return "Invalid message-id";
@@ -263,13 +288,16 @@ static char* test_send_message_annotations(void *context)
     pn_data_rewind(ma);
     pn_data_next(ma);
     if (pn_data_type(ma) != PN_MAP) return "Invalid message annotation type";
-    if (pn_data_get_map(ma) != 6) return "Invalid map length";
+    if (pn_data_get_map(ma) != QD_MA_N_KEYS * 2) return "Invalid map length";
     pn_data_enter(ma);
-    for (int i = 0; i < 6; i+=2) {
+    for (int i = 0; i < QD_MA_N_KEYS; i++) {
         pn_data_next(ma);
         if (pn_data_type(ma) != PN_SYMBOL) return "Bad map index";
         pn_bytes_t sym = pn_data_get_symbol(ma);
-        if (!strncmp(QD_MA_INGRESS, sym.start, sym.size)) {
+        if (!strncmp(QD_MA_PREFIX, sym.start, sym.size)) {
+            pn_data_next(ma);
+            sym = pn_data_get_string(ma);
+        } else if (!strncmp(QD_MA_INGRESS, sym.start, sym.size)) {
             pn_data_next(ma);
             sym = pn_data_get_string(ma);
             if (strncmp("distress", sym.start, sym.size)) return "Bad ingress";
@@ -302,6 +330,27 @@ static char* test_send_message_annotations(void *context)
 }
 
 
+static char* test_q2_input_holdoff_sensing(void *context)
+{
+    if (QD_QLIMIT_Q2_LOWER >= QD_QLIMIT_Q2_UPPER)
+        return "QD_LIMIT_Q2 lower limit is bigger than upper limit";
+
+    for (int nbufs=1; nbufs<QD_QLIMIT_Q2_UPPER + 1; nbufs++) {
+        qd_message_t         *msg     = qd_message();
+        qd_message_content_t *content = MSG_CONTENT(msg);
+
+        set_content_bufs(content, nbufs);
+        if (qd_message_Q2_holdoff_should_block(msg) != (nbufs >= QD_QLIMIT_Q2_UPPER))
+            return "qd_message_holdoff_would_block was miscalculated";
+        if (qd_message_Q2_holdoff_should_unblock(msg) != (nbufs < QD_QLIMIT_Q2_LOWER))
+            return "qd_message_holdoff_would_unblock was miscalculated";
+
+        qd_message_free(msg);
+    }
+    return 0;
+}
+
+
 int message_tests(void)
 {
     int result = 0;
@@ -312,6 +361,7 @@ int message_tests(void)
     TEST_CASE(test_message_properties, 0);
     TEST_CASE(test_check_multiple, 0);
     TEST_CASE(test_send_message_annotations, 0);
+    TEST_CASE(test_q2_input_holdoff_sensing, 0);
 
     return result;
 }

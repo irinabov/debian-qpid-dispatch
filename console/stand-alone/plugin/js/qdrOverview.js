@@ -150,6 +150,7 @@ var QDR = (function (QDR) {
         }
       ],
       enableColumnResize: true,
+      jqueryUIDraggable: true,
       enablePaging: true,
       showFooter: $scope.totalRouters > 50,
       totalServerItems: 'totalRouters',
@@ -223,6 +224,7 @@ var QDR = (function (QDR) {
           displayName: 'Value',
         }
       ],
+      jqueryUIDraggable: true,
       enableColumnResize: true,
       multiSelect: false
     }
@@ -318,6 +320,7 @@ var QDR = (function (QDR) {
       pagingOptions: $scope.addressPagingOptions,
       enableColumnResize: true,
       multiSelect: false,
+      jqueryUIDraggable: true,
       selectedItems: $scope.selectedAddresses,
       plugins: [new ngGridFlexibleHeightPlugin()],
       afterSelectionChange: function(data) {
@@ -345,7 +348,9 @@ var QDR = (function (QDR) {
             if (addr[0] == 'A')  return "area"
             if (addr[0] == 'L')  return "local"
             if (addr[0] == 'C')  return "link-incoming"
+            if (addr[0] == 'E')  return "link-incoming"
             if (addr[0] == 'D')  return "link-outgoing"
+            if (addr[0] == 'F')  return "link-outgoing"
             if (addr[0] == 'T')  return "topo"
             return "unknown: " + addr[0]
       }
@@ -516,14 +521,12 @@ var QDR = (function (QDR) {
     $scope.pagedLinkData = []
     $scope.selectedLinks = []
 
-    var linkRowTmpl = `
-      <div ng-class="{linkDirIn: row.getProperty('linkDir') == 'in', linkDirOut: row.getProperty('linkDir') == 'out'}">
-        <div ng-style="{ 'cursor': row.cursor }" ng-repeat="col in renderedColumns" ng-class="col.colIndex()" class="ngCell {{col.cellClass}}">
-          <div class="ngVerticalBar" ng-style="{height: rowHeight}" ng-class="{ ngVerticalBarVisible: !$last }">&nbsp;</div>
-          <div ng-cell></div>
-        </div>
-      </div>
-    `;
+    var linkRowTmpl = "<div ng-class=\"{linkDirIn: row.getProperty('linkDir') == 'in', linkDirOut: row.getProperty('linkDir') == 'out'}\">" +
+          "<div ng-style=\"{ 'cursor': row.cursor }\" ng-repeat=\"col in renderedColumns\" ng-class=\"col.colIndex()\" class=\"ngCell {{col.cellClass}}\">" +
+          "<div class=\"ngVerticalBar\" ng-style=\"{height: rowHeight}\" ng-class=\"{ ngVerticalBarVisible: !$last }\">&nbsp;</div>" +
+          "<div ng-cell></div>" +
+          "</div>" +
+          "</div>";
 
     $scope.linksGrid = {
       saveKey: 'linksGrid',
@@ -603,6 +606,7 @@ var QDR = (function (QDR) {
       showColumnMenu: true,
       rowTemplate: linkRowTmpl,
       multiSelect: false,
+      jqueryUIDraggable: true,
       selectedItems: $scope.selectedLinks,
       plugins: [new ngGridFlexibleHeightPlugin()],
       afterSelectionChange: function(data) {
@@ -850,6 +854,7 @@ return;
       pagingOptions: $scope.connectionPagingOptions,
       enableColumnResize: true,
       multiSelect: false,
+      jqueryUIDraggable: true,
       selectedItems: $scope.allConnectionSelections,
       plugins: [new ngGridFlexibleHeightPlugin()],
       afterSelectionChange: function(data) {
@@ -951,6 +956,7 @@ return;
       }
       ],
       enableColumnResize: true,
+      jqueryUIDraggable: true,
       multiSelect: false
     }
 
@@ -992,6 +998,7 @@ return;
         }
       ],
       enableColumnResize: true,
+      jqueryUIDraggable: true,
       multiSelect: false
     }
 
@@ -1016,7 +1023,7 @@ QDR.log.debug("linkInfo called for " + link.data.key)
 
     // get info for a single connection
     $scope.gridModes = [{
-        content: '<a><i class="icon-list"></i> Attriutes</a>',
+        content: '<a><i class="icon-list"></i> Attributes</a>',
         id: 'attributes',
         title: "View attributes"
       },
@@ -1143,6 +1150,7 @@ QDR.log.debug("setting linkFields to [] in selectMode")
       }
       ],
       enableColumnResize: true,
+      jqueryUIDraggable: true,
       multiSelect: false
     }
 
@@ -1229,6 +1237,7 @@ QDR.log.debug("setting linkFields to [] in selectMode")
         },
       ],
       enableColumnResize: true,
+      jqueryUIDraggable: true,
       multiSelect: false,
       selectedItems: $scope.logModuleSelected,
       plugins: [new ngGridFlexibleHeightPlugin()],
@@ -1336,6 +1345,7 @@ QDR.log.debug("setting linkFields to [] in selectMode")
       ],
       //enableCellSelection: true,
       enableColumnResize: true,
+      jqueryUIDraggable: true,
       multiSelect: false,
       selectedItems: $scope.allLogSelections,
       plugins: [new ngGridFlexibleHeightPlugin()],
@@ -1571,10 +1581,13 @@ QDR.log.debug("setting linkFields to [] in selectMode")
     }
 
     // we are currently connected. setup a handler to get notified if we are ever disconnected
-    QDRService.addDisconnectAction( function () {
-      QDRService.redirectWhenConnected("overview")
-      $scope.$apply();
-    })
+    var onDisconnect = function () {
+QDR.log.info("we were just disconnected while on the overview page. Setting org to redirect back once we are connected again")
+      $timeout(function () {
+        QDRService.redirectWhenConnected("overview")
+      })
+    }
+    QDRService.addDisconnectAction( onDisconnect )
 
     /* --------------------------------------------------
      *
@@ -1858,8 +1871,8 @@ QDR.log.debug("newly created node needs to be activated")
     initTreeAndGrid();
     $scope.$on("$destroy", function( event ) {
       clearTimeout(tickTimer)
+      QDRService.delDisconnectAction( onDisconnect )
       //QDRService.stopUpdating()
-      //QDRService.delUpdatedAction("overview")
     });
 
   }]);

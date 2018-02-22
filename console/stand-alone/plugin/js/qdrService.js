@@ -62,6 +62,13 @@ var QDR = (function(QDR) {
           self.disconnectActions.push(action);
         }
       },
+      delDisconnectAction: function(action) {
+        if (angular.isFunction(action)) {
+          var index = self.disconnectActions.indexOf(action)
+          if (index >= 0)
+            self.disconnectActions.splice(index, 1)
+        }
+      },
       addUpdatedAction: function(key, action) {
         if (angular.isFunction(action)) {
           self.updatedActions[key] = action;
@@ -74,11 +81,11 @@ var QDR = (function(QDR) {
 
       executeConnectActions: function() {
         self.connectActions.forEach(function(action) {
-          //QDR.log.debug("executing connect action " + action);
           try {
             action.apply();
           } catch (e) {
             // in case the page that registered the handler has been unloaded
+            QDR.log.info(e.message)
           }
         });
         self.connectActions = [];
@@ -106,14 +113,14 @@ console.dump(e)
         }
       },
       redirectWhenConnected: function(org) {
-        $location.path("/connect")
+        $location.path(QDR.pluginRoot + "/connect")
         $location.search('org', org);
       },
 
       notifyTopologyDone: function() {
         if (!self.gotTopology) {
           QDR.log.debug("topology was just initialized");
-          console.dump(self.topology._nodeInfo)
+          //console.dump(self.topology._nodeInfo)
           self.gotTopology = true;
           //$rootScope.$apply();
         } else {
@@ -179,7 +186,23 @@ console.dump(e)
 
       onSubscription: function() {
         self.executeConnectActions();
-        //self.getSchema();
+        var org = $location.search()
+        if (org)
+          org = org.org
+        if (org && org.length > 0 && org !== "connect") {
+          self.getSchema(function () {
+            self.setUpdateEntities([])
+            self.topology.get()
+            self.addUpdatedAction('onSub', function () {
+              self.delUpdatedAction('onSub')
+              $timeout( function () {
+                $location.path(QDR.pluginRoot + '/' + org)
+                $location.search('org', null)
+                $location.replace()
+              })
+            })
+          });
+        }
       },
 
       startUpdating: function() {
@@ -206,9 +229,6 @@ console.dump(e)
           QDR.log.info("stopUpdating called")
       },
 
-      initProton: function() {
-        //QDR.log.debug("*************QDR init proton called ************");
-      },
       cleanUp: function() {},
       error: function(line) {
         if (line.num) {
@@ -269,6 +289,9 @@ console.dump(e)
       isLargeNetwork: function () {
         return Object.keys(self.topology._nodeInfo).length >= 12
       },
+      isMSIE: function () {
+        return (document.documentMode || /Edge/.test(navigator.userAgent))
+      },
 
       // given an attribute name array, find the value at the same index in the values array
       valFor: function(aAr, vAr, key) {
@@ -280,11 +303,11 @@ console.dump(e)
       },
 
       isArtemis: function(d) {
-        return d.nodeType === 'route-container' && d.properties.product === 'apache-activemq-artemis';
+        return (d.nodeType === 'route-container' || d.nodeType === 'on-demand') && (d.properties && d.properties.product === 'apache-activemq-artemis');
       },
 
       isQpid: function(d) {
-        return d.nodeType === 'on-demand' && (d.properties && d.properties.product === 'qpid-cpp');
+        return (d.nodeType === 'route-container' || d.nodeType === 'on-demand') && (d.properties && d.properties.product === 'qpid-cpp');
       },
 
       isAConsole: function(properties, connectionId, nodeType, key) {
@@ -324,7 +347,8 @@ console.dump(e)
         function gotMethodResponse(nodeName, entity, response, context) {
           var statusCode = context.message.application_properties.statusCode;
           if (statusCode < 200 || statusCode >= 300) {
-            Core.notification('error', context.message.application_properties.statusDescription);
+            Core.notification('error', context.message.statusDescription);
+            QDR.log.info('Error ' + context.message.statusDescription)
           }
         }
         var attributes = {
@@ -348,7 +372,9 @@ console.dump(e)
         if (addr[0] == 'A') return "area"
         if (addr[0] == 'L') return "local"
         if (addr[0] == 'C') return "link-incoming"
+        if (addr[0] == 'E') return "link-incoming"
         if (addr[0] == 'D') return "link-outgoing"
+        if (addr[0] == 'F') return "link-outgoing"
         if (addr[0] == 'T') return "topo"
         return "unknown: " + addr[0]
       },
@@ -518,10 +544,8 @@ console.dump(e)
             self.topology._getTimer = null
           }
 
-          //QDR.log.debug("starting get topology with correlator.depth of " + self.correlator.depth())
-          //self.topology._lastNodeInfo = angular.copy(self.topology._nodeInfo);
+          //QDR.log.info("starting get topology with correlator.depth of " + self.correlator.depth())
           self.topology._gettingTopo = true;
-
           self.errorText = undefined;
 
           // get the list of nodes to query.
@@ -541,8 +565,8 @@ console.dump(e)
                 var parts = self.receiver.remote.attach.source.address.split('/')
                 parts[4] = '$management'
                 response.push(parts.join('/'))
-                QDR.log.debug("GET-MGMT-NODES returned an empty list. Using ")
-                console.dump(response)
+                //QDR.log.info("GET-MGMT-NODES returned an empty list. Using ")
+                //console.dump(response)
               }
               for (var i=0; i<response.length; ++i) {
                 if (!angular.isDefined(self.topology._nodeInfo[response[i]])) {
@@ -756,12 +780,12 @@ console.dump(e)
 
 
       getSchema: function(callback) {
-        //QDR.log.debug("getting schema");
+        //QDR.log.info("getting schema");
         var ret;
         self.correlator.request(
           ret = self.sendMgmtQuery('GET-SCHEMA')
         ).then(ret.id, function(response) {
-          //QDR.log.debug("Got schema response");
+          //QDR.log.info("Got schema response");
           // remove deprecated
           for (var entityName in response.entityTypes) {
             var entity = response.entityTypes[entityName]
@@ -925,46 +949,54 @@ console.dump(e)
 
       disconnect: function() {
         self.connection.close();
+        self.connected = false
         self.errorText = "Disconnected."
       },
 
       connectionTimer: null,
 
       testConnect: function (options, timeout, callback) {
-        clearTimeout(self.connectionTimer)
         var connection;
+        var allowDelete = true;
         var reconnect = angular.isDefined(options.reconnect) ? options.reconnect : false
         var baseAddress = options.address + ':' + options.port;
         var protocol = "ws"
         if ($location.protocol() === "https")
           protocol = "wss"
-        QDR.log.debug("testConnect called with reconnect " + reconnect + " using " + protocol + " protocol")
+        QDR.log.info("testConnect called with reconnect " + reconnect + " using " + protocol + " protocol")
         try {
-            var ws = self.rhea.websocket_connect(WebSocket);
-            connection = self.rhea.connect({
+          var ws = self.rhea.websocket_connect(WebSocket);
+          connection = self.rhea.connect({
             connection_details: ws(protocol + "://" + baseAddress, ["binary"]),
             reconnect: reconnect,
-            properties: {
-              console_identifier: 'Dispatch console'
+              properties: {
+                console_identifier: 'Dispatch console'
+              }
             }
-          });
+          );
         } catch (e) {
           QDR.log.debug("exception caught on test connect " + e)
           self.errorText = "Connection failed "
           callback({error: e})
           return
         }
-        self.connectionTimer = setTimeout(function () {
-          callback({error: "timedout"})
-        }, timeout)
+        // called when initial connecting fails, and when connection is dropped after connecting
+        connection.on('disconnected', function(context) {
+          if (allowDelete) {
+            delete connection
+            connection.options.reconnect = false
+            //QDR.log.info("connection.on(disconnected) called")
+            callback({error: "failed to connect"})
+          }
+        })
         connection.on("connection_open", function (context) {
-          clearTimeout(self.connectionTimer)
+          allowDelete = false;
           callback({connection: connection, context: context})
         })
       },
 
       connect: function(options) {
-        clearTimeout(self.connectionTimer)
+        var connection;
         self.topologyInitialized = false;
         if (!self.connected) {
           var okay = {
@@ -988,13 +1020,13 @@ console.dump(e)
           }
           var maybeStart = function() {
             if (okay.connection && okay.sender && okay.receiver && self.sendable && !self.connected) {
-              QDR.log.info("okay to start")
+              //QDR.log.info("okay to start")
               self.connected = true;
               self.connection = connection;
               self.sender = sender;
               self.receiver = receiver;
-              self.onSubscription();
               self.gotTopology = false;
+              self.onSubscription();
             }
           }
           var onDisconnect = function() {
@@ -1006,7 +1038,9 @@ console.dump(e)
 
           // called after connection.open event is fired or connection error has happened
           var connectionCallback = function (options) {
+            //QDR.log.info('connectionCallback called')
             if (!options.error) {
+              //QDR.log.info('there was no error')
               connection = options.connection
               self.version = options.context.connection.properties.version
               QDR.log.debug("connection_opened")
@@ -1015,19 +1049,19 @@ console.dump(e)
               okay.sender = false;
 
               connection.on('disconnected', function(context) {
-                QDR.log.debug("connection disconnected")
+                //QDR.log.info("connection.on(disconnected) called")
                 self.errorText = "Unable to connect"
                 onDisconnect();
               })
               connection.on('connection_close', function(context) {
-                QDR.log.debug("connection closed")
+                //QDR.log.info("connection closed")
                 self.errorText = "Disconnected"
                 onDisconnect();
               })
 
               sender = connection.open_sender();
               sender.on('sender_open', function(context) {
-                QDR.log.debug("sender_opened")
+                //QDR.log.info("sender_opened")
                 okay.sender = true
                 maybeStart()
               })
@@ -1043,22 +1077,27 @@ console.dump(e)
                 }
               });
               receiver.on('receiver_open', function(context) {
-                QDR.log.debug("receiver_opened")
-                okay.receiver = true;
-                maybeStart()
+                //QDR.log.info("receiver_opened")
+                if (receiver.remote && receiver.remote.attach && receiver.remote.attach.source) {
+                  okay.receiver = true;
+                  maybeStart()
+                }
               })
               receiver.on("message", function(context) {
                 self.correlator.resolve(context);
               });
+            } else {
+              //QDR.log.info("there was an error " + options.error)
+              self.errorText = "Unable to connect"
+              onDisconnect();
             }
           }
 
           QDR.log.debug("****** calling rhea.connect ********")
-          var connection;
           if (!options.connection) {
             QDR.log.debug("rhea.connect was not passed an existing connection")
             options.reconnect = true
-            self.testConnect(options, 10000, connectionCallback)
+            self.testConnect(options, 5000, connectionCallback)
           } else {
             QDR.log.debug("rhea.connect WAS passed an existing connection")
             connectionCallback(options)
@@ -1094,6 +1133,8 @@ function ngGridFlexibleHeightPlugin (opts) {
         var innerRecalcForData = function () {
             var gridId = self.grid.gridId;
             var footerPanelSel = '.' + gridId + ' .ngFooterPanel';
+            if (!self.grid.$topPanel || !self.grid.$canvas)
+              return;
             var extraHeight = self.grid.$topPanel.height() + $(footerPanelSel).height();
             var naturalHeight = self.grid.$canvas.height() + 1;
             if (opts != null) {
@@ -1124,4 +1165,67 @@ function ngGridFlexibleHeightPlugin (opts) {
         self.scope.$watch('catHashKeys()', innerRecalcForData);
         self.scope.$watch(self.grid.config.data, recalcHeightForData);
     };
+}
+
+if (!String.prototype.startsWith) {
+  String.prototype.startsWith = function (searchString, position) {
+    return this.substr(position || 0, searchString.length) === searchString
+  }
+}
+
+if (!String.prototype.endsWith) {
+  String.prototype.endsWith = function(searchString, position) {
+      var subjectString = this.toString();
+      if (typeof position !== 'number' || !isFinite(position) || Math.floor(position) !== position || position > subjectString.length) {
+        position = subjectString.length;
+      }
+      position -= searchString.length;
+      var lastIndex = subjectString.lastIndexOf(searchString, position);
+      return lastIndex !== -1 && lastIndex === position;
+  };
+}
+
+// https://tc39.github.io/ecma262/#sec-array.prototype.findIndex
+if (!Array.prototype.findIndex) {
+  Object.defineProperty(Array.prototype, 'findIndex', {
+    value: function(predicate) {
+     // 1. Let O be ? ToObject(this value).
+      if (this == null) {
+        throw new TypeError('"this" is null or not defined');
+      }
+
+      var o = Object(this);
+
+      // 2. Let len be ? ToLength(? Get(O, "length")).
+      var len = o.length >>> 0;
+
+      // 3. If IsCallable(predicate) is false, throw a TypeError exception.
+      if (typeof predicate !== 'function') {
+        throw new TypeError('predicate must be a function');
+      }
+
+      // 4. If thisArg was supplied, let T be thisArg; else let T be undefined.
+      var thisArg = arguments[1];
+
+      // 5. Let k be 0.
+      var k = 0;
+
+      // 6. Repeat, while k < len
+      while (k < len) {
+        // a. Let Pk be ! ToString(k).
+        // b. Let kValue be ? Get(O, Pk).
+        // c. Let testResult be ToBoolean(? Call(predicate, T, « kValue, k, O »)).
+        // d. If testResult is true, return k.
+        var kValue = o[k];
+        if (predicate.call(thisArg, kValue, k, o)) {
+          return k;
+        }
+        // e. Increase k by 1.
+        k++;
+      }
+
+      // 7. Return -1.
+      return -1;
+    }
+  });
 }
