@@ -2,3 +2,4 @@ qdrouterd: arch-dependent-file-not-in-arch-specific-directory usr/lib/qpid-dispa
 qdrouterd: arch-dependent-file-not-in-arch-specific-directory usr/sbin/qdrouterd
 qdrouterd: binary-without-manpage usr/sbin/qdrouterd
 qdrouterd: pkg-has-shlibs-control-file-but-no-actual-shared-libs
+qdrouterd: postinst-has-useless-call-to-ldconfig
