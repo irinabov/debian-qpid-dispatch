@@ -374,7 +374,7 @@
             "singleton": true,
             "attributes": {
                 "id": {
-                    "description":"Router's unique identity. One of id or routerId is required. The router will fail to start without id or routerId",
+                    "description":"Router's unique identity. The router will fail to start without id.",
                     "type": "string",
                     "required": false,
                     "create": true
@@ -457,7 +457,7 @@
                     "description":"Number of open connections to the router node.",
                     "graph": true
                 },
-                                                                
+
                 "workerThreads": {
                     "type": "integer",
                     "default": 4,
@@ -484,19 +484,19 @@
                     "required": false,
                     "create": true
                 },
-                "routerId": {
-                    "description":"(DEPRECATED) Router's unique identity. This attribute has been deprecated. Use id instead",
-                    "type": "string",
+                "allowUnsettledMulticast": {
+                    "type": "boolean",
+                    "description": "If true, allow senders to send unsettled deliveries to multicast addresses.  These deliveries shall be settled by the ingress router.  If false, unsettled deliveries to multicast addresses shall be rejected.",
+                    "create": true,
                     "required": false,
-                    "deprecated": true,
-                    "create": true
+                    "default": false
                 },
-                "mobileAddrMaxAge": {
-                    "type": "integer",
-                    "default": 60,
-                    "deprecated": true,
-                    "description": "(DEPRECATED) This value is no longer used in the router.",
-                    "create": true
+                "defaultDistribution": {
+                    "type": ["multicast", "closest", "balanced", "unavailable"],
+                    "description": "Default forwarding treatment for any address without a specified treatment. multicast - one copy of each message delivered to all subscribers; closest - messages delivered to only the closest subscriber; balanced - messages delivered to one subscriber with load balanced across subscribers; unavailable - this address is unavailable, link attaches to an address of unavilable distribution will be rejected.",
+                    "create": true,
+                    "required": false,
+                    "default": "balanced"
                 }
             }
         },
@@ -507,6 +507,11 @@
             "extends": "configurationEntity",
             "operations": ["CREATE", "DELETE"],
             "attributes": {
+                "ciphers": {
+                    "type": "string",
+                    "description": "Specifies the enabled ciphers so the SSL Ciphers can be hardened. In other words, use this field to disable weak ciphers. The ciphers are specified in the format understood by the OpenSSL library. For example, ciphers can be set to ALL:!aNULL:!EXPORT56:RC4+RSA:+HIGH:+MEDIUM:+LOW:+SSLv2:+EXP; -- The full list of allowed ciphers can be viewed using the openssl ciphers command",
+                    "create": true
+                },            
                 "certDb": {
                     "type": "path",
                     "description": "The absolute path to the database that contains the public certificates of trusted certificate authorities (CA).",
@@ -549,15 +554,42 @@
             }
         },
 
+        "authServicePlugin": {
+            "description":"EXPERIMENTAL. Attributes for setting SASL plugin.",
+            "referential": true,
+            "extends": "configurationEntity",
+            "operations": ["CREATE", "DELETE"],
+            "attributes": {
+                "authService": {
+                    "type": "string",
+                    "description": "Address of a service to delegate authentication to.",
+                    "required": true,
+                    "create": true
+                },
+                "saslInitHostname": {
+                    "type": "string",
+                    "description": "Value to set for hostname field on sasl-init",
+                    "required": false,
+                    "create": true
+                },
+                "authSslProfile": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Name of the sslProfile to use for the authentication service.",
+                    "create": true
+                }
+            }
+        },
+
         "listener": {
             "description": "Listens for incoming connections to the router.",
             "extends": "configurationEntity",
             "operations": ["CREATE", "DELETE"],
             "attributes": {
                 "host": {
-                    "description":"IP address: ipv4 or ipv6 literal or a host name",
+                    "description":"A host name, IPV4 or IPV6 literal, or the empty string. The empty string listens on all local addresses. A host name listens on all addresses associated with the name. An IPV6 literal address (or wildcard '[::]') listens only for IPV6. An IPV4 literal address (or wildcard '0.0.0.0') listens only for IPV4.",
                     "type": "string",
-                    "default": "127.0.0.1",
+                    "default": "",
                     "create": true
                 },
                 "port": {
@@ -577,16 +609,15 @@
                     "type": [
                         "normal",
                         "inter-router",
-                        "route-container",
-                        "on-demand"
+                        "route-container"
                     ],
                     "default": "normal",
-                    "description": "The role of an established connection. In the normal role, the connection is assumed to be used for AMQP clients that are doing normal message delivery over the connection.  In the inter-router role, the connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections. route-container role can be used for router-container connections, for example, a router-broker connection. on-demand role has been deprecated.",
+                    "description": "The role of an established connection. In the normal role, the connection is assumed to be used for AMQP clients that are doing normal message delivery over the connection.  In the inter-router role, the connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections. route-container role can be used for router-container connections, for example, a router-broker connection.",
                     "create": true
                 },
                 "cost": {
                     "type": "integer",
-                    "default": "1",
+                    "default": 1,
                     "required": false,
                     "create": true,
                     "description": "For the 'inter-router' role only.  This value assigns a cost metric to the inter-router connection.  The default (and minimum) value is one.  Higher values represent higher costs.  The cost is used to influence the routing algorithm as it attempts to use the path with the lowest total cost from ingress to egress."
@@ -607,6 +638,12 @@
                     "type": "boolean",
                     "default": false,
                     "description": "yes: Require the peer's identity to be authenticated; no: Do not require any authentication.",
+                    "create": true
+                },
+                "saslPlugin": {
+                    "type": "string",
+                    "required": false,
+                    "description": "EXPERIMENTAL. Name of the a sasl plugin configuration section to use for this listener (e.g. authServicePlugin).",
                     "create": true
                 },
                 "requireEncryption": {
@@ -648,6 +685,14 @@
                     "type": "integer",
                     "default": 16,
                     "description": "The idle timeout, in seconds, for connections through this listener.  If no frames are received on the connection for this time interval, the connection shall be closed.",
+                    "required": false,
+                    "create": true
+                },
+                "initialHandshakeTimeoutSeconds": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "The timeout, in seconds, for the initial handshake for connections coming in through listeners.  If the time interval expires before the peer sends the AMQP OPEN frame, the connection shall be closed.  A value of zero (the default) disables this timeout.",
+                    "required": false,
                     "create": true
                 },
                 "stripAnnotations": {
@@ -675,35 +720,10 @@
                     "required": false,
                     "description": "A comma-separated list of failover urls to be supplied to connected clients.  Form: [(amqp|amqps|ws|wss)://]host_or_ip[:port]"
                 },
-                "addr": {
-                    "description":"(DEPRECATED)IP address: ipv4 or ipv6 literal or a host name. This attribute has been deprecated. Use host instead",
-                    "deprecated": true,
-                    "type": "string",
-                    "default": "127.0.0.1",
-                    "create": true
-                },
-                "allowNoSasl": {
-                    "type": "boolean",
-                    "create": true,
-                    "deprecated": true,
-                    "description": "(DEPRECATED) This attribute is now controlled by the authenticatePeer attribute."
-                },
-                "requirePeerAuth": {
-                    "type": "boolean",
-                    "create": true,
-                    "deprecated": true,
-                    "description": "(DEPRECATED) This attribute is now controlled by the authenticatePeer attribute."
-                },
-                "allowUnsecured": {
-                    "type": "boolean",
-                    "create": true,
-                    "deprecated": true,
-                    "description": "(DEPRECATED) This attribute is now controlled by the requireEncryption attribute."
-                },
                 "http": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Accept HTTP connections that can upgrade to AMQP over WebSocket",
+                    "description": "Accept HTTP connections that can upgrade to AMQP over WebSocket. Plain AMQP connections are not accepted on this listener.",
                     "create": true
                 },
                 "httpRoot": {
@@ -716,7 +736,7 @@
                     "default": "none",
                     "description": "A comma separated list that indicates which components of the message should be logged. Defaults to 'none' (log nothing). If you want all properties and application properties of the message logged use 'all'. Specific components of the message can be logged by indicating the components via a comma separated list. The components are message-id, user-id, to, subject, reply-to, correlation-id, content-type, content-encoding, absolute-expiry-time, creation-time, group-id, group-sequence, reply-to-group-id, app-properties. The application-data part of the bare message will not be logged. No spaces are allowed",
                     "create": true
-                }                                                             
+                }
             }
         },
 
@@ -749,11 +769,10 @@
                     "type": [
                         "normal",
                         "inter-router",
-                        "route-container",
-                        "on-demand"
+                        "route-container"
                     ],
                     "default": "normal",
-                    "description": "The role of an established connection. In the normal role, the connection is assumed to be used for AMQP clients that are doing normal message delivery over the connection.  In the inter-router role, the connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections. route-container role can be used for router-container connections, for example, a router-broker connection. on-demand role has been deprecated.",
+                    "description": "The role of an established connection. In the normal role, the connection is assumed to be used for AMQP clients that are doing normal message delivery over the connection.  In the inter-router role, the connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections. route-container role can be used for router-container connections, for example, a router-broker connection.",
                     "create": true
                 },
                 "cost": {
@@ -836,19 +855,18 @@
                     "create": true,
                     "hidden": true
                 },
-                "addr": {
-                    "description":"(DEPRECATED)IP address: ipv4 or ipv6 literal or a host name. This attribute has been deprecated. Use host instead",
-                    "deprecated": true,
-                    "type": "string",
-                    "default": "127.0.0.1",
-                    "create": true
-                },
                 "logMessage": {
                     "type": "string",
                     "default": "none",
-                    "description": "A comma separated list that indicates which components of the message should be logged. Defaults to 'none' (log nothing). If you want all properties and application properties of the message logged use 'all'. Specific components of the message can be logged by indicating the components via a comma separated list. The components are message-id, user-id, to, subject, reply-to, correlation-id, content-type, content-encoding, absolute-expiry-time, creation-time, group-id, group-sequence, reply-to-group-id, app-properties. The application-data part of the bare message will not be logged. No spaces are allowed",
+                    "description": "A comma separated list that indicates which components of the message should be logged (no spaces allowed between list components). Defaults to 'none' (log nothing). If you want all properties and application properties of the message logged use 'all'. Specific components of the message can be logged by indicating the components via a comma separated list. The components are message-id, user-id, to, subject, reply-to, correlation-id, content-type, content-encoding, absolute-expiry-time, creation-time, group-id, group-sequence, reply-to-group-id, app-properties. The application-data part of the bare message will not be logged. This log message is written to the MESSAGE logging module. In the 'log' entity, set 'module' property to MESSAGE or DEFAULT and 'enable' to trace+ to see this log message",
                     "create": true
-                }
+                },
+                "failoverList": {
+                    "type": "string",
+                    "description": "A read-only, comma-separated list of failover urls. ",
+                    "create": false
+                    
+                }            
             }
         },
 
@@ -944,12 +962,18 @@
             "attributes": {
                 "prefix": {
                     "type": "string",
-                    "description": "The address prefix for the configured settings",
+                    "description": "The address prefix for the configured settings. Cannot be used with a pattern attribute.",
                     "create": true,
-                    "required": true
+                    "required": false
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "A wildcarded pattern for address matching. Incoming addresses are matched against this pattern. Matching addresses use the configured settings. The pattern consists of one or more tokens separated by a forward slash '/'. A token can be one of the following: a * character, a # character, or a sequence of characters that do not include /, *, or #.  The * token matches any single token.  The # token matches zero or more tokens. * has higher precedence than #, and exact match has the highest precedence. Cannot be used with a prefix attribute.",
+                    "create": true,
+                    "required": false
                 },
                 "distribution": {
-                    "type": ["multicast", "closest", "balanced"],
+                    "type": ["multicast", "closest", "balanced", "unavailable"],
                     "description": "Treatment of traffic associated with the address",
                     "create": true,
                     "required": false,
@@ -978,15 +1002,21 @@
         },
 
         "router.config.linkRoute": {
-            "description": "Entity type for link-route configuration.  This is used to identify remote containers that shall be destinations for routed link-attaches.  The link-routing configuration applies to an addressing space defined by a prefix.",
+            "description": "Entity type for link-route configuration.  This is used to identify remote containers that shall be destinations for routed link-attaches.  The link-routing configuration applies to an addressing space defined by a prefix or a pattern.",
             "extends": "configurationEntity",
             "operations": ["CREATE", "DELETE"],
             "attributes": {
                 "prefix": {
                     "type": "string",
-                    "description": "The address prefix for the configured settings",
+                    "description": "The address prefix for the configured settings. Cannot be used with the pattern attribute.",
                     "create": true,
-                    "required": true
+                    "required": false
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "A wildcarded pattern for address matching. Link addresses are matched against this pattern. Matching addresses use the configured settings. The pattern consists of one or more tokens separated by a forward slash '/'. A token can be one of the following: a * character, a # character, or a sequence of characters that do not include /, *, or #.  The * token matches any single token.  The # token matches zero or more tokens. * has higher precedence than #, and exact match has the highest precedence. Cannot be used with the prefix attribute.",
+                    "create": true,
+                    "required": false
                 },
                 "containerId": {
                     "type": "string",
@@ -1165,8 +1195,8 @@
             "extends": "operationalEntity",
             "attributes": {
                 "distribution": {
-                    "type": ["flood", "multicast", "closest", "balanced", "linkBalanced"],
-                    "description": "Forwarding treatment for the address: flood - messages delivered to all subscribers along all available paths (this will cause duplicate deliveries if there are redundant paths); multi - one copy of each message delivered to all subscribers; anyClosest - messages delivered to only the closest subscriber; anyBalanced - messages delivered to one subscriber with load balanced across subscribers; linkBalanced - for link-routing, link attaches balanced across destinations."
+                    "type": ["flood", "multicast", "closest", "balanced", "linkBalanced", "unavailable"],
+                    "description": "Forwarding treatment for the address: flood - messages delivered to all subscribers along all available paths (this will cause duplicate deliveries if there are redundant paths); multicast - one copy of each message delivered to all subscribers; closest - messages delivered to only the closest subscriber; balanced - messages delivered to one subscriber with load balanced across subscribers; linkBalanced - for link-routing, link attaches balanced across destinations; unavailable - this address is unavailable, link attaches to an address of unavailable distribution will be rejected."
                 },
                 "inProcess": {
                     "type": "integer",
@@ -1361,9 +1391,10 @@
         },
 
         "console": {
-            "description": "Start a websocket/tcp proxy and http file server to serve the web console",
+            "description": "(DEPRECATED) Start a websocket/tcp proxy and http file server to serve the web console",
             "extends": "configurationEntity",
             "singleton": true,
+            "deprecated": true,
             "attributes": {
                 "listener": {
                     "type": "string",
@@ -1376,10 +1407,12 @@
                 },
                 "proxy": {
                     "type": "string",
+                    "required": true,
                     "description": "The full path to the proxy program to run."
                  },
                 "home": {
                     "type": "string",
+                    "required": true,
                     "description": "The full path to the html/css/js files for the console."
                 },
                 "args": {
@@ -1481,7 +1514,7 @@
                 }
             }
         },
-
+        
         "vhostStats": {
             "description": "Virtual host connection and access statistics.",
             "extends": "operationalEntity",
@@ -1507,148 +1540,7 @@
                 "receiverDenied": {"type": "integer", "graph": true}
             }
         },
-
-        "container": {
-            "description":"(DEPRECATED)Attributes related to the AMQP container. This entity has been deprecated. Use the router entity instead.",
-            "extends": "configurationEntity",
-            "deprecated": true,
-            "singleton": true,
-            "attributes": {
-
-                "containerName": {
-                    "type": "string",
-                    "description": "The  name of the AMQP container.  If not specified, the container name will be set to a value of the container's choosing.  The automatically assigned container name is not guaranteed to be persistent across restarts of the container.",
-                    "create": true
-
-                },
-                "workerThreads": {
-                    "type": "integer",
-                    "default": 4,
-                    "description": "The number of threads that will be created to process message traffic and other application work (timers, non-amqp file descriptors, etc.) .",
-                    "create": true
-
-                },
-                "debugDump": {
-                    "type": "path",
-                    "description": "A file to dump debugging information that can't be logged normally.",
-                    "create": true
-
-                },
-                "saslConfigPath": {
-                    "type": "path",
-                    "description": "Absolute path to the SASL configuration file.",
-                    "required": false,
-                    "create": true
-                },
-                "saslConfigName": {
-                    "type": "string",
-                    "description": "Name of the SASL configuration.  This string + '.conf' is the name of the configuration file.",
-                    "required": false,
-                    "create": true
-                }
-            }
-        },
-
-        "waypoint": {
-            "description":"(DEPRECATED) A remote node that messages for an address pass through. This entity has been deprecated. Use autoLink instead",
-            "deprecated": true,
-            "extends": "configurationEntity",
-            "operations": ["CREATE", "DELETE"],
-            "attributes": {
-                "address": {
-                    "description":"The AMQP address of the waypoint.",
-                    "type": "string",
-                    "required": true,
-                    "create": true
-                },
-                "connector": {
-                    "description":"The name of the on-demand connector used to reach the waypoint's container.",
-                    "type": "string",
-                    "required": true,
-                    "create": true
-                },
-                "inPhase": {
-                    "description":"The phase of the address as it is routed _to_ the waypoint.",
-                    "type": "integer",
-                    "default": -1,
-                    "create": true
-                },
-                "outPhase": {
-                    "description":"The phase of the address as it is routed _from_ the waypoint.",
-                    "type": "integer",
-                    "default": -1,
-                    "create": true
-                }
-            }
-        },
-
-        "fixedAddress": {
-            "description":"(DEPRECATED) Establishes treatment for addresses starting with a prefix. This entity has been deprecated. Use address instead",
-            "extends": "configurationEntity",
-            "deprecated": true,
-            "operations": ["CREATE"],
-            "attributes": {
-                "prefix": {
-                    "type": "string",
-                    "required": true,
-                    "description": "The address prefix (always starting with '/').",
-                    "create": true
-                },
-                "phase": {
-                    "type": "integer",
-                    "description": "The phase of a multi-hop address passing through one or more waypoints.",
-                    "create": true
-                },
-                "fanout": {
-                    "type": [
-                        "multiple",
-                        "single"
-                    ],
-                    "default": "multiple",
-                    "description": "One of 'multiple' or 'single'.  Multiple fanout is a non-competing pattern.  If there are multiple consumers using the same address, each consumer will receive its own copy of every message sent to the address.  Single fanout is a competing pattern where each message is sent to only one consumer.",
-                    "create": true
-                },
-                "bias": {
-                    "type": [
-                        "closest",
-                        "spread"
-                    ],
-                    "default": "closest",
-                    "description": "Only if fanout is single.  One of 'closest' or 'spread'.  Closest bias means that messages to an address will always be delivered to the closest (lowest cost) subscribed consumer. Spread bias will distribute the messages across subscribers in an approximately even manner.",
-                    "create": true
-                }
-            }
-        },
-
-        "linkRoutePattern": {
-            "description":"(DEPRECATED) An address pattern to match against link sources and targets to cause the router to link-route the attach across the network to a remote node. This entity has been deprecated. Use linkRoute instead",
-            "deprecated": true,
-            "extends": "configurationEntity",
-            "operations": ["CREATE"],
-            "attributes": {
-                "prefix": {
-                    "description":"An address prefix to match against target and source addresses.  This pattern must be of the form '<text>.<text1>.<textN>' or '<text>' or '<text>.' and matches any address that contains that prefix.  For example, if the prefix is set to org.apache (or org.apache.), any address that has the prefix 'org.apache'  (like org.apache.dev) will match. Note that a prefix must not start with a (.), can end in a (.) and can contain zero or more dots (.).  Any characters between the dots are simply treated as part of the address",
-                    "type": "string",
-                    "required": true,
-                    "create": true
-                },
-                "dir": {
-                    "description":"Link direction for match: 'in' matches only links inbound to the client; 'out' matches only links outbound from the client; 'both' matches any link.",
-                    "type": ["in", "out", "both"],
-                    "required": false,
-                    "default": "both",
-                    "create": true
-                },
-                "connector": {
-                    "description":"The name of the on-demand connector used to reach the target node's container.  If this value is not provided, it means that the target container is expected to be connected to a different router in the network.  This prevents links to a link-routable address from being misinterpreted as message-routing links when there is no route to a valid destination available.",
-                    "type": "string",
-                    "required": false,
-                    "default": "",
-                    "create": true
-                }
-            }
-        },
-
+        
         "dummy": {
             "description": "Dummy entity for test purposes.",
             "extends": "entity",

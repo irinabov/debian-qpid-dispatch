@@ -17,18 +17,18 @@
  * under the License.
  */
 
-#include "alloc.h"
-
+#include <qpid/dispatch/alloc.h>
 #include <qpid/dispatch.h>
 #include <qpid/dispatch/buffer.h>
 #include <stdio.h>
 
 int tool_tests(void);
-int timer_tests(void);
+int timer_tests(qd_dispatch_t*);
 int alloc_tests(void);
 int compose_tests(void);
 int policy_tests(void);
 int failoverlist_tests(void);
+int parse_tree_tests(void);
 
 int main(int argc, char** argv)
 {
@@ -52,7 +52,7 @@ int main(int argc, char** argv)
         printf("Config failed: %s\n", qd_error_message());
         return 1;
     }
-    result += timer_tests();
+    result += timer_tests(qd);
     result += tool_tests();
     result += compose_tests();
 #if USE_MEMORY_POOL
@@ -60,6 +60,8 @@ int main(int argc, char** argv)
 #endif
     result += policy_tests();
     result += failoverlist_tests();
+    result += parse_tree_tests();
+
     qd_dispatch_free(qd);       // dispatch_free last.
 
     return result;

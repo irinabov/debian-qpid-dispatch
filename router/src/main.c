@@ -38,42 +38,26 @@ static const char* argv0 = 0;
 
 /**
  * This is the OS signal handler, invoked on an undetermined thread at a completely
- * arbitrary point of time.  It is not safe to do anything here but signal the dispatch
- * server with the signal number.
+ * arbitrary point of time.
  */
 static void signal_handler(int signum)
 {
-    qd_server_signal(dispatch, signum);
-}
-
-
-/**
- * This signal handler is called cleanly by one of the server's worker threads in
- * response to an earlier call to qd_server_signal.
- */
-static void server_signal_handler(void* context, int signum)
-{
-    qd_server_pause(dispatch);
-
+    /* Ignore future signals, dispatch may already be freed */
+    signal(SIGHUP,  SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
+    signal(SIGTERM, SIG_IGN);
+    signal(SIGINT,  SIG_IGN);
     switch (signum) {
     case SIGINT:
         exit_with_sigint = 1;
         // fallthrough
-
     case SIGQUIT:
     case SIGTERM:
-        fflush(stdout);
-        qd_server_stop(dispatch);
+        qd_server_stop(dispatch); /* qpid_server_stop is signal-safe */
         break;
-
-    case SIGHUP:
-        break;
-
     default:
         break;
     }
-
-    qd_server_resume(dispatch);
 }
 
 static void check(int fd) {
@@ -109,9 +93,6 @@ static void main_process(const char *config_path, const char *python_pkgdir, int
     qd_dispatch_load_config(dispatch, config_path);
     check(fd);
 
-    (void)server_signal_handler; (void)signal_handler;
-    qd_server_set_signal_handler(dispatch, server_signal_handler, 0);
-
     signal(SIGHUP,  signal_handler);
     signal(SIGQUIT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -133,6 +114,7 @@ static void main_process(const char *config_path, const char *python_pkgdir, int
     dispatch = NULL;
     qd_dispatch_free(d);
 
+    fflush(stdout);
     if (exit_with_sigint) {
         signal(SIGINT, SIG_DFL);
         kill(getpid(), SIGINT);
@@ -314,7 +296,7 @@ int main(int argc, char **argv)
             exit(0);
 
         case 'v' :
-            fprintf(stdout, "Qpid Dispatch Router %s\n", QPID_DISPATCH_VERSION);
+            fprintf(stdout, "%s\n", QPID_DISPATCH_VERSION);
             exit(0);
 
         case '?' :

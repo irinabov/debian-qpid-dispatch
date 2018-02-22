@@ -18,6 +18,7 @@
  */
 
 #include "router_core_private.h"
+#include "route_control.h"
 #include <stdio.h>
 
 static void qdr_add_router_CT        (qdr_core_t *core, qdr_action_t *action, bool discard);
@@ -220,6 +221,9 @@ void qdr_route_table_setup_CT(qdr_core_t *core)
     core->addr_hash    = qd_hash(12, 32, 0);
     core->conn_id_hash = qd_hash(6, 4, 0);
     core->cost_epoch   = 1;
+    core->addr_parse_tree = qd_parse_tree_new();
+    core->link_route_tree[QD_INCOMING] = qd_parse_tree_new();
+    core->link_route_tree[QD_OUTGOING] = qd_parse_tree_new();
 
     if (core->router_mode == QD_ROUTER_MODE_INTERIOR) {
         core->hello_addr      = qdr_add_local_address_CT(core, 'L', "qdhello",     QD_TREATMENT_MULTICAST_FLOOD);
@@ -272,20 +276,22 @@ static void qdr_add_router_CT(qdr_core_t *core, qdr_action_t *action, bool disca
         qd_iterator_reset_view(iter, ITER_VIEW_ADDRESS_HASH);
         qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
 
-        if (addr) {
-            qd_log(core->log, QD_LOG_CRITICAL, "add_router: Data inconsistency for router-maskbit %d", router_maskbit);
-            assert(addr == 0);  // Crash in debug mode.  This should never happen
-            break;
+        if (!addr) {
+            //
+            // Create an address record for this router and insert it in the hash table.
+            // This record will be found whenever a "foreign" topological address to this
+            // remote router is looked up.
+            //
+            addr = qdr_address_CT(core, QD_TREATMENT_ANYCAST_CLOSEST);
+            qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
+            DEQ_INSERT_TAIL(core->addrs, addr);
         }
 
         //
-        // Create an address record for this router and insert it in the hash table.
-        // This record will be found whenever a "foreign" topological address to this
-        // remote router is looked up.
+        // Set the block-deletion flag on this address for the time that it is associated
+        // with an existing remote router node.
         //
-        addr = qdr_address_CT(core, QD_TREATMENT_ANYCAST_CLOSEST);
-        qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
-        DEQ_INSERT_TAIL(core->addrs, addr);
+        addr->block_deletion = true;
 
         //
         // Create a router-node record to represent the remote router.
@@ -377,10 +383,15 @@ static void qdr_del_router_CT(qdr_core_t *core, qdr_action_t *action, bool disca
     assert(rnode->ref_count == 0);
 
     //
-    // Free the router node and the owning address records.
+    // Free the router node.
     //
     qdr_router_node_free(core, rnode);
-    qdr_core_remove_address(core, oaddr);
+
+    //
+    // Check the address and free it if there are no other interested parties tracking it
+    //
+    oaddr->block_deletion = false;
+    qdr_check_addr_CT(core, oaddr, false);
 }
 
 
@@ -414,6 +425,7 @@ static void qdr_set_link_CT(qdr_core_t *core, qdr_action_t *action, bool discard
     //
     qdr_node_t *rnode = core->routers_by_mask_bit[router_maskbit];
     rnode->link_mask_bit = link_maskbit;
+    qdr_addr_start_inlinks_CT(core, rnode->owning_addr);
 }
 
 
@@ -464,6 +476,7 @@ static void qdr_set_next_hop_CT(qdr_core_t *core, qdr_action_t *action, bool dis
     if (router_maskbit != nh_router_maskbit) {
         qdr_node_t *rnode = core->routers_by_mask_bit[router_maskbit];
         rnode->next_hop   = core->routers_by_mask_bit[nh_router_maskbit];
+        qdr_addr_start_inlinks_CT(core, rnode->owning_addr);
     }
 }
 
@@ -566,6 +579,14 @@ static void qdr_map_destination_CT(qdr_core_t *core, qdr_action_t *action, bool 
             qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
             DEQ_ITEM_INIT(addr);
             DEQ_INSERT_TAIL(core->addrs, addr);
+            // if the address is a link route, add the pattern to the wildcard
+            // address parse tree
+            {
+                const char *a_str = (const char *)qd_hash_key_by_handle(addr->hash_handle);
+                if (QDR_IS_LINK_ROUTE(a_str[0])) {
+                    qdr_link_route_map_pattern_CT(core, iter, addr);
+                }
+            }
         }
 
         qdr_node_t *rnode = core->routers_by_mask_bit[router_maskbit];
@@ -605,12 +626,11 @@ static void qdr_unmap_destination_CT(qdr_core_t *core, qdr_action_t *action, boo
         qdr_address_t *addr  = 0;
 
         qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
-
         if (!addr) {
             qd_log(core->log, QD_LOG_CRITICAL, "unmap_destination: Address not found");
             break;
         }
-
+        
         qd_bitmask_clear_bit(addr->rnodes, router_maskbit);
         rnode->ref_count--;
         addr->cost_epoch--;

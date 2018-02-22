@@ -33,8 +33,16 @@
  * AMQP Constants
  */
 typedef enum {
-    QD_AMQP_MIN_MAX_FRAME_SIZE = 512
+    QD_AMQP_MIN_MAX_FRAME_SIZE = 512,
+    QD_AMQP_PORT_INT = 5672,
+    QD_AMQPS_PORT_INT = 5671
 } qd_amqp_constants_t;
+
+extern const char * const QD_AMQP_PORT_STR;
+extern const char * const QD_AMQPS_PORT_STR;
+
+/* Returns -1 if string is not a number or recognized symbolic port name */
+int qd_port_int(const char* port_str);
 
 /**
  * AMQP Performative Tags
@@ -104,6 +112,9 @@ extern const char * const QD_MA_TRACE;    ///< Trace
 extern const char * const QD_MA_TO;       ///< To-Override
 extern const char * const QD_MA_PHASE;    ///< Phase for override address
 extern const char * const QD_MA_CLASS;    ///< Message-Class
+extern const int          QD_MA_MAX_KEY_LEN;  ///< strlen of longest key name
+extern const int          QD_MA_N_KEYS;       ///< number of router annotation keys
+extern const int          QD_MA_FILTER_LEN;   ///< size of annotation filter buffer
 /// @}
 
 /** @name Container Capabilities */
@@ -165,6 +176,5 @@ extern const char * const QD_AMQP_COND_ILLEGAL_STATE;
 extern const char * const QD_AMQP_COND_FRAME_SIZE_TOO_SMALL;
 /// @};
 
-/// Name for AMQP conditions from the router that don't have a more specific name.
-extern const char * const QD_COND;
+
 #endif

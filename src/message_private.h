@@ -20,7 +20,7 @@
  */
 
 #include <qpid/dispatch/message.h>
-#include "alloc.h"
+#include <qpid/dispatch/alloc.h>
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/atomic.h>
 
@@ -68,6 +68,7 @@ typedef struct {
     sys_mutex_t         *lock;
     sys_atomic_t         ref_count;                       // The number of messages referencing this
     qd_buffer_list_t     buffers;                         // The buffer chain containing the message
+    qd_buffer_t         *pending;                         // Buffer owned by and filled by qd_message_receive
     qd_field_location_t  section_message_header;          // The message header list
     qd_field_location_t  section_delivery_annotation;     // The delivery annotation map
     qd_field_location_t  section_message_annotation;      // The message annotation map
@@ -75,6 +76,7 @@ typedef struct {
     qd_field_location_t  section_application_properties;  // The application properties list
     qd_field_location_t  section_body;                    // The message body: Data
     qd_field_location_t  section_footer;                  // The footer
+    qd_field_location_t  field_user_annotations;          // Opaque user message annotations, not a real field.
     qd_field_location_t  field_message_id;                // The string value of the message-id
     qd_field_location_t  field_user_id;                   // The string value of the user-id
     qd_field_location_t  field_to;                        // The string value of the to field
@@ -93,16 +95,40 @@ typedef struct {
     qd_buffer_t         *parse_buffer;
     unsigned char       *parse_cursor;
     qd_message_depth_t   parse_depth;
-    qd_parsed_field_t   *parsed_message_annotations;
+    qd_iterator_t       *ma_field_iter_in;                // 'message field iterator' for msg.FIELD_MESSAGE_ANNOTATION
+
+    qd_iterator_pointer_t ma_user_annotation_blob;        // Original user annotations
+                                                          // with router annotations stripped
+    uint32_t             ma_count;                        // Number of map elements in blob
+                                                          // after the router fields stripped
+    qd_parsed_field_t   *ma_pf_ingress;
+    qd_parsed_field_t   *ma_pf_phase;
+    qd_parsed_field_t   *ma_pf_to_override;
+    qd_parsed_field_t   *ma_pf_trace;
+    int                  ma_int_phase;
+    sys_atomic_t         fanout;                         // The number of receivers for this message. This number does not include in-process subscribers.
+    qd_link_t           *input_link;                     // message received on this link
+
+    bool                 ma_parsed;                      // have parsed annotations in incoming message
+    bool                 discard;                        // Should this message be discarded?
+    bool                 receive_complete;               // true if the message has been completely received, false otherwise
+    bool                 q2_input_holdoff;               // hold off calling pn_link_recv
+    bool                 aborted;                        // receive completed with abort flag set
 } qd_message_content_t;
 
 typedef struct {
     DEQ_LINKS(qd_message_t);   // Deque linkage that overlays the qd_message_t
-    qd_message_content_t *content;
+    qd_iterator_pointer_t cursor;          // A pointer to the current location of the outgoing byte stream.
+    qd_message_depth_t    message_depth;   // What is the depth of the message that has been received so far
+    qd_message_depth_t    sent_depth;      // How much of the message has been sent?  QD_DEPTH_NONE means nothing has been sent so far, QD_DEPTH_HEADER means the header has already been sent, dont send it again and so on.
+    qd_message_content_t *content;         // The actual content of the message. The content is never copied
     qd_buffer_list_t      ma_to_override;  // to field in outgoing message annotations.
     qd_buffer_list_t      ma_trace;        // trace list in outgoing message annotations
     qd_buffer_list_t      ma_ingress;      // ingress field in outgoing message annotations
     int                   ma_phase;        // phase for the override address
+    bool                  strip_annotations_in;
+    bool                  send_complete;   // Has the message been completely received and completely sent?
+    bool                  tag_sent;        // Tags are sent
 } qd_message_pvt_t;
 
 ALLOC_DECLARE(qd_message_t);
@@ -112,6 +138,8 @@ ALLOC_DECLARE(qd_message_content_t);
 
 /** Initialize logging */
 void qd_message_initialize();
+
+qd_iterator_pointer_t qd_message_cursor(qd_message_pvt_t *msg);
 
 ///@}
 

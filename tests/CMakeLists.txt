@@ -29,9 +29,10 @@ set(unit_test_SOURCES
     compose_test.c
     policy_test.c
     run_unit_tests.c
-    timer_test.c
     tool_test.c
     failoverlist_test.c
+    timer_test.c
+    parse_tree_tests
     )
 if (USE_MEMORY_POOL)
   list(APPEND unit_test_SOURCES alloc_test.c)
@@ -53,15 +54,15 @@ target_link_libraries(unit_tests_size qpid-dispatch)
 
 set(TEST_WRAP ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/run.py)
 
-add_test(unit_tests_size_10000 ${TEST_WRAP} --vg unit_tests_size 10000)
-add_test(unit_tests_size_512   ${TEST_WRAP} --vg unit_tests_size 512)
-add_test(unit_tests_size_10    ${TEST_WRAP} --vg unit_tests_size 10)
-add_test(unit_tests_size_7     ${TEST_WRAP} --vg unit_tests_size 7)
-add_test(unit_tests_size_5     ${TEST_WRAP} --vg unit_tests_size 5)
-add_test(unit_tests_size_3     ${TEST_WRAP} --vg unit_tests_size 3)
-add_test(unit_tests_size_2     ${TEST_WRAP} --vg unit_tests_size 2)
-add_test(unit_tests_size_1     ${TEST_WRAP} --vg unit_tests_size 1)
-add_test(unit_tests            ${TEST_WRAP} --vg unit_tests ${CMAKE_CURRENT_SOURCE_DIR}/threads4.conf)
+add_test(unit_tests_size_10000 ${TEST_WRAP} -x unit_tests_size 10000)
+add_test(unit_tests_size_512   ${TEST_WRAP} -x unit_tests_size 512)
+add_test(unit_tests_size_10    ${TEST_WRAP} -x unit_tests_size 10)
+add_test(unit_tests_size_7     ${TEST_WRAP} -x unit_tests_size 7)
+add_test(unit_tests_size_5     ${TEST_WRAP} -x unit_tests_size 5)
+add_test(unit_tests_size_3     ${TEST_WRAP} -x unit_tests_size 3)
+add_test(unit_tests_size_2     ${TEST_WRAP} -x unit_tests_size 2)
+add_test(unit_tests_size_1     ${TEST_WRAP} -x unit_tests_size 1)
+add_test(unit_tests            ${TEST_WRAP} -x unit_tests ${CMAKE_CURRENT_SOURCE_DIR}/threads4.conf)
 
 # Unit test python modules
 add_test(router_engine_test    ${TEST_WRAP} -m unittest -v router_engine_test)
@@ -80,6 +81,8 @@ foreach(py_test_module
     system_tests_drain
     system_tests_management
     system_tests_one_router
+    system_tests_handle_failover
+    system_tests_default_distribution
     system_tests_policy
     system_tests_protocol_family
     system_tests_protocol_settings
@@ -88,13 +91,15 @@ foreach(py_test_module
     system_tests_sasl_plain
     system_tests_user_id
     system_tests_user_id_proxy
-    system_tests_deprecated
     system_tests_two_routers
-    system_tests_three_routers
+    system_tests_distribution
     system_tests_multi_tenancy
     system_tests_dynamic_terminus
     system_tests_log_message_components
     system_tests_failover_list
+    system_tests_denied_unsettled_multicast
+    system_tests_auth_service_plugin
+    system_tests_delivery_abort
     ${SYSTEM_TESTS_HTTP}
     )
 

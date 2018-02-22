@@ -36,7 +36,7 @@ static void qdr_activate_connections_CT(qdr_core_t *core)
     while (conn) {
         DEQ_REMOVE_HEAD_N(ACTIVATE, core->connections_to_activate);
         conn->in_activate_list = false;
-        core->activate_handler(core->user_context, conn, DEQ_IS_EMPTY(core->connections_to_activate));
+        qd_server_activate((qd_connection_t*) qdr_connection_get_context(conn));
         conn = DEQ_HEAD(core->connections_to_activate);
     }
 }

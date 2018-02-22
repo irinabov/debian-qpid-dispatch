@@ -59,13 +59,22 @@ class Config(object):
         begin = re.compile(r'([\w-]+)[ \t]*{') # WORD {
         end = re.compile(r'}')                 # }
         attr = re.compile(r'([\w-]+)[ \t]*:[ \t]*(.+)') # WORD1: VALUE
+        pattern = re.compile(r'([\w-]+)[ \t]*:[ \t]*([\S]+).*')
 
         def sub(line):
             """Do substitutions to make line json-friendly"""
-            line = line.split('#')[0].strip() # Strip comments
-            line = re.sub(begin, r'["\1", {', line)
-            line = re.sub(end, r'}],', line)
-            line = re.sub(attr, r'"\1": "\2",', line)
+            line = line.strip()
+            if line.startswith("#"):
+                return ""
+            # 'pattern:' is a special snowflake.  It allows '#' characters in
+            # its value, so they cannot be treated as comment delimiters
+            if line.split(':')[0].strip().lower() == "pattern":
+                line = re.sub(pattern, r'"\1": "\2",', line)
+            else:
+                line = line.split('#')[0].strip()
+                line = re.sub(begin, r'["\1", {', line)
+                line = re.sub(end, r'}],', line)
+                line = re.sub(attr, r'"\1": "\2",', line)
             return line
 
         js_text = "[%s]"%("\n".join([sub(l) for l in lines]))
@@ -105,7 +114,7 @@ class Config(object):
             sections = self._parserawjson(source) if raw_json else self._parse(source)
             # Add missing singleton sections
             for et in self.get_config_types():
-                if et.singleton and not [s for s in sections if s[0] == et.short_name]:
+                if et.singleton and not et.deprecated and not [s for s in sections if s[0] == et.short_name]:
                     sections.append((et.short_name, {}))
             entities = [dict(type=self.schema.long_name(s[0]), **s[1]) for s in sections]
             self.schema.validate_all(entities)
@@ -151,8 +160,7 @@ def configure_dispatch(dispatch, lib_handle, filename):
     for m in modules:
         agent.configure(attributes=dict(type="log", module=m))
 
-    # Configure and prepare container and router before we can activate the agent.
-    configure(config.by_type('container')[0])
+    # Configure and prepare the router before we can activate the agent.
     configure(config.by_type('router')[0])
     qd.qd_dispatch_prepare(dispatch)
     qd.qd_router_setup_late(dispatch) # Actions requiring active management agent.
@@ -164,7 +172,7 @@ def configure_dispatch(dispatch, lib_handle, filename):
     policyDir = config.by_type('policy')[0]['policyDir']
     policyDefaultVhost = config.by_type('policy')[0]['defaultVhost']
     # Remaining configuration
-    for t in "sslProfile", "fixedAddress", "listener", "connector", "waypoint", "linkRoutePattern", \
+    for t in "sslProfile", "authServicePlugin", "listener", "connector", \
              "router.config.address", "router.config.linkRoute", "router.config.autoLink", \
              "policy", "vhost":
         for a in config.by_type(t):

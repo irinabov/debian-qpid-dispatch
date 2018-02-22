@@ -23,7 +23,6 @@ var QDR = (function(QDR) {
 
   QDR.module.controller('QDR.TopologyFormController', function($scope, $rootScope, $timeout, QDRService) {
 
-    $scope.panelVisible = true  // show/hide the panel on the left
     $scope.attributes = []
     var nameTemplate = '<div title="{{row.entity.description}}" class="ngCellText {{row.entity.cls}}"><span>{{row.entity.attributeName}}</span></div>';
     var valueTemplate = '<div title="{{row.entity.attributeValue}}" class="ngCellText {{row.entity.cls}}"><span>{{row.entity.attributeValue}}</span></div>';
@@ -31,6 +30,7 @@ var QDR = (function(QDR) {
       data: 'attributes',
       enableColumnResize: false,
       multiSelect: false,
+      jqueryUIDraggable: true,
       columnDefs: [{
         field: 'attributeName',
         displayName: 'Attribute',
@@ -57,46 +57,7 @@ var QDR = (function(QDR) {
       $scope.attributes = attributes;
       $scope.form = args.entity;
     })
-    $scope.$on('showAddForm', function(event) {
-      $scope.form = 'add';
-    })
-
-    $scope.hideLeftPane = function () {
-      d3.select(".qdr-topology-form")
-        .transition().duration(300).ease("sin-in")
-        .style("left" , "-309px")
-        .each("end", function () {
-          $timeout(function () {
-            QDR.log.debug("done with transition. setting scope ");
-            $scope.panelVisible = false
-            $rootScope.$broadcast('panel-resized')
-        })
-/*
-      d3.select(".qdr-topology-svg")
-        .transition().duration(300).ease("sin-in")
-        .style("margin-left", "30px")
-        .each("end", function () {
-          resize()
-          $timeout(function () {QDR.log.debug("done with transition. setting scope ");$scope.panelVisible = false})
-        })
-*/
-    })}
-
-    $scope.showLeftPane = function () {
-      d3.select(".qdr-topology-form")
-        .transition().duration(300).ease("sin-out")
-        .style("left" , "0px")
-
-      d3.select(".qdr-topology-svg")
-        .transition().duration(300).ease("sin-out")
-        .style("margin-left", "430px")
-        .each("end", function () {
-          resize()
-          $timeout(function () {QDR.log.debug("done with transition. setting scope ");$scope.panelVisible = true})
-        })
-    }
   })
-
   /**
    * @method TopologyController
    *
@@ -109,6 +70,34 @@ var QDR = (function(QDR) {
       $scope.selectedClient = [];
       $scope.quiesceState = {}
       var dontHide = false;
+
+      $scope.panelVisible = true  // show/hide the panel on the left
+      $scope.hideLeftPane = function () {
+        d3.select(".qdr-topology.pane.left")
+          .transition().duration(300).ease("sin-in")
+          .style("left" , "-380px")
+
+        d3.select(".panel-adjacent")
+          .transition().duration(300).ease("sin-in")
+          .style("margin-left", "30px")
+          .each("end", function () {
+            resize()
+            $timeout(function () {$scope.panelVisible = false})
+          })
+      }
+      $scope.showLeftPane = function () {
+        d3.select(".qdr-topology.pane.left")
+          .transition().duration(300).ease("sin-out")
+          .style("left" , "0px")
+
+        d3.select(".panel-adjacent")
+          .transition().duration(300).ease("sin-out")
+          .style("margin-left", "430px")
+          .each("end", function () {
+            resize()
+            $timeout(function () {$scope.panelVisible = true})
+          })
+      }
 
       $scope.quiesceConnection = function(row) {
         var entity = row.entity;
@@ -146,6 +135,7 @@ var QDR = (function(QDR) {
         data: 'multiData',
         selectedItems: $scope.selectedClient,
         multiSelect: false,
+        jqueryUIDraggable: true,
         afterSelectionChange: function(obj) {
           if (obj.selected && obj.orig) {
             var detailsDiv = d3.select('#link_details')
@@ -162,15 +152,16 @@ var QDR = (function(QDR) {
           $scope.linkData = obj.entity.linkData;
           $scope.connectionId = obj.entity.connectionId;
           var visibleLen = Math.min(obj.entity.linkData.length, 10)
-          QDR.log.debug("visibleLen is " + visibleLen)
+          //QDR.log.debug("visibleLen is " + visibleLen)
           var left = parseInt(d3.select('#multiple_details').style("left"))
+          var offset = jQuery('#topology').offset();
           var detailsDiv = d3.select('#link_details')
           detailsDiv
             .style({
               display: 'block',
               opacity: 1,
               left: (left + 20) + "px",
-              top: (mouseY + 20 + $(document).scrollTop()) + "px",
+              top: (mouseY - offset.top + 20 + $(document).scrollTop()) + "px",
               height: ((visibleLen + 1) * 30) + 40 + "px", // +1 for the header row
               'overflow-y': obj.entity.linkData > 10 ? 'scroll' : 'hidden'
             })
@@ -255,6 +246,7 @@ var QDR = (function(QDR) {
       $scope.linkData = [];
       $scope.linkDetails = {
         data: 'linkData',
+        jqueryUIDraggable: true,
         columnDefs: [{
             field: 'adminStatus',
             cellTemplate: "titleCellTemplate.html",
@@ -301,29 +293,18 @@ var QDR = (function(QDR) {
         return;
       }
       // we are currently connected. setup a handler to get notified if we are ever disconnected
-      QDRService.addDisconnectAction(function() {
-        QDRService.redirectWhenConnected("topology");
-        $scope.$apply();
-      })
+      var onDisconnect = function () {
+        //QDR.log.info("we were just disconnected while on the topology page. Setting org to redirect back once we are connected again")
+        $timeout(function () {
+          QDRService.redirectWhenConnected("topology")
+        })
+      }
+      QDRService.addDisconnectAction( onDisconnect )
 
       var urlPrefix = $location.absUrl();
       urlPrefix = urlPrefix.split("#")[0]
       QDR.log.debug("started QDR.TopologyController with urlPrefix: " + urlPrefix);
 
-      $scope.addingNode = {
-        step: 0,
-        hasLink: false,
-        trigger: ''
-      };
-
-      $scope.cancel = function() {
-        $scope.addingNode.step = 0;
-      }
-      $scope.editNewRouter = function() {
-        $scope.addingNode.trigger = 'editNode';
-      }
-
-      var NewRouterName = "__NEW__";
       // mouse event vars
       var selected_node = null,
         selected_link = null,
@@ -335,149 +316,11 @@ var QDR = (function(QDR) {
 
       $scope.schema = "Not connected";
 
-      $scope.modes = [{
-          title: 'Topology view',
-          name: 'Diagram',
-          right: false
-        },
-        /* {title: 'Add a new router node', name: 'Add Router', right: true} */
-      ];
-      $scope.mode = "Diagram";
       $scope.contextNode = null; // node that is associated with the current context menu
-      $scope.isModeActive = function(name) {
-        if ((name == 'Add Router' || name == 'Diagram') && $scope.addingNode.step > 0)
-          return true;
-        return ($scope.mode == name);
-      }
-      $scope.selectMode = function(name) {
-        if (name == "Add Router") {
-          name = 'Diagram';
-          if ($scope.addingNode.step > 0) {
-            $scope.addingNode.step = 0;
-          } else {
-            // start adding node mode
-            $scope.addingNode.step = 1;
-          }
-        } else {
-          $scope.addingNode.step = 0;
-        }
-
-        $scope.mode = name;
-      }
-      $scope.$watch(function() { return $scope.addingNode.step }, function(newValue, oldValue) {
-        if (newValue == 0 && oldValue != 0) {
-          // we are cancelling the add
-
-          // find the New node
-          nodes.every(function(n, i) {
-            // for the placeholder node, the key will be __internal__
-            if (QDRService.nameFromId(n.key) == '__internal__') {
-              var newLinks = links.filter(function(e, i) {
-                  return e.source.id == n.id || e.target.id == n.id;
-                })
-                // newLinks is an array of links to remove
-              newLinks.map(function(e) {
-                  links.splice(links.indexOf(e), 1);
-                })
-                // i is the index of the node to remove
-              nodes.splice(i, 1);
-              force.nodes(nodes).links(links).start();
-              restart(false);
-              return false; // stop looping
-            }
-            return true;
-          })
-          updateForm(Object.keys(QDRService.topology.nodeInfo())[0], 'router', 0);
-
-        } else if (newValue > 0) {
-          // we are starting the add mode
-          $scope.$broadcast('showAddForm')
-
-          resetMouseVars();
-          selected_node = null;
-          selected_link = null;
-          // add a new node
-          var id = "amqp:/_topo/0/__internal__/$management";
-          var x = radiusNormal * 4;
-          var y = x;;
-          if (newValue > 1) { // add at current mouse position
-            var offset = jQuery('#topology').offset();
-            x = mouseX - offset.left + $(document).scrollLeft();
-            y = mouseY - offset.top + $(document).scrollTop();;
-          }
-          QDRService.ensureAllEntities({entity: ".router"}, function () {
-            NewRouterName = genNewName();
-            nodes.push(aNode(id, NewRouterName, "inter-router", undefined, nodes.length, x, y, undefined, true));
-            force.nodes(nodes).links(links).start();
-            restart(false);
-          })
-        }
-      })
       $scope.isRight = function(mode) {
         return mode.right;
       }
 
-      // for ng-grid that shows details for multiple consoles/clients
-      // generate unique name for router and containerName
-      var genNewName = function() {
-        var nodeInfo = QDRService.topology.nodeInfo();
-        var nameIndex = 1;
-        var newName = "R." + nameIndex;
-
-        var names = [];
-        for (key in nodeInfo) {
-          var node = nodeInfo[key];
-          var router = node['.router'];
-          var attrNames = router.attributeNames;
-          var name = QDRService.valFor(attrNames, router.results[0], 'routerId')
-          if (!name)
-            name = QDRService.valFor(attrNames, router.results[0], 'name')
-          names.push(name);
-        }
-
-        while (names.indexOf(newName) >= 0) {
-          newName = "R." + nameIndex++;
-        }
-        return newName;
-      }
-
-      $scope.$watch(function() {
-        return $scope.addingNode.trigger
-      }, function(newValue, oldValue) {
-        if (newValue == 'editNode') {
-          $scope.addingNode.trigger = "";
-          editNode();
-        }
-      })
-
-      function editNode() {
-        doAddDialog(NewRouterName);
-      };
-      $scope.reverseLink = function() {
-        if (!mousedown_link)
-          return;
-        var d = mousedown_link;
-        var tmp = d.left;
-        d.left = d.right;;
-        d.right = tmp;
-        restart(false);
-        tick();
-      }
-      $scope.removeLink = function() {
-        if (!mousedown_link)
-          return;
-        var d = mousedown_link;
-        links.every(function(l, i) {
-          if (l.source.id == d.source.id && l.target.id == d.target.id) {
-            links.splice(i, 1);
-            force.links(links).start();
-            return false; // exit the 'every' loop
-          }
-          return true;
-        });
-        restart(false);
-        tick();
-      }
       var setNodesFixed = function (name, b) {
         nodes.some(function (n) {
           if (n.name === name) {
@@ -497,10 +340,17 @@ var QDR = (function(QDR) {
       $scope.isFixed = function() {
         if (!$scope.contextNode)
           return false;
-        return ($scope.contextNode.fixed & 0b1);
+        return ($scope.contextNode.fixed & 1);
       }
 
       var mouseX, mouseY;
+      var relativeMouse = function () {
+        var offset = jQuery('#topology').offset();
+        return {left: (mouseX + $(document).scrollLeft()) - 1,
+                top: (mouseY  + $(document).scrollTop()) - 1,
+                offset: offset
+                }
+      }
       // event handlers for popup context menu
       $(document).mousemove(function(e) {
         mouseX = e.clientX;
@@ -573,12 +423,46 @@ var QDR = (function(QDR) {
       var nodes = [];
       var links = [];
 
-      var aNode = function(id, name, nodeType, nodeInfo, nodeIndex, x, y, resultIndex, fixed, properties) {
+      var nodeExists = function (connectionContainer) {
         for (var i=0; i<nodes.length; ++i) {
-          if (nodes[i].name === name)
-            return nodes[i]
+          if (nodes[i].container === connectionContainer) {
+            return i
+          }
         }
+        return -1
+      }
+      var normalExists = function (connectionContainer) {
+        var normalInfo = {}
+        for (var i=0; i<nodes.length; ++i) {
+          if (nodes[i].normals) {
+            if (nodes[i].normals.some(function (normal, j) {
+              if (normal.container === connectionContainer && i !== j) {
+                normalInfo = {nodesIndex: i, normalsIndex: j}
+                return true
+              }
+              return false
+            }))
+              break;
+          }
+        }
+        return normalInfo
+      }
+      var getLinkSource = function (nodesIndex) {
+        for (var i=0; i<links.length; ++i) {
+          if (links[i].target === nodesIndex)
+            return i
+        }
+        return -1
+      }
+      var aNode = function(id, name, nodeType, nodeInfo, nodeIndex, x, y, connectionContainer, resultIndex, fixed, properties) {
         properties = properties || {};
+        for (var i=0; i<nodes.length; ++i) {
+          if (nodes[i].name === name || nodes[i].container === connectionContainer) {
+            if (properties.product)
+              nodes[i].properties = properties
+            return nodes[i]
+          }
+        }
         var routerId = QDRService.nameFromId(id)
         return {
           key: id,
@@ -591,7 +475,8 @@ var QDR = (function(QDR) {
           id: nodeIndex,
           resultIndex: resultIndex,
           fixed: !!+fixed,
-          cls: name == NewRouterName ? 'temp' : ''
+          cls: '',
+          container: connectionContainer
         };
       };
 
@@ -647,7 +532,7 @@ var QDR = (function(QDR) {
           localStorage[d.name] = angular.toJson({
             x: Math.round(d.x),
             y: Math.round(d.y),
-            fixed: d.fixed ? 1 : 0,
+            fixed: (d.fixed & 1) ? 1 : 0,
           });
         })
       }
@@ -673,8 +558,7 @@ var QDR = (function(QDR) {
             position.y = 200 - yInit;
             yInit *= -1
           }
-          nodes.push(aNode(id, name, "inter-router", nodeInfo, nodes.length, position.x, position.y, undefined, position.fixed));
-          //QDR.log.debug("adding node " + nodes.length-1);
+          nodes.push(aNode(id, name, "inter-router", nodeInfo, nodes.length, position.x, position.y, name, undefined, position.fixed));
         }
       }
 
@@ -684,6 +568,8 @@ var QDR = (function(QDR) {
         var client = 1.0;
         for (var id in nodeInfo) {
           var onode = nodeInfo[id];
+          if (!onode['.connection'])
+            continue
           var conns = onode['.connection'].results;
           var attrs = onode['.connection'].attributeNames;
           //QDR.log.debug("external client parent is " + parent);
@@ -701,7 +587,7 @@ var QDR = (function(QDR) {
                 getLink(source, target, dir, "", source + "-" + target);
               }
             } else if (role == "normal" || role == "on-demand" || role === "route-container") {
-              // not a router, but an external client
+              // not an connection between routers, but an external connection
               var name = QDRService.nameFromId(id) + "." + connection.identity;
 
               // if we have any new clients, animate the force graph to position them
@@ -718,10 +604,31 @@ var QDR = (function(QDR) {
               if (position.y > height) {
                 position.y = Math.round(nodes[source].y + 40 + Math.cos(client / (Math.PI * 2.0)))
               }
-              var node = aNode(id, name, role, nodeInfo, nodes.length, position.x, position.y, j, position.fixed, properties)
+              var existingNodeIndex = nodeExists(connection.container)
+              var normalInfo = normalExists(connection.container)
+              var node = aNode(id, name, role, nodeInfo, nodes.length, position.x, position.y, connection.container, j, position.fixed, properties)
               var nodeType = QDRService.isAConsole(properties, connection.identity, role, node.key) ? "console" : "client"
-              if (role === 'normal') {
-                var cdir = getLinkDir(id, connection, onode)
+              var cdir = getLinkDir(id, connection, onode)
+              if (existingNodeIndex >= 0) {
+                // make a link between the current router (source) and the existing node
+                getLink(source, existingNodeIndex, dir, "small", connection.name);
+              } else if (normalInfo.nodesIndex) {
+                  // get node index of node that contained this connection in its normals array
+                  var normalSource = getLinkSource(normalInfo.nodesIndex)
+                  if (normalSource >= 0) {
+                    if (cdir === 'unknown')
+                      cdir = dir
+                    node.cdir = cdir
+                    nodes.push(node)
+                    // create link from original node to the new node
+                    getLink(links[normalSource].source, nodes.length-1, cdir, "small", connection.name)
+                    // create link from this router to the new node
+                    getLink(source, nodes.length-1, cdir, "small", connection.name)
+                    // remove the old node from the normals list
+                    nodes[normalInfo.nodesIndex].normals.splice(normalInfo.normalsIndex, 1)
+                  }
+              } else if (role === 'normal') {
+              // normal nodes can be collapsed into a single node if they are all the same dir
                 if (cdir !== 'unknown') {
                   node.user = connection.user
                   node.isEncrypted = connection.isEncrypted
@@ -740,6 +647,7 @@ var QDR = (function(QDR) {
                     normalsParent[nodeType+cdir].normals.push(node)
                   }
                 } else {
+                  node.id = nodes.length - 1 + unknowns.length
                   unknowns.push(node)
                 }
               } else {
@@ -779,7 +687,6 @@ var QDR = (function(QDR) {
       var gravity = function (d, nodeCount) {
         return forceScale(nodeCount, 0.0001, 0.1)
       }
-
       // initialize the nodes and links array from the QDRService.topology._nodeInfo object
       var initForceGraph = function() {
         nodes = [];
@@ -800,20 +707,6 @@ var QDR = (function(QDR) {
           .attr("id", "SVG_ID")
           .attr('width', width)
           .attr('height', height)
-          .on("contextmenu", function(d) {
-            if (d3.event.defaultPrevented)
-              return;
-            d3.event.preventDefault();
-
-            if ($scope.addingNode.step != 0)
-              return;
-            if (d3.select('#svg_context_menu').style('display') !== 'block')
-              $(document).click();
-            d3.select('#svg_context_menu')
-              .style('left', (mouseX + $(document).scrollLeft()) + "px")
-              .style('top', (mouseY + $(document).scrollTop()) + "px")
-              .style('display', 'block');
-          })
           .on('click', function(d) {
             removeCrosssection()
           });
@@ -934,7 +827,7 @@ var QDR = (function(QDR) {
             setTimeout(continueForce, 100, extra)
           }
         }
-        continueForce(forceScale(nodeCount, 20, 200))  // give graph time to settle down
+        continueForce(forceScale(nodeCount, 0, 200))  // give graph time to settle down
       }
 
       var resolveUnknowns = function (nodeInfo, unknowns) {
@@ -944,11 +837,10 @@ var QDR = (function(QDR) {
           unknownNodes[unknowns[i].key] = 1
         }
         unknownNodes = Object.keys(unknownNodes)
-          //QDR.log.debug("there were " + unknownNodes.length + " connections with normal links")
-          //console.dump(unknownNodes)
-
-        QDRService.ensureEntities(unknownNodes, {entity: ".router.link", attrs: ["linkType","connectionId","linkDir"], force: true}, function () {
+        //QDR.log.info("-- resolveUnknowns: ensuring .connection and .router.link are present for each node")
+        QDRService.ensureEntities(unknownNodes, [{entity: ".connection", force: true}, {entity: ".router.link", attrs: ["linkType","connectionId","linkDir"], force: true}], function () {
           initializeLinks(nodeInfo, [])
+          // collapse any router-container nodes that are duplicates
           animate = true;
           force.nodes(nodes).links(links).start();
           restart(false);
@@ -1037,8 +929,9 @@ var QDR = (function(QDR) {
             return -i;
           }
         }
-
         //QDR.log.debug("creating new link (" + (links.length) + ") between " + nodes[_source].name + " and " + nodes[_target].name);
+        if (links.some( function (l) { return l.uid === uid}))
+          uid = uid + '.' + links.length
         var link = {
           source: _source,
           target: _target,
@@ -1098,9 +991,11 @@ var QDR = (function(QDR) {
 
           var deltaX = dtx - dsx,
             deltaY = dty - dsy,
-            dist = Math.sqrt(deltaX * deltaX + deltaY * deltaY),
-            normX = deltaX / dist,
-            normY = deltaY / dist;
+            dist = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+          if (dist == 0)
+            dist = 0.001;
+          var normX = deltaX / dist,
+              normY = deltaY / dist;
           var sourceX = dsx + (sourcePadding * normX),
             sourceY = dsy + (sourcePadding * normY),
             targetX = dtx - (targetPadding * normX),
@@ -1241,9 +1136,6 @@ var QDR = (function(QDR) {
           .classed('highlighted', function(d) {
             return d.highlighted;
           })
-          .classed('temp', function(d) {
-            return d.cls == 'temp';
-          })
           .attr('marker-start', function(d) {
             var sel = d === selected_link ? '-selected' : (d.cls === 'small' ? '-small' : '');
             if (d.highlighted)
@@ -1269,19 +1161,10 @@ var QDR = (function(QDR) {
             var sel = d === selected_link ? '-selected' : (d.cls === 'small' ? '-small' : '');
             return d.right ? 'url(' + urlPrefix + '#end-arrow' + sel + ')' : '';
           })
-          .classed('temp', function(d) {
-            return d.cls == 'temp';
-          })
           .classed('small', function(d) {
             return d.cls == 'small';
           })
           .on('mouseover', function(d) { // mouse over a path
-            if ($scope.addingNode.step > 0) {
-              if (d.cls == 'temp') {
-                d3.select(this).classed('over', true);
-              }
-              return;
-            }
             //QDR.log.debug("showing connections form");
             var resultIndex = 0; // the connection to use
             var left = d.left ? d.target : d.source;
@@ -1316,27 +1199,9 @@ var QDR = (function(QDR) {
             restart();
           })
           .on('mouseout', function(d) { // mouse out of a path
-            if ($scope.addingNode.step > 0) {
-              if (d.cls == 'temp') {
-                d3.select(this).classed('over', false);
-              }
-              return;
-            }
             //QDR.log.debug("showing connections form");
             selected_link = null;
             restart();
-          })
-          .on("contextmenu", function(d) {  // right click a path
-            $(document).click();
-            d3.event.preventDefault();
-            if (d.cls !== "temp")
-              return;
-
-            mousedown_link = d;
-            d3.select('#link_context_menu')
-              .style('left', (mouseX + $(document).scrollLeft()) + "px")
-              .style('top', (mouseY + $(document).scrollTop()) + "px")
-              .style('display', 'block');
           })
           // left click a path
           .on("click", function (d) {
@@ -1461,7 +1326,7 @@ var QDR = (function(QDR) {
             return (d === selected_node)
           })
           .classed('fixed', function(d) {
-            return d.fixed
+            return d.fixed & 1
           })
 
         // add new circle nodes. if nodes[] is longer than the existing paths, add a new path for each new element
@@ -1484,13 +1349,10 @@ var QDR = (function(QDR) {
               return null;
             })
             .classed('fixed', function(d) {
-              return d.fixed
-            })
-            .classed('temp', function(d) {
-              return QDRService.nameFromId(d.key) == '__internal__';
+              return d.fixed & 1
             })
             .classed('normal', function(d) {
-              return d.nodeType == 'normal'
+              return d.nodeType == 'normal' || QDRService.isConsole(d)
             })
             .classed('in', function(d) {
               return d.cdir == 'in'
@@ -1516,21 +1378,20 @@ var QDR = (function(QDR) {
             .classed('qpid-cpp', function(d) {
               return QDRService.isQpid(d)
             })
+            .classed('route-container', function (d) {
+              return (!QDRService.isArtemis(d) && !QDRService.isQpid(d) && d.nodeType === 'route-container')
+            })
             .classed('client', function(d) {
               return d.nodeType === 'normal' && !d.properties.console_identifier
             })
         }
         appendCircle(g)
           .on('mouseover', function(d) {  // mouseover a circle
-            if ($scope.addingNode.step > 0) {
-              d3.select(this).attr('transform', 'scale(1.1)');
-              return;
-            }
-            if (!selected_node) {
+            if (!selected_node && !mousedown_node) {
               if (d.nodeType === 'inter-router') {
                 //QDR.log.debug("showing general form");
                 updateForm(d.key, 'router', 0);
-              } else if (d.nodeType === 'normal' || d.nodeType === 'on-demand') {
+              } else if (d.nodeType === 'normal' || d.nodeType === 'on-demand' || d.nodeType === 'route-container') {
                 //QDR.log.debug("showing connections form");
                 updateForm(d.key, 'connection', d.resultIndex);
               }
@@ -1543,7 +1404,7 @@ var QDR = (function(QDR) {
             // enlarge target node
             d3.select(this).attr('transform', 'scale(1.1)');
             // highlight the next-hop route from the selected node to this node
-            mousedown_node = null;
+            //mousedown_node = null;
 
             if (!selected_node) {
               return;
@@ -1569,7 +1430,7 @@ var QDR = (function(QDR) {
             }
             mousedown_node = d;
             // mouse position relative to svg
-            initial_mouse_down_position = d3.mouse(this.parentElement.parentElement.parentElement).slice();
+            initial_mouse_down_position = d3.mouse(this.parentNode.parentNode.parentNode).slice();
           })
           .on('mouseup', function(d) {  // mouse up for circle
             if (!mousedown_node)
@@ -1581,35 +1442,17 @@ var QDR = (function(QDR) {
 
             // check for drag
             mouseup_node = d;
-            var mySvg = this.parentElement.parentElement.parentElement;
+
+            var mySvg = this.parentNode.parentNode.parentNode;
             // if we dragged the node, make it fixed
             var cur_mouse = d3.mouse(mySvg);
             if (cur_mouse[0] != initial_mouse_down_position[0] ||
               cur_mouse[1] != initial_mouse_down_position[1]) {
-              console.log("mouse pos changed. making this node fixed")
               d.fixed = true;
               setNodesFixed(d.name, true)
               resetMouseVars();
               restart();
               return;
-            }
-
-            // we didn't drag, we just clicked on the node
-            if ($scope.addingNode.step > 0) {
-              if (d.nodeType !== 'inter-router')
-                return;
-              if (QDRService.nameFromId(d.key) == '__internal__')
-                return;
-
-              // add a link from the clicked node to the new node
-              getLink(d.id, nodes.length - 1, "in", "temp", "__internal__");
-              $scope.addingNode.hasLink = true;
-              if (!$scope.$$phase) $scope.$apply()
-                // add new elements to the svg
-              force.links(links).start();
-              restart();
-              return;
-
             }
 
             // if this node was selected, unselect it
@@ -1640,13 +1483,13 @@ var QDR = (function(QDR) {
           .on("contextmenu", function(d) {  // circle
             $(document).click();
             d3.event.preventDefault();
-            $scope.contextNode = d;
-            if (!$scope.$$phase) $scope.$apply() // we just changed a scope valiable during an async event
+            $scope.contextNode = d
+            var rm = relativeMouse()
             d3.select('#node_context_menu')
-              .style('left', (mouseX + $(document).scrollLeft()) + "px")
-              .style('top', (mouseY + $(document).scrollTop()) + "px")
+              .style('left', rm.left + "px")
+              .style('top', (rm.top - rm.offset.top) + "px")
               .style('display', 'block');
-
+            if (!$scope.$$phase) $scope.$apply()
           })
           .on("click", function(d) {  // circle
             if (!mouseup_node)
@@ -1683,6 +1526,8 @@ var QDR = (function(QDR) {
                 y = 9;
               else if (d.nodeType === 'inter-router')
                 y = 4;
+              else if (d.nodeType === 'route-container')
+                y = 5;
               return y;
             })
             .attr('class', 'id')
@@ -1704,14 +1549,13 @@ var QDR = (function(QDR) {
             .text(function(d) {
               if (QDRService.isConsole(d)) {
                 return '\uf108'; // icon-desktop for this console
-              }
-              if (QDRService.isArtemis(d)) {
+              } else if (QDRService.isArtemis(d)) {
                 return '\ue900'
-              }
-              if (QDRService.isQpid(d)) {
+              } else if (QDRService.isQpid(d)) {
                 return '\ue901';
-              }
-              if (d.nodeType === 'normal')
+              } else if (d.nodeType === 'route-container') {
+                return d.properties.product ? d.properties.product[0].toUpperCase() : 'S'
+              } else if (d.nodeType === 'normal')
                 return '\uf109'; // icon-laptop for clients
               return d.name.length > 7 ? d.name.substr(0, 6) + '...' : d.name;
             });
@@ -1726,18 +1570,17 @@ var QDR = (function(QDR) {
               x = " x " + d.normals.length;
             if (QDRService.isConsole(d)) {
               return 'Dispatch console' + x
-            }
-            if (d.properties.product == 'qpid-cpp') {
-              return 'Broker - qpid-cpp' + x
-            }
-            if (QDRService.isArtemis(d)) {
+            } else if (QDRService.isArtemis(d)) {
               return 'Broker - Artemis' + x
-            }
-            if (d.cdir === 'in')
+            } else if (d.properties.product == 'qpid-cpp') {
+              return 'Broker - qpid-cpp' + x
+            } else if (d.properties.product) {
+              return d.properties.product
+            } else if (d.cdir === 'in')
               return 'Sender' + x
-            if (d.cdir === 'out')
+            else if (d.cdir === 'out')
               return 'Receiver' + x
-            if (d.cdir === 'both')
+            else if (d.cdir === 'both')
               return 'Sender/Receiver' + x
             return d.nodeType == 'normal' ? 'client' + x : (d.nodeType == 'on-demand' ? 'broker' : 'Router ' + d.name)
           })
@@ -1770,35 +1613,40 @@ var QDR = (function(QDR) {
           .attr('transform', 'translate(' + (radii['inter-router'] + 2) + ',' + (radii['inter-router'] + 2) + ')')
           .selectAll('g');
         var legendNodes = [];
-        legendNodes.push(aNode("Router", "", "inter-router", undefined, 0, 0, 0, 0, false, {}))
+        legendNodes.push(aNode("Router", "", "inter-router", '', undefined, 0, 0, 0, 0, false, {}))
 
         if (!svg.selectAll('circle.console').empty()) {
-          legendNodes.push(aNode("Console", "", "normal", undefined, 1, 0, 0, 0, false, {
+          legendNodes.push(aNode("Console", "", "normal", '', undefined, 1, 0, 0, 0, false, {
             console_identifier: 'Dispatch console'
           }))
         }
         if (!svg.selectAll('circle.client.in').empty()) {
-          var node = aNode("Sender", "", "normal", undefined, 2, 0, 0, 0, false, {})
+          var node = aNode("Sender", "", "normal", '', undefined, 2, 0, 0, 0, false, {})
           node.cdir = "in"
           legendNodes.push(node)
         }
         if (!svg.selectAll('circle.client.out').empty()) {
-          var node = aNode("Receiver", "", "normal", undefined, 3, 0, 0, 0, false, {})
+          var node = aNode("Receiver", "", "normal", '', undefined, 3, 0, 0, 0, false, {})
           node.cdir = "out"
           legendNodes.push(node)
         }
         if (!svg.selectAll('circle.client.inout').empty()) {
-          var node = aNode("Sender/Receiver", "", "normal", undefined, 4, 0, 0, 0, false, {})
+          var node = aNode("Sender/Receiver", "", "normal", '', undefined, 4, 0, 0, 0, false, {})
           node.cdir = "both"
           legendNodes.push(node)
         }
         if (!svg.selectAll('circle.qpid-cpp').empty()) {
-          legendNodes.push(aNode("Qpid broker", "", "on-demand", undefined, 5, 0, 0, 0, false, {
+          legendNodes.push(aNode("Qpid broker", "", "route-container", '', undefined, 5, 0, 0, 0, false, {
             product: 'qpid-cpp'
           }))
         }
         if (!svg.selectAll('circle.artemis').empty()) {
-          legendNodes.push(aNode("Artemis broker", "", "route-container", undefined, 6, 0, 0, 0, false, {product: 'apache-activemq-artemis'}))
+          legendNodes.push(aNode("Artemis broker", "", "route-container", '', undefined, 6, 0, 0, 0, false,
+          {product: 'apache-activemq-artemis'}))
+        }
+        if (!svg.selectAll('circle.route-container').empty()) {
+          legendNodes.push(aNode("Service", "", "route-container", 'external-service', undefined, 7, 0, 0, 0, false,
+          {product: ' External Service'}))
         }
         lsvg = lsvg.data(legendNodes, function(d) {
           return d.key;
@@ -1874,26 +1722,24 @@ var QDR = (function(QDR) {
                 links.results.forEach(function(link) {
                   if (link[linkTypeIndex] === 'endpoint' && link[connectionIdIndex] === n.connectionId) {
                     var l = {};
-                    l.owningAddr = QDRService.valFor(links.attributeNames, link, 'owningAddr');
-                    l.dir = QDRService.valFor(links.attributeNames, link, 'linkDir');
+                    var ll = QDRService.flatten(links.attributeNames, link)
+                    l.owningAddr = ll.owningAddr
+                    l.dir = ll.linkDir
                     if (l.owningAddr && l.owningAddr.length > 2)
                       if (l.owningAddr[0] === 'M')
                         l.owningAddr = l.owningAddr.substr(2)
                       else
                         l.owningAddr = l.owningAddr.substr(1)
 
-                    l.deliveryCount = QDRService.pretty(QDRService.valFor(links.attributeNames, link, 'deliveryCount'));
-                    l.uncounts = QDRService.pretty(QDRService.valFor(links.attributeNames, link, 'undeliveredCount') +
-                        QDRService.valFor(links.attributeNames, link, 'unsettledCount'))
-                      //l.undeliveredCount = QDRService.pretty(QDRService.valFor(links.attributeNames, link, 'undeliveredCount'));
-                      //l.unsettledCount = QDRService.pretty(QDRService.valFor(links.attributeNames, link, 'unsettledCount'));
-                    l.adminStatus = QDRService.valFor(links.attributeNames, link, 'adminStatus');
-                    l.operStatus = QDRService.valFor(links.attributeNames, link, 'operStatus');
-                    l.identity = QDRService.valFor(links.attributeNames, link, 'identity')
-                    l.connectionId = QDRService.valFor(links.attributeNames, link, 'connectionId')
+                    l.deliveryCount = ll.deliveryCount
+                    l.uncounts = QDRService.pretty(ll.undeliveredCount + ll.unsettledCount)
+                    l.adminStatus = ll.adminStatus;
+                    l.operStatus = ll.operStatus;
+                    l.identity = ll.identity
+                    l.connectionId = ll.connectionId
                     l.nodeId = n.key
-                    l.type = QDRService.valFor(links.attributeNames, link, 'type')
-                    l.name = QDRService.valFor(links.attributeNames, link, 'name')
+                    l.type = ll.type
+                    l.name = ll.name
 
                     // TODO: remove this fake quiescing/reviving logic when the routers do the work
                     initConnState(n.connectionId)
@@ -1952,12 +1798,13 @@ var QDR = (function(QDR) {
           left = left - 30;
           mouseY = mouseY - 20
         }
+        var rm = relativeMouse()
         d3.select('#multiple_details')
           .style({
             display: display,
             opacity: 1,
-            left: (mouseX + $(document).scrollLeft()) + "px",
-            top: (mouseY + $(document).scrollTop()) + "px"
+            left: rm.left + "px",
+            top: rm.top + "px"
           })
         if (d.normals.length === 1) {
           // simulate a click on the connection to popup the link details
@@ -2021,8 +1868,6 @@ var QDR = (function(QDR) {
       function hasChanged() {
         // Don't update the underlying topology diagram if we are adding a new node.
         // Once adding is completed, the topology will update automatically if it has changed
-        if ($scope.addingNode.step > 0)
-          return -2;
         var nodeInfo = QDRService.topology.nodeInfo();
         if (Object.keys(nodeInfo).length != Object.keys(savedKeys).length)
           return Object.keys(nodeInfo).length > Object.keys(savedKeys).length ? 1 : -1;
@@ -2048,13 +1893,12 @@ var QDR = (function(QDR) {
             savedKeys[key] = nodeInfo[key]['.connection'].results.length;
         }
         //QDR.log.debug("saving current keys");
-        console.dump(savedKeys);
+        //console.dump(savedKeys);
       };
       // we are about to leave the page, save the node positions
       $rootScope.$on('$locationChangeStart', function(event, newUrl, oldUrl) {
         //QDR.log.debug("locationChangeStart");
         savePositions()
-        $scope.addingNode.step = 0;
       });
       // When the DOM element is removed from the page,
       // AngularJS will trigger the $destroy event on
@@ -2066,6 +1910,8 @@ var QDR = (function(QDR) {
         QDRService.stopUpdating();
         QDRService.delUpdatedAction("normalsStats");
         QDRService.delUpdatedAction("topology");
+        QDRService.delDisconnectAction( onDisconnect )
+
         d3.select("#SVG_ID").remove();
         window.removeEventListener('resize', resize);
       });
@@ -2123,50 +1969,9 @@ var QDR = (function(QDR) {
       setupInitialUpdate();
       QDRService.startUpdating();
 
-      function doAddDialog(NewRouterName) {
-        QDRService.ensureAllEntities({entity: ".listener"}, function () {
-          var d = $uibModal.open({
-            dialogClass: "modal dlg-large",
-            backdrop: true,
-            keyboard: true,
-            backdropClick: true,
-            controller: 'QDR.NodeDialogController',
-            templateUrl: 'node-config-template.html',
-            resolve: {
-              newname: function() {
-                return NewRouterName;
-              }
-            }
-          });
-          $timeout(function () {
-            d.result.then(function(result) {
-              if (result)
-                doDownloadDialog(result);
-            });
-          })
-        })
-      };
-
-      function doDownloadDialog(result) {
-        d = $uibModal.open({
-          backdrop: true,
-          keyboard: true,
-          backdropClick: true,
-          controller: 'QDR.DownloadDialogController',
-          templateUrl: 'download-dialog-template.html',
-          resolve: {
-            results: function() {
-              return result;
-            }
-          }
-        });
-        d.result.then(function(result) {
-          //QDR.log.debug("download dialog done")
-        })
-        if (!$scope.$$phase) $scope.$apply()
-      };
     }
   ]);
 
   return QDR;
+
 }(QDR || {}));

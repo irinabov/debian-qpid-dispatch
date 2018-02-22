@@ -18,9 +18,9 @@ from setuptools import setup, find_packages
 setup(
     name = 'dispatch',
     version = '0.0.1',
-    description = 'sample dashboard extension for OpenStack Dashboard',
-    author = 'Cindy Lu',
-    author_email = 'clu@us.ibm.com',
+    description = 'dashboard extension for OpenStack Dashboard',
+    author = 'Apache Qpid',
+    author_email = 'dev@qpid.apache.org',
     classifiers = [
         'Environment :: OpenStack',
         'Framework :: Django',

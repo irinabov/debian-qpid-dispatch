@@ -9,8 +9,8 @@ Build-Depends: debhelper (>= 9),
                dh-python,
                asciidoc (>= 8.6.8),
                dblatex,
-               libqpid-proton10-dev (>= 0.17.0),
-               python-qpid-proton (>= 0.17.0),
+               libqpid-proton-core10-dev (>= 0.20.0),
+               python-qpid-proton (>= 0.20.0),
                libssl-dev,
                libwebsockets-dev
 Standards-Version: 3.9.7
@@ -18,7 +18,7 @@ Homepage: http://qpid.apache.org/components/dispatch-router
 
 Package: qdrouterd
 Architecture: any
-Depends: libqpid-proton10,
+Depends: libqpid-proton-core10,
          adduser,
          libwebsockets7,
          ${shlibs:Depends}, ${misc:Depends}
@@ -46,7 +46,7 @@ Description: Qpid Dispatch Router executable
 
 Package: qdstat
 Architecture: all
-Depends: python-qpid-proton (>= 0.17.0),
+Depends: python-qpid-proton (>= 0.20.0),
          python,
          qdrouterd (>= ${binary:Version}),
          ${misc:Depends}
@@ -71,7 +71,7 @@ Description: Qpid Dispatch stat tool
 
 Package: qdmanage
 Architecture: all
-Depends: python-qpid-proton (>= 0.17.0),
+Depends: python-qpid-proton (>= 0.20.0),
          python,
          qdrouterd (>= ${binary:Version}),
          ${misc:Depends}

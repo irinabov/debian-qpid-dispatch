@@ -20,13 +20,11 @@
 """System tests for management of qdrouter"""
 
 import unittest, system_test, re, os, json, sys
-from qpid_dispatch.management.client import Node, ManagementError, Url, BadRequestStatus, NotImplementedStatus, NotFoundStatus, ForbiddenStatus
+from qpid_dispatch.management.client import Node, ManagementError, Url, BadRequestStatus, NotImplementedStatus, NotFoundStatus
 from qpid_dispatch_internal.management.qdrouter import QdSchema
-from qpid_dispatch_internal.compat import OrderedDict, dictify
-from system_test import Qdrouterd, message, retry, retry_exception, wait_ports, Process
-from proton import ConnectionException
+from qpid_dispatch_internal.compat import dictify
+from system_test import Qdrouterd, message, Process
 from itertools import chain
-from time import sleep
 
 PREFIX = u'org.apache.qpid.dispatch.'
 MANAGEMENT = PREFIX + 'management'
@@ -34,12 +32,12 @@ CONFIGURATION = PREFIX + 'configurationEntity'
 OPERATIONAL = PREFIX + 'operationalEntity'
 LISTENER = PREFIX + 'listener'
 CONNECTOR = PREFIX + 'connector'
-FIXED_ADDRESS = PREFIX + 'fixedAddress'
 DUMMY = PREFIX + 'dummy'
 ROUTER = PREFIX + 'router'
 LINK = ROUTER + '.link'
 ADDRESS = ROUTER + '.address'
 NODE = ROUTER + '.node'
+CONFIG_ADDRESS = ROUTER + '.config.address'
 
 def short_name(name):
     if name.startswith(PREFIX):
@@ -163,6 +161,11 @@ class ManagementTest(system_test.TestCase):
         self.assertMapSubset(attributes, entity.attributes)
         return entity
 
+    def assert_read_ok(self, type, name, attributes):
+        entity = self.node.read(type, name)
+        self.assertMapSubset(attributes, entity.attributes)
+        return entity
+
     def test_create_listener(self):
         """Create a new listener on a running router"""
 
@@ -171,7 +174,7 @@ class ManagementTest(system_test.TestCase):
         attributes = {'name':'foo', 'port':str(port), 'role':'normal', 'saslMechanisms': 'ANONYMOUS', 'authenticatePeer': False}
         entity = self.assert_create_ok(LISTENER, 'foo', attributes)
         self.assertEqual(entity['name'], 'foo')
-        self.assertEqual(entity['host'], '127.0.0.1')
+        self.assertEqual(entity['host'], '')
 
         # Connect via the new listener
         node3 = self.cleanup(Node.connect(Url(port=port)))
@@ -241,13 +244,35 @@ class ManagementTest(system_test.TestCase):
         # Invalid values
         self.assertRaises(ManagementError, node.update, dict(identity="log/AGENT", enable="foo"))
 
-    def test_create_fixed_address(self):
-        self.assert_create_ok(FIXED_ADDRESS, 'fixed1', dict(prefix='fixed1'))
+    def test_create_config_address(self):
+        self.assert_create_ok(CONFIG_ADDRESS, 'myConfigAddr', dict(prefix='prefixA'))
+        self.assert_read_ok(CONFIG_ADDRESS, 'myConfigAddr',
+                            dict(prefix='prefixA', pattern=None))
         msgr = self.messenger()
-        address = self.router.addresses[0]+'/fixed1'
+        address = self.router.addresses[0]+'/prefixA/other'
         msgr.subscribe(address)
         msgr.put(message(address=address, body='hello'))
         self.assertEqual('hello', msgr.fetch().body)
+        msgr.stop()
+        del msgr
+        self.node.delete(CONFIG_ADDRESS, name='myConfigAddr')
+        self.assertRaises(NotFoundStatus, self.node.read,
+                          type=CONFIG_ADDRESS, name='myConfigAddr')
+
+    def test_create_config_address_pattern(self):
+        self.assert_create_ok(CONFIG_ADDRESS, 'patternAddr', dict(pattern='a.*.b'))
+        self.assert_read_ok(CONFIG_ADDRESS, 'patternAddr',
+                            dict(prefix=None, pattern='a.*.b'))
+        msgr = self.messenger()
+        address = self.router.addresses[0]+'/a.HITHERE.b'
+        msgr.subscribe(address)
+        msgr.put(message(address=address, body='hello'))
+        self.assertEqual('hello', msgr.fetch().body)
+        msgr.stop()
+        del msgr
+        self.node.delete(CONFIG_ADDRESS, name='patternAddr')
+        self.assertRaises(NotFoundStatus, self.node.read,
+                          type=CONFIG_ADDRESS, name='patternAddr')
 
     def test_dummy(self):
         """Test all operations on the dummy test entity"""
@@ -305,7 +330,7 @@ class ManagementTest(system_test.TestCase):
                 self.assertEqual(
                     {u'operation': u'callme', u'type': DUMMY, u'identity': identity, u'data': data},
                     dummy.call('callme', data=data))
-            except TypeError, e:
+            except TypeError:
                 extype, value, trace = sys.exc_info()
                 raise extype, "data=%r: %s" % (data, value), trace
 
@@ -373,16 +398,6 @@ class ManagementTest(system_test.TestCase):
         """Test that we can access management info of remote nodes using get_mgmt_nodes addresses"""
         nodes = [self.cleanup(Node.connect(Url(r.addresses[0]))) for r in self.routers]
         remotes = sum([n.get_mgmt_nodes() for n in nodes], [])
-        self.assertEqual([u'amqp:/_topo/0/router2/$management', u'amqp:/_topo/0/router1/$management'], remotes)
-        # Query router2 indirectly via router1
-        remote_url = Url(self.routers[0].addresses[0], path=Url(remotes[0]).path)
-        remote = self.cleanup(Node.connect(remote_url))
-        self.assertEqual(["router2"], [r.id for r in remote.query(type=ROUTER).get_entities()])
-
-    def test_remote_node(self):
-        """Test that we can access management info of remote nodes using get_mgmt_nodes addresses"""
-        nodes = [self.cleanup(Node.connect(Url(r.addresses[0]))) for r in self.routers]
-        remotes = sum([n.get_mgmt_nodes() for n in nodes], [])
         self.assertEqual(set([u'amqp:/_topo/0/router%s/$management' % i for i in [0, 1, 2]]),
                          set(remotes))
         self.assertEqual(9, len(remotes))
@@ -397,10 +412,6 @@ class ManagementTest(system_test.TestCase):
         types = self.node.get_types()
         self.assertIn(CONFIGURATION, types[LISTENER])
         self.assertIn(OPERATIONAL, types[LINK])
-
-    def test_get_attributes(self):
-        types = self.node.get_attributes()
-        self.assertIn(SSL_PROFILE, types[CONNECTOR])
 
     def test_get_operations(self):
         result = self.node.get_operations(type=DUMMY)
