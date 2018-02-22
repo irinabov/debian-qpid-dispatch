@@ -1,4 +1,4 @@
-E: qdrouterd: arch-dependent-file-not-in-arch-specific-directory usr/lib/qpid-dispatch/libqpid-dispatch.so
-E: qdrouterd: arch-dependent-file-not-in-arch-specific-directory usr/sbin/qdrouterd
-W: qdrouterd: binary-without-manpage usr/sbin/qdrouterd
-E: qdrouterd: pkg-has-shlibs-control-file-but-no-actual-shared-libs
+qdrouterd: arch-dependent-file-not-in-arch-specific-directory usr/lib/qpid-dispatch/libqpid-dispatch.so
+qdrouterd: arch-dependent-file-not-in-arch-specific-directory usr/sbin/qdrouterd
+qdrouterd: binary-without-manpage usr/sbin/qdrouterd
+qdrouterd: pkg-has-shlibs-control-file-but-no-actual-shared-libs
