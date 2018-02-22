@@ -10,6 +10,7 @@ Build-Depends: debhelper (>= 9),
                asciidoc (>= 8.6.8),
                dblatex,
                libqpid-proton-core10-dev (>= 0.20.0),
+               libqpid-proton-proactor1-dev (>= 0.20.0),
                python-qpid-proton (>= 0.20.0),
                libssl-dev,
                libwebsockets-dev
