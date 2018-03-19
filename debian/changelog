@@ -1,3 +1,9 @@
+qpid-dispatch (1.0.1-1qpid+trusty1) trusty; urgency=medium
+
+  * Rebased to Dispatch 1.0.1
+
+ -- Irina Boverman <iboverma@redhat.com>  Mon, 19 Mar 2018 15:05:55 -0400
+
 qpid-dispatch (1.0.0-2qpid+trusty1) trusty; urgency=medium
 
   * Rebased to Dispatch 1.0.0
