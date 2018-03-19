@@ -75,7 +75,6 @@ ALLOC_DEFINE(qd_connector_t);
 ALLOC_DEFINE(qd_deferred_call_t);
 ALLOC_DEFINE(qd_connection_t);
 
-const char *QD_CONNECTION_TYPE = "connection";
 const char *MECH_EXTERNAL = "EXTERNAL";
 
 //Allowed uidFormat fields.
@@ -738,8 +737,6 @@ static void qd_connection_free(qd_connection_t *ctx)
 {
     qd_server_t *qd_server = ctx->server;
 
-    qd_entity_cache_remove(QD_CONNECTION_TYPE, ctx); /* Removed management entity */
-
     // If this is a dispatch connector, schedule the re-connect timer
     if (ctx->connector) {
         long delay = ctx->connector->delay;
@@ -1392,6 +1389,7 @@ bool qd_connector_decref(qd_connector_t* ct)
             free(item);
             item = DEQ_HEAD(ct->conn_info_list);
         }
+        sys_mutex_free(ct->lock);
         free_qd_connector_t(ct);
         return true;
     }
