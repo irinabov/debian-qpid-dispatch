@@ -40,14 +40,17 @@ const char *IDENTITY = "identity";
 const char *OPERATION = "operation";
 const char *ATTRIBUTE_NAMES = "attributeNames";
 
-const unsigned char *config_address_entity_type = (unsigned char*) "org.apache.qpid.dispatch.router.config.address";
-const unsigned char *link_route_entity_type     = (unsigned char*) "org.apache.qpid.dispatch.router.config.linkRoute";
-const unsigned char *auto_link_entity_type      = (unsigned char*) "org.apache.qpid.dispatch.router.config.autoLink";
-const unsigned char *address_entity_type        = (unsigned char*) "org.apache.qpid.dispatch.router.address";
-const unsigned char *link_entity_type           = (unsigned char*) "org.apache.qpid.dispatch.router.link";
-const unsigned char *console_entity_type        = (unsigned char*) "org.apache.qpid.dispatch.console";
-const unsigned char *router_entity_type         = (unsigned char*) "org.apache.qpid.dispatch.router";
-const unsigned char *connection_entity_type     = (unsigned char*) "org.apache.qpid.dispatch.connection";
+
+const unsigned char *config_address_entity_type  = (unsigned char*) "org.apache.qpid.dispatch.router.config.address";
+const unsigned char *link_route_entity_type      = (unsigned char*) "org.apache.qpid.dispatch.router.config.linkRoute";
+const unsigned char *auto_link_entity_type       = (unsigned char*) "org.apache.qpid.dispatch.router.config.autoLink";
+const unsigned char *address_entity_type         = (unsigned char*) "org.apache.qpid.dispatch.router.address";
+const unsigned char *link_entity_type            = (unsigned char*) "org.apache.qpid.dispatch.router.link";
+const unsigned char *console_entity_type         = (unsigned char*) "org.apache.qpid.dispatch.console";
+const unsigned char *router_entity_type          = (unsigned char*) "org.apache.qpid.dispatch.router";
+const unsigned char *connection_entity_type      = (unsigned char*) "org.apache.qpid.dispatch.connection";
+const unsigned char *config_exchange_entity_type = (unsigned char*) "org.apache.qpid.dispatch.router.config.exchange";
+const unsigned char *config_binding_entity_type  = (unsigned char*) "org.apache.qpid.dispatch.router.config.binding";
 
 const char * const status_description = "statusDescription";
 const char * const correlation_id = "correlation-id";
@@ -432,6 +435,10 @@ static bool qd_can_handle_request(qd_parsed_field_t           *properties_fld,
         *entity_type = QD_ROUTER_FORBIDDEN;
     else if (qd_iterator_equal(qd_parse_raw(parsed_field), connection_entity_type))
         *entity_type = QD_ROUTER_CONNECTION;
+    else if (qd_iterator_equal(qd_parse_raw(parsed_field), config_exchange_entity_type))
+        *entity_type = QD_ROUTER_EXCHANGE;
+    else if (qd_iterator_equal(qd_parse_raw(parsed_field), config_binding_entity_type))
+        *entity_type = QD_ROUTER_BINDING;
     else
         return false;
 
@@ -458,13 +465,13 @@ static bool qd_can_handle_request(qd_parsed_field_t           *properties_fld,
     // Obtain the count and offset.
     parsed_field = qd_parse_value_by_key(properties_fld, COUNT);
     if (parsed_field)
-        (*count) = qd_parse_as_int(parsed_field);
+        (*count) = (int)qd_parse_as_long(parsed_field);
     else
         (*count) = -1;
 
     parsed_field = qd_parse_value_by_key(properties_fld, OFFSET);
     if (parsed_field)
-        (*offset) = qd_parse_as_int(parsed_field);
+        (*offset) = (int)qd_parse_as_long(parsed_field);
     else
         (*offset) = 0;
 

@@ -140,7 +140,7 @@ typedef struct qd_server_config_t {
     /**
      * Directory for HTTP content
      */
-    char *http_root;
+    char *http_root_dir;
 
     /**
      * Connection name, used as a reference from other parts of the configuration.
@@ -274,7 +274,7 @@ typedef struct qd_server_config_t {
     /**
      * Full path to the file that contains the uid to display name mapping.
      */
-    char *ssl_display_name_file;
+    char *ssl_uid_name_mapping_file;
 
     /**
      * The password used to sign the private key, or NULL if the key is not protected.
@@ -303,7 +303,13 @@ typedef struct qd_server_config_t {
     /**
      * Specifies the enabled ciphers so the SSL Ciphers can be hardened.
      */
-    char *ciphers;
+    char *ssl_ciphers;
+
+    /**
+     * This list is a space separated string of the allowed TLS protocols. The current possibilities are TLSv1 TLSv1.1 TLSv1.2.
+     * For example, if you want to permit only TLSv.1.1 and TLSv1.2, your value for the protocols would be TLSv1.1 TLSv1.2. If this attribute is not set, then all the TLS protocols are allowed.
+     */
+    char *ssl_protocols;
 
     /**
      * Allow the connection to be redirected by the peer (via CLOSE->Redirect).  This is

@@ -1,21 +1,21 @@
-##
-## Licensed to the Apache Software Foundation (ASF) under one
-## or more contributor license agreements.  See the NOTICE file
-## distributed with this work for additional information
-## regarding copyright ownership.  The ASF licenses this file
-## to you under the Apache License, Version 2.0 (the
-## "License"); you may not use this file except in compliance
-## with the License.  You may obtain a copy of the License at
-##
-##   http://www.apache.org/licenses/LICENSE-2.0
-##
-## Unless required by applicable law or agreed to in writing,
-## software distributed under the License is distributed on an
-## "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-## KIND, either express or implied.  See the License for the
-## specific language governing permissions and limitations
-## under the License
-##
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License
+#
 
 """
 Schema for AMQP management entity types.
@@ -26,10 +26,28 @@ check for uniqueness of enties/attributes that are specified to be unique.
 A Schema can be loaded/dumped to a json file.
 """
 
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+
 import sys
+import traceback
 from qpid_dispatch.management.entity import EntityBase
 from qpid_dispatch.management.error import NotImplementedStatus
 from ..compat import OrderedDict
+from ..compat import PY_STRING_TYPE
+from ..compat import PY_TEXT_TYPE
+from ..compat import dict_keys
+from ..compat import dict_items
+try:
+    from ..dispatch import LogAdapter, LOG_WARNING
+    logger_available = True
+except:
+    # We need to do this because at compile time the schema is pulled using this code and at that time the
+    # LogAdapter is not loaded. When running the router, the LogAdapter is available.
+    logger_available = False
 
 class ValidationError(Exception):
     """Error raised if schema validation fails"""
@@ -81,7 +99,7 @@ class BooleanType(Type):
         @return A python bool.
         """
         try:
-            if isinstance(value, basestring):
+            if isinstance(value, (PY_STRING_TYPE, PY_TEXT_TYPE)):
                 return self.VALUES[value.lower()]
             return bool(value)
         except:
@@ -96,7 +114,9 @@ class EnumValue(str):
         setattr(s, 'value', value)
         return s
 
+    def __hash__(self): return super(EnumValue, self).__hash__()
     def __int__(self): return self.value
+    def __long__(self): return self.value
     def __eq__(self, x): return str(self) == x or int(self) == x
     def __ne__(self, x): return not self == x
     def __repr__(self): return "EnumValue('%s', %s)"%(str(self), int(self))
@@ -185,7 +205,7 @@ class AttributeType(object):
     """
 
     def __init__(self, name, type=None, defined_in=None, default=None,
-                 required=False, unique=False, hidden=False, deprecated=False,
+                 required=False, unique=False, hidden=False, deprecated=False, deprecationName=None,
                  value=None, description="", create=False, update=False, graph=False):
         """
         See L{AttributeType} instance variables.
@@ -199,6 +219,7 @@ class AttributeType(object):
             self.hidden = hidden
             self.deprecated = deprecated
             self.default = default
+            self.deprecation_name = deprecationName
             self.value = value
             self.unique = unique
             self.description = description
@@ -208,9 +229,11 @@ class AttributeType(object):
             self.create=create
             self.update=update
             self.graph=graph
-        except:
-            ex, msg, trace = sys.exc_info()
-            raise ValidationError, "Attribute '%s': %s" % (name, msg), trace
+        except Exception:
+            raise ValidationError("Attribute '%s': %s\n%s"
+                                  % (name,
+                                     sys.exc_info()[1],
+                                     sys.exc_info()[2]))
 
     def missing_value(self):
         """
@@ -234,8 +257,8 @@ class AttributeType(object):
                 self.name, self.value, value))
         try:
             return self.atype.validate(value)
-        except (TypeError, ValueError), e:
-            raise ValidationError, str(e), sys.exc_info()[2]
+        except (TypeError, ValueError) as e:
+            raise ValidationError("%s:%s" % (str(e), sys.exc_info()[2]))
 
     def dump(self):
         """
@@ -261,7 +284,7 @@ class MessageDef(object):
         self.body = None
         if body: self.body = AttributeType("body", **body)
         self.properties = dict((name, AttributeType(name, **value))
-                               for name, value in (properties or {}).iteritems())
+                               for name, value in (properties or {}).items())
 
 
 class OperationDef(object):
@@ -273,9 +296,9 @@ class OperationDef(object):
             self.request = self.response = None
             if request: self.request = MessageDef(**request)
             if response: self.response = MessageDef(**response)
-        except:
-            ex, msg, trace = sys.exc_info()
-            raise ValidationError, "Operation '%s': %s" % (name, msg), trace
+        except Exception as exc:
+            raise ValidationError("Operation '%s': %s\n%s"
+                                  % (name, str(exc), sys.exc_info()[2]))
 
 
 class EntityType(object):
@@ -311,8 +334,32 @@ class EntityType(object):
             else:
                 self.name = self.short_name = name
             self.attributes = OrderedDict((k, AttributeType(k, defined_in=self, **v))
-                                              for k, v in (attributes or {}).iteritems())
+                                              for k, v in (attributes or {}).items())
+
+            self.deprecated_attributes = OrderedDict()
+            for key, value in self.attributes.items():
+                if value.deprecation_name or value.deprecated:
+                    attr_type = AttributeType(value.deprecation_name or key,
+                                              type=value.type,
+                                              defined_in=self,
+                                              default=value.default,
+                                              required=value.required,
+                                              unique=value.unique,
+                                              hidden=value.hidden,
+                                              deprecated=True,
+                                              deprecationName=None,
+                                              value=value.value,
+                                              description="(DEPRECATED) " + value.description,
+                                              create=value.create,
+                                              update=value.update,
+                                              graph=value.graph)
+                    if value.deprecation_name:
+                        self.deprecated_attributes[value.deprecation_name] = attr_type
+                    else:
+                        self.deprecated_attributes[key] = attr_type
+
             self.operations = operations or []
+
             # Bases are resolved in self.init()
             self.base = extends
             self.all_bases = []
@@ -324,10 +371,12 @@ class EntityType(object):
             self._init = False      # Have not yet initialized from base and attributes.
             # Operation definitions
             self.operation_defs = dict((name, OperationDef(name, **op))
-                                  for name, op in (operationDefs or {}).iteritems())
-        except:
-            ex, msg, trace = sys.exc_info()
-            raise ValidationError, "%s '%s': %s" % (type(self).__name__, name, msg), trace
+                                  for name, op in (operationDefs or {}).items())
+        except Exception as exc:
+            raise ValidationError("%s '%s': %s\n%s" % (type(self).__name__,
+                                                       name,
+                                                       exc,
+                                                       sys.exc_info()[2]))
 
     def init(self):
         """Find bases after all types are loaded."""
@@ -348,7 +397,7 @@ class EntityType(object):
                                       % (self.name, how, other.short_name, what, ",".join(overlap)))
         check(self.operations, other.operations, "operations")
         self.operations += other.operations
-        check(self.attributes.iterkeys(), other.attributes.itervalues(), "attributes")
+        check(dict_keys(self.attributes), other.attributes.values(), "attributes")
         self.attributes.update(other.attributes)
         if other.name == 'entity':
             # Fill in entity "type" attribute automatically.
@@ -360,14 +409,21 @@ class EntityType(object):
 
     def attribute(self, name):
         """Get the AttributeType for name"""
-        if not name in self.attributes:
+        if not name in self.attributes and not name in dict_keys(self.deprecated_attributes):
             raise ValidationError("Unknown attribute '%s' for '%s'" % (name, self))
-        return self.attributes[name]
+        if self.attributes.get(name):
+            return self.attributes[name]
+        if self.deprecated_attributes.get(name):
+            return self.deprecated_attributes[name]
+        return None
+
+    def log(self, level, text):
+        self.schema.log(level, text)
 
     @property
     def my_attributes(self):
         """Return only attribute types defined in this entity type"""
-        return [a for a in self.attributes.itervalues() if a.defined_in == self]
+        return [a for a in self.attributes.values() if a.defined_in == self]
 
     def validate(self, attributes):
         """
@@ -379,20 +435,42 @@ class EntityType(object):
 
         try:
             # Add missing values
-            for attr in self.attributes.itervalues():
+            for attr in self.attributes.values():
                 if attributes.get(attr.name) is None:
-                    value = attr.missing_value()
-                    if value is not None: attributes[attr.name] = value
+                    value = None
+                    deprecation_name = attr.deprecation_name
+                    if deprecation_name:
+                        value = attributes.get(deprecation_name)
+                        if value is not None:
+                            if logger_available:
+                                self.log(LOG_WARNING, "Attribute '%s' of entity '%s' has been deprecated."
+                                                      " Use '%s' instead"%(deprecation_name, self.short_name, attr.name))
+                            del attributes[deprecation_name]
+
+                    if value is None:
+                        value = attr.missing_value()
+                    if value is not None:
+                        attributes[attr.name] = value
                     if value is None and attr.name in attributes:
                         del attributes[attr.name]
+                else:
+                    deprecation_name = attr.deprecation_name
+                    if deprecation_name:
+                        value = attributes.get(deprecation_name)
+                        if not value is None:
+                            # Both name and deprecation name have values
+                            # For example, both dir and direction of linkRoute have been specified, This is
+                            # illegal. Just fail.
+                            raise ValidationError("Both '%s' and '%s' cannot be specified for entity '%s'" %
+                                                  (deprecation_name, attr.name, self.short_name))
 
             # Validate attributes.
-            for name, value in attributes.iteritems():
+            for name, value in dict_items(attributes):
                 if name == 'type':
                     value = self.schema.long_name(value)
                 attributes[name] = self.attribute(name).validate(value)
-        except ValidationError, e:
-            raise  ValidationError, "%s: %s"%(self, e), sys.exc_info()[2]
+        except ValidationError as e:
+            raise ValidationError("%s: %s" % (self, e))
 
         return attributes
 
@@ -409,7 +487,7 @@ class EntityType(object):
                 raise ValidationError("Cannot set attribute '%s' in CREATE" % a)
 
     def update_check(self, new_attributes, old_attributes):
-        for a, v in new_attributes.iteritems():
+        for a, v in new_attributes.items():
             # Its not an error to include an attribute in UPDATE if the value is not changed.
             if not self.attribute(a).update and \
                not (a in old_attributes and old_attributes[a] == v):
@@ -419,7 +497,7 @@ class EntityType(object):
         """Json friendly representation"""
         return _dump_dict([
             ('attributes', OrderedDict(
-                (k, v.dump()) for k, v in self.attributes.iteritems()
+                (k, v.dump()) for k, v in self.attributes.items()
                 if k != 'type')), # Don't dump 'type' attribute, dumped separately.
             ('operations', self.operations),
             ('description', self.description or None),
@@ -453,6 +531,11 @@ class Schema(object):
         @param entity_types: Map of  { entityTypeName: { singleton:, attributes:{...}}}
         @param description: Human readable description.
         """
+        if logger_available:
+            self.log_adapter = LogAdapter("AGENT")
+        else:
+            self.log_adapter = None
+
         if prefix:
             self.prefix = prefix.strip('.')
             self.prefixdot = self.prefix + '.'
@@ -462,15 +545,21 @@ class Schema(object):
 
         def parsedefs(cls, defs):
             return OrderedDict((self.long_name(k), cls(k, self, **v))
-                               for k, v in (defs or {}).iteritems())
+                               for k, v in (defs or {}).items())
 
         self.entity_types = parsedefs(EntityType, entityTypes)
 
         self.all_attributes = set()
 
-        for e in self.entity_types.itervalues():
+        for e in self.entity_types.values():
             e.init()
-            self.all_attributes.update(e.attributes.keys())
+            self.all_attributes.update(dict_keys(e.attributes))
+
+    def log(self, level, text):
+        if not self.log_adapter:
+            return
+        info = traceback.extract_stack(limit=2)[0] # Caller frame info
+        self.log_adapter.log(level, text, info[0], info[1])
 
     def short_name(self, name):
         """Remove prefix from name if present"""
@@ -491,7 +580,7 @@ class Schema(object):
         return OrderedDict([
             ('prefix', self.prefix),
             ('entityTypes',
-             OrderedDict((e.short_name, e.dump()) for e in self.entity_types.itervalues()))
+             OrderedDict((e.short_name, e.dump()) for e in self.entity_types.values()))
         ])
 
     def _lookup(self, map, name, message, error):
@@ -549,7 +638,7 @@ class Schema(object):
 
     def entity(self, attributes):
         """Convert an attribute map into an L{SchemaEntity}"""
-        attributes = dict((k, v) for k, v in attributes.iteritems() if v is not None)
+        attributes = dict((k, v) for k, v in attributes.items() if v is not None)
         return SchemaEntity(self.entity_type(attributes['type']), attributes)
 
     def entities(self, attribute_maps):
@@ -558,14 +647,14 @@ class Schema(object):
 
     def filter(self, predicate):
         """Return an iterator over entity types that satisfy predicate."""
-        if predicate is None: return self.entity_types.itervalues()
-        return (t for t in self.entity_types.itervalues() if predicate(t))
+        if predicate is None: return self.entity_types.values()
+        return (t for t in self.entity_types.values() if predicate(t))
 
     def by_type(self, type):
         """Return an iterator over entity types that extend or are type.
         If type is None return all entities."""
         if not type:
-            return self.entity_types.itervalues()
+            return self.entity_types.values()
         else:
             return self.filter(lambda t: t.is_a(type))
 

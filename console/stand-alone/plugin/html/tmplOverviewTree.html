@@ -16,12 +16,18 @@
  specific language governing permissions and limitations
  under the License
 -->
-
-<div class="col-sm-9 col-md-10 col-sm-push-3 col-md-push-2" style="min-height: 990px;">
+<div class="col-xs-9">
     <ng-include src="'overviewGrid.html'"></ng-include>
 </div>
 
-<div class="col-sm-3 col-md-2 col-sm-pull-9 col-md-pull-10 sidebar-pf sidebar-pf-left" style="min-height: 990px;">
+<button type='button' class='navbar-toggle tree-menu-button' data-toggle="collapse" data-target=".overview-tree">
+    <span class="sr-only">Toggle navigation</span>
+    <span class="icon-bar"></span>
+    <span class="icon-bar"></span>
+    <span class="icon-bar"></span>
+ </button>
+
+<div class="overview-tree navbar-collapse collapse col-xs-3">
     <div class="pane-wrapper">
         <div class="pane-header-wrapper">
             <div ng-hide="largeNetwork" class="expand-collapse">

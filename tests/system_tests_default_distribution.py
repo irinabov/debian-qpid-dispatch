@@ -17,13 +17,19 @@
 # under the License.
 #
 
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+import unittest2 as unittest
 import re
-import system_test
 from subprocess import PIPE
-from system_test import TestCase, Qdrouterd, TIMEOUT
+from system_test import TestCase, Qdrouterd, TIMEOUT, main_module
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
 from proton import Message
+
 
 class DefaultDistributionTest(TestCase):
     """System tests for testing the defaultDistribution attribute of the router entity"""
@@ -46,8 +52,9 @@ class DefaultDistributionTest(TestCase):
 
     def run_qdstat(self, args, regexp=None, address=None):
         p = self.popen(
-            ['qdstat', '--bus', str(address or self.address), '--timeout', str(system_test.TIMEOUT) ] + args,
-            name='qdstat-'+self.id(), stdout=PIPE, expect=None)
+            ['qdstat', '--bus', str(address or self.address), '--timeout', str(TIMEOUT) ] + args,
+            name='qdstat-'+self.id(), stdout=PIPE, expect=None,
+            universal_newlines=True)
 
         out = p.communicate()[0]
         assert p.returncode == 0, \
@@ -72,12 +79,12 @@ class DefaultDistributionTest(TestCase):
 
     def test_general(self):
         out = self.run_qdstat(['--general'], r'(?s)Router Statistics.*Mode\s*Standalone')
-        self.assertTrue("Connections  1" in out)
-        self.assertTrue("Nodes        0" in out)
-        self.assertTrue("Auto Links   0" in out)
-        self.assertTrue("Link Routes  0" in out)
-        self.assertTrue("Router Id    QDR" in out)
-        self.assertTrue("Mode         standalone" in out)
+        self.assertTrue("Connections                      1" in out)
+        self.assertTrue("Nodes                            0" in out)
+        self.assertTrue("Auto Links                       0" in out)
+        self.assertTrue("Link Routes                      0" in out)
+        self.assertTrue("Router Id                        QDR" in out)
+        self.assertTrue("Mode                             standalone" in out)
 
 class Timeout(object):
     def __init__(self, parent):
@@ -184,3 +191,6 @@ class UnavailableAnonymousSender(MessagingHandler):
     def run(self):
         Container(self).run()
 
+
+if __name__ == '__main__':
+    unittest.main(main_module())

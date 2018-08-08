@@ -1,1 +1,0 @@
-../../stand-alone/plugin/js/qdrService.js

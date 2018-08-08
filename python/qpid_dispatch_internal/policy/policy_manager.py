@@ -21,10 +21,16 @@
 
 """
 
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
 import json
 import traceback
-from policy_local import PolicyLocal
-from ..dispatch import LogAdapter, LOG_INFO, LOG_TRACE, LOG_DEBUG, LOG_ERROR
+
+from .policy_local import PolicyLocal
+from ..dispatch import LogAdapter, LOG_INFO, LOG_TRACE, LOG_DEBUG, LOG_ERROR, LOG_WARNING
 
 
 
@@ -43,6 +49,7 @@ class PolicyManager(object):
         self._agent = agent
         self._policy_local = PolicyLocal(self)
         self.log_adapter = LogAdapter("POLICY")
+        self._use_hostname_patterns = False
 
     def log(self, level, text):
         info = traceback.extract_stack(limit=2)[0] # Caller frame info
@@ -64,8 +71,18 @@ class PolicyManager(object):
     def log_error(self, text):
         self._log(LOG_ERROR, text)
 
+    def log_warning(self, text):
+        self._log(LOG_WARNING, text)
+
     def get_agent(self):
         return self._agent
+
+    def get_use_hostname_patterns(self):
+        return self._use_hostname_patterns
+
+    def set_use_hostname_patterns(self, v):
+        self._use_hostname_patterns = v
+        self._policy_local.use_hostname_patterns = v
 
     #
     # Management interface to create a ruleset

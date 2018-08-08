@@ -18,11 +18,14 @@
 ##
 
 # Set default build type. Must come before project() which sets default to ""
-set (CMAKE_BUILD_TYPE RelWithDebInfo CACHE string
-  "Build type: Debug, Release, RelWithDebInfo or MinSizeRel (default RelWithDebInfo)")
-if (CMAKE_BUILD_TYPE MATCHES "Deb")
+if (NOT CMAKE_BUILD_TYPE)
+  set (CMAKE_BUILD_TYPE RelWithDebInfo CACHE string
+    "Build type: Debug, Release, RelWithDebInfo, MinSizeRel or Coverage (default RelWithDebInfo)" FORCE)
+endif(NOT CMAKE_BUILD_TYPE)
+if (CMAKE_BUILD_TYPE MATCHES "Deb|Cover")
   set (has_debug_symbols " (has debug symbols)")
-endif (CMAKE_BUILD_TYPE MATCHES "Deb")
+endif (CMAKE_BUILD_TYPE MATCHES "Deb|Cover")
+message(STATUS "Build type is \"${CMAKE_BUILD_TYPE}\"${has_debug_symbols}")
 
 project(qpid-dispatch C)
 
@@ -34,7 +37,7 @@ option(QD_MEMORY_STATS "Track memory pool usage statistics" ON)
 
 file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION.txt" QPID_DISPATCH_VERSION)
 
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 2.6.2)
 include(CheckLibraryExists)
 include(CheckSymbolExists)
 include(CheckFunctionExists)
@@ -42,8 +45,19 @@ include(CheckIncludeFiles)
 include(FindPythonInterp)
 include(FindPythonLibs)
 
+# Find python-unittest2
+execute_process(COMMAND "${PYTHON_EXECUTABLE}" "-c" "import unittest2"
+			RESULT_VARIABLE UNITTEST2_MISSING
+			ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
 enable_testing()
-include (CTest)
+if(UNITTEST2_MISSING)
+  message(STATUS "WARNING: python-unittest2 is not installed. ***unit tests cannot be run***" )
+  # add bogus test for folk who may have missed the cmake warning
+  add_test(WARNING_python_unittest2_module_NOT_INSTALLED false)
+else(UNITTEST2_MISSING)
+  include (CTest)
+endif(UNITTEST2_MISSING)
+
 
 if (NOT PYTHONLIBS_FOUND)
      message(FATAL_ERROR "Python Development Libraries are needed.")
@@ -100,7 +114,10 @@ endif (NOT COMMAND add_compile_options)
 find_library(pthread_lib pthread)
 find_library(dl_lib dl)
 find_library(rt_lib rt)
-find_package(Proton REQUIRED Core Proactor)
+
+find_package(Proton 0.23 REQUIRED)
+
+message(STATUS "Found Proton: ${Proton_LIBRARIES} (found version \"${Proton_VERSION}\")" )
 
 ## Optional dependencies
 include(FindLibWebSockets)
@@ -115,7 +132,11 @@ find_package_handle_standard_args(VALGRIND DEFAULT_MSG VALGRIND_EXECUTABLE)
 option(USE_VALGRIND "Use valgrind when running tests" OFF)
 
 if (USE_VALGRIND)
-  set(TEST_RUNNER "${VALGRIND_EXECUTABLE} --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite --error-exitcode=42 --suppressions=${CMAKE_SOURCE_DIR}/tests/valgrind.supp")
+  if (CMAKE_BUILD_TYPE MATCHES "Coverage")
+    message(WARNING "Building for coverage analysis; disabling valgrind run-time error detection")
+  else ()
+    set(TEST_RUNNER "${VALGRIND_EXECUTABLE} --quiet --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite --error-exitcode=42 --suppressions=${CMAKE_SOURCE_DIR}/tests/valgrind.supp")
+  endif ()
 endif()
 
 option(USE_SANITIZERS "Compile with sanitizers (ASan, UBSan, TSan); incompatible with Valgrind" OFF)
@@ -153,6 +174,21 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
  endif(HAS_PEDANTIC_FLAG)
  add_compile_options(-std=gnu99)
  add_compile_options(-pthread)
+ if (CMAKE_BUILD_TYPE MATCHES "Coverage")
+   set (CMAKE_C_FLAGS_COVERAGE "-g -O0 --coverage")
+   set (CMAKE_EXE_LINKER_FLAGS_COVERAGE "--coverage")
+   set (CMAKE_MODULE_LINKER_FLAGS_COVERAGE "--coverage")
+   set (CMAKE_SHARED_LINKER_FLAGS_COVERAGE "--coverage")
+   mark_as_advanced(
+     CMAKE_C_FLAGS_COVERAGE
+     CMAKE_EXE_LINKER_FLAGS_COVERAGE
+     CMAKE_MODULE_LINKER_FLAGS_COVERAGE
+     CMAKE_SHARED_LINKER_FLAGS_COVERAGE)
+   make_directory(${CMAKE_BINARY_DIR}/coverage_results)
+   add_custom_target(coverage
+     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/coverage_results
+     COMMAND ${CMAKE_SOURCE_DIR}/bin/record-coverage.sh ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR})
+ endif(CMAKE_BUILD_TYPE MATCHES "Coverage")
 else (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
  add_compile_options(-xc99)
  add_compile_options(-errwarn=%all)
@@ -189,7 +225,6 @@ install(FILES
   README
   DESTINATION ${QD_DOC_INSTALL_DIR})
 
-
 add_subdirectory(src) # Build src first so other subdirs can use QPID_DISPATCH_LIB
 
 # run.py environment runner script - needs QPID_DISPATCH_LIB
@@ -197,10 +232,12 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run.py.in ${CMAKE_CURRENT_BINARY_DIR}
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run.py.in ${CMAKE_CURRENT_BINARY_DIR}/tests/run.py)
 execute_process(COMMAND ${RUN} --sh OUTPUT_FILE config.sh)
 
-add_subdirectory(tests)
+if (NOT UNITTEST2_MISSING)
+  add_subdirectory(tests)
+endif(NOT UNITTEST2_MISSING)
 add_subdirectory(python)
 add_subdirectory(router)
-add_subdirectory(doc)
+add_subdirectory(docs)
 add_subdirectory(console)
 
 # reconfigure.in is a workaround to force cmake re-configuration. For example,

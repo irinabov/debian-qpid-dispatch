@@ -27,11 +27,36 @@
 
 
 typedef struct qd_parse_node qd_parse_tree_t;
-extern const char * const QD_PARSE_TREE_TOKEN_SEP;
 
-qd_parse_tree_t *qd_parse_tree_new(void);
+// Pattern matching algorithms
+// ADDRESS - configured address prefix/pattern matching
+//    token separators: '.' or '/'
+//    match exactly one: '*'
+//    match zero or more: '#'
+// AMQP_0_10 - compliant with old 0-10 draft Topic exchanges
+//    token separators: '.'
+//    match exactly one: '*'
+//    match zero or more: '#'
+// MQTT - compliant with MQTT wildcard topic filters
+//    token separators: '/'
+//    match exactly one: '+'
+//    match zero or more: '#'
+//    Note: '#' only permitted at end of pattern
+//
+typedef enum {
+    QD_PARSE_TREE_ADDRESS,
+    QD_PARSE_TREE_AMQP_0_10,
+    QD_PARSE_TREE_MQTT
+} qd_parse_tree_type_t;
+
+qd_parse_tree_t *qd_parse_tree_new(qd_parse_tree_type_t type);
 void qd_parse_tree_free(qd_parse_tree_t *tree);
+qd_parse_tree_type_t qd_parse_tree_type(const qd_parse_tree_t *tree);
+const char *qd_parse_address_token_sep();
 
+// verify the pattern is in a legal format for the given tree's match algorithm
+bool qd_parse_tree_validate_pattern(const qd_parse_tree_t *tree,
+                                    const qd_iterator_t *pattern);
 
 // returns old payload or NULL if new
 void *qd_parse_tree_add_pattern(qd_parse_tree_t *node,
@@ -52,11 +77,11 @@ bool qd_parse_tree_get_pattern(qd_parse_tree_t *tree,
 // first):
 //
 // 1) exact token match
-// 2) * wildcard match
-// 3) # wildcard match
+// 2) "match exactly one" wildcard match
+// 3) "match zero or more" wildcard match
 //
 // example:
-//   given patterns
+//   given the following AMQP 0-10 topic patterns:
 //   1) 'a.b.c'
 //   2) 'a.b.*'
 //   3)'a.b.#'
@@ -85,4 +110,21 @@ void qd_parse_tree_search(qd_parse_tree_t *tree, const qd_iterator_t *value,
 // visit each terminal node on the tree, returns last value returned by callback
 bool qd_parse_tree_walk(qd_parse_tree_t *tree, qd_parse_tree_visit_t *callback, void *handle);
 
+//
+// parse tree functions using string interface
+//
+
+// returns old payload or NULL if new
+void *qd_parse_tree_add_pattern_str(qd_parse_tree_t *node,
+                                    const char *pattern,
+                                    void *payload);
+
+// returns true on match and sets *payload
+bool qd_parse_tree_retrieve_match_str(qd_parse_tree_t *tree,
+                                      const char *value,
+                                      void **payload);
+
+// returns old payload or NULL if not present
+void *qd_parse_tree_remove_pattern_str(qd_parse_tree_t *node,
+                                       const char *pattern);
 #endif /* parse_tree.h */

@@ -19,6 +19,11 @@
 # under the License.
 #
 
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
 import sys, json, re
 import  qpid_dispatch_site
 from qpid_dispatch.management.client import Node, Url
@@ -26,18 +31,31 @@ from collections import Mapping, Sequence
 from optparse import OptionGroup
 from qpid_dispatch_internal.tools.command import OptionParser, Option, UsageError, connection_options, check_args, \
     main, opts_ssl_domain, opts_url, opts_sasl
+from qpid_dispatch_internal.management.qdrouter import QdSchema
+from qpid_dispatch_internal.compat import PY_TEXT_TYPE
+from qpid_dispatch_internal.compat import PY_STRING_TYPE
 
-def attr_split(attrstr):
+INTEGER_TYPE = "integer"
+
+def attr_split(attrstr, qd_schema, type):
     """Split an attribute string of the form name=value or name to indicate None"""
     nv = attrstr.split("=", 1)
-    if len(nv) == 1: return [nv[0], None]
+    if len(nv) == 1:
+        return [nv[0], None]
     else:
-        if nv[1] == "true": nv[1] = True
-        if nv[1] == "false": nv[1] = False
+        if nv[1] == "true":
+            nv[1] = True
+        elif nv[1] == "false":
+            nv[1] = False
+        elif type and qd_schema.entity_type(type) and qd_schema.entity_type(type).attribute(nv[0]).type == INTEGER_TYPE:
+            nv[1] = int(nv[1])
+
         return nv
+
 
 class QdManage():
     def __init__(self):
+        self.qd_schema = QdSchema()
         self.prefix = 'org.apache.qpid.dispatch.'
         self.operations = ['QUERY', 'CREATE', 'READ', 'UPDATE', 'DELETE',
                            'GET-TYPES', 'GET-OPERATIONS', 'GET-ATTRIBUTES', 'GET-ANNOTATIONS',
@@ -67,7 +85,9 @@ class QdManage():
 
     def run(self, argv):
         # Make all args unicode to avoid encoding arg values as AMQP bytes.
-        self.opts, self.args = self.op.parse_args([unicode(x) for x in argv[1:]])
+        al = [x.decode() if not isinstance(x, PY_TEXT_TYPE) else x
+              for x in argv[1:]]
+        self.opts, self.args = self.op.parse_args(al)
         self.clean_opts()
         if self.opts.indent == -1:
             self.opts.indent = None
@@ -76,6 +96,7 @@ class QdManage():
         self.node = Node.connect(opts_url(self.opts), self.opts.router, self.opts.timeout,
                                  opts_ssl_domain(self.opts),
                                  opts_sasl(self.opts))
+
         operation = self.args.pop(0)
         method = operation.lower().replace('-','_')
         if operation.upper() in self.operations and hasattr(self, method):
@@ -88,18 +109,18 @@ class QdManage():
 
     def print_json(self, data):
         """Print data as JSON"""
-        print json.dumps(data, indent=self.opts.indent)
+        print("%s" % json.dumps(data, indent=self.opts.indent))
 
     def print_result(self, result):
         """Print a string result as-is, else try json dump, else print as-is"""
         if not result: return
-        if isinstance(result, basestring):
-            print result
+        if isinstance(result, (PY_STRING_TYPE, PY_TEXT_TYPE)):
+            print("%s" % result)
         else:
             try:
                 self.print_json(result)
             except ValueError:
-                print result
+                print("%s" % result)
 
     def long_type(self, type):
         if not type or "." in type:
@@ -149,7 +170,7 @@ class QdManage():
     def create(self):
         """create [ATTR=VALUE...]   Create a new entity."""
         if self.args:
-            self.opts.attributes = dict(attr_split(arg) for arg in self.args)
+            self.opts.attributes = dict(attr_split(arg, self.qd_schema, self.opts.type) for arg in self.args)
         self.call_bulk(lambda attrs: self.call_node('create', 'type', 'name', attributes=attrs))
 
     def read(self):
@@ -160,7 +181,7 @@ class QdManage():
     def update(self):
         """update [ATTR=VALUE...]   Update an entity."""
         if self.args:
-            self.opts.attributes = dict(attr_split(arg) for arg in self.args)
+            self.opts.attributes = dict(attr_split(arg, self.qd_schema, self.opts.type) for arg in self.args)
         self.call_bulk(
             lambda attrs: self.call_node('update', 'type', 'name', 'identity', attributes=attrs))
 
@@ -171,22 +192,26 @@ class QdManage():
 
     def get_types(self):
         """get-types [TYPE]         List entity types with their base types."""
-        self.opts.type = check_args(self.args, 1)[0]
+        if not self.opts.type:
+            self.opts.type = check_args(self.args, 1)[0]
         self.print_json(self.call_node('get_types', 'type'))
 
     def get_annotations(self):
         """get-annotations [TYPE]   List entity types with the annotations they implement."""
-        self.opts.type = check_args(self.args, 1)[0]
+        if not self.opts.type:
+            self.opts.type = check_args(self.args, 1)[0]
         self.print_json(self.call_node('get_annotations', 'type'))
 
     def get_attributes(self):
         """get-attributes [TYPE]    List entity types with their attributes."""
-        self.opts.type = check_args(self.args, 1)[0]
+        if not self.opts.type:
+            self.opts.type = check_args(self.args, 1)[0]
         self.print_json(self.call_node('get_attributes', 'type'))
 
     def get_operations(self):
         """get-operations [TYPE]    List entity types with their operations."""
-        self.opts.type = check_args(self.args, 1)[0]
+        if not self.opts.type:
+            self.opts.type = check_args(self.args, 1)[0]
         self.print_json(self.call_node('get_operations', 'type'))
 
     def get_mgmt_nodes(self):
@@ -197,14 +222,14 @@ class QdManage():
     def json_arg(self, value):
         try:
             return json.loads(value)
-        except ValueError, e:
+        except ValueError as e:
             if not re.search(r'["{}\[\]]', value): # Doesn't look like attempted JSON.
                 return value    # Just treat as plain string
             raise ValueError("Invalid JSON '%s': %s" % (value, e))
 
     def operation(self, operation):
         """operation [ATTR=VALUE...]   Call custom operation with ATTR=VALUE as request properties. Use --body and --properties if specified."""
-        properties = dict(attr_split(arg) for arg in self.args or [])
+        properties = dict(attr_split(arg, self.qd_schema, self.opts.type) for arg in self.args or [])
         if self.opts.properties:
             properties.update(self.json_arg(self.opts.properties))
         body = None

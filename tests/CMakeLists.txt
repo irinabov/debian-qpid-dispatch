@@ -33,6 +33,7 @@ set(unit_test_SOURCES
     failoverlist_test.c
     timer_test.c
     parse_tree_tests
+    proton_utils_tests.c
     )
 if (USE_MEMORY_POOL)
   list(APPEND unit_test_SOURCES alloc_test.c)
@@ -65,24 +66,30 @@ add_test(unit_tests_size_1     ${TEST_WRAP} -x unit_tests_size 1)
 add_test(unit_tests            ${TEST_WRAP} -x unit_tests ${CMAKE_CURRENT_SOURCE_DIR}/threads4.conf)
 
 # Unit test python modules
-add_test(router_engine_test    ${TEST_WRAP} -m unittest -v router_engine_test)
-add_test(management_test       ${TEST_WRAP} -m unittest -v management)
-add_test(router_policy_test    ${TEST_WRAP} -m unittest -v router_policy_test)
+add_test(router_engine_test    ${TEST_WRAP} -x unit2 -v router_engine_test)
+add_test(management_test       ${TEST_WRAP} -x unit2 -v management)
+add_test(router_policy_test    ${TEST_WRAP} -x unit2 -v router_policy_test)
 
 if(USE_LIBWEBSOCKETS)
   set(SYSTEM_TESTS_HTTP system_tests_http)
 endif()
 
+if(CONSOLE_INSTALL)
+  set(CONSOLE_TEST system_tests_console)
+endif(CONSOLE_INSTALL)
+
 # System test python modules
 foreach(py_test_module
 #   system_tests_broker
     system_tests_link_routes
+    system_tests_link_routes_add_external_prefix
     system_tests_autolinks
     system_tests_drain
     system_tests_management
     system_tests_one_router
     system_tests_handle_failover
     system_tests_default_distribution
+    system_tests_deprecated
     system_tests_policy
     system_tests_protocol_family
     system_tests_protocol_settings
@@ -97,15 +104,65 @@ foreach(py_test_module
     system_tests_dynamic_terminus
     system_tests_log_message_components
     system_tests_failover_list
-    system_tests_denied_unsettled_multicast
     system_tests_auth_service_plugin
+    system_tests_authz_service_plugin
     system_tests_delivery_abort
+    system_tests_topology
+    system_tests_topology_disposition
+    system_tests_topology_addition
+    system_tests_disallow_link_resumable_link_route
+    system_tests_global_delivery_counts
+    system_tests_exchange_bindings
+    system_tests_cmdline_parsing
+    system_tests_bad_configuration
+    system_tests_ssl
     ${SYSTEM_TESTS_HTTP}
+    ${CONSOLE_TEST}
     )
 
-  add_test(${py_test_module} ${TEST_WRAP} -m unittest -v ${py_test_module})
+  add_test(${py_test_module} ${TEST_WRAP} -x unit2 -v ${py_test_module})
   list(APPEND SYSTEM_TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/${py_test_module}.py)
 endforeach()
+
+# Use tox to run the flake8 python linter tool on all the python
+# sources. Highly recommended if you're hacking the python code.
+# Unfortunately this can only be done for versions of tox >= 1.9.0
+# since that version allows us to skip the install step (we have
+# no modules thus no setup.py)
+#
+find_program(TOX_EXE "tox")
+if (TOX_EXE)
+  set(TOX_MIN_VERSION 1.9.0)
+  execute_process(COMMAND ${PYTHON_EXECUTABLE} -c "import tox, sys; print('%s' % tox.__version__); sys.exit(0)"
+                  RESULT_VARIABLE TOX_STATUS
+                  OUTPUT_VARIABLE TOX_VERSION)
+  if (TOX_STATUS EQUAL 0)
+    string(STRIP ${TOX_VERSION} TOX_VERSION)
+    if (TOX_VERSION STRLESS TOX_MIN_VERSION)
+      message( STATUS "tox version ${TOX_VERSION} < required version ${TOX_MIN_VERSION} - skipping python-checker")
+    else (TOX_VERSION STRLESS TOX_MIN_VERSION)
+      configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tox.ini.in ${CMAKE_CURRENT_BINARY_DIR}/tox.ini)
+      add_test (NAME python-checker
+                COMMAND ${TOX_EXE}
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+      # Once we move to tox >= v1.7.2 we can remove the next
+      # line.  See tox.ini file for details
+      set_tests_properties(python-checker
+                           PROPERTIES
+                           PASS_REGULAR_EXPRESSION "commands succeeded"
+                           FAIL_REGULAR_EXPRESSION "commands failed")
+    endif (TOX_VERSION STRLESS TOX_MIN_VERSION)
+  else (TOX_STATUS EQUAL 0)
+    message(STATUS "Cannot determine tox version - skipping python-checker")
+  endif (TOX_STATUS EQUAL 0)
+
+else (TOX_EXE)
+  message(STATUS "Could NOT find 'tox' tool - unable to validate python code")
+endif ()
+
+
+
+
 
 # Additional files to install for running system tests.
 # NOTE: Don't install run.py. A system test of a dispatch installation should pick everything
@@ -129,6 +186,7 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-1/policy-safari.json      DESTINATI
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-2/policy-photoserver-sasl.sasldb  DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-2)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-3/test-sender-receiver-limits.json DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-3)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-4/management-access.json  DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-4/)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/authservice.py  DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
 # following install() functions will be called only if you do a make "install"
 install(FILES ${SYSTEM_TEST_FILES}

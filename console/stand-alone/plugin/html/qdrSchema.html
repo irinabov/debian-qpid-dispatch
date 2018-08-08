@@ -16,6 +16,45 @@ KIND, either express or implied.  See the License for the
 specific language governing permissions and limitations
 under the License.
 -->
+<style>
+    .page-menu-button {
+        display: none;
+    }
+
+
+span.fancytree-title {
+  color: black;
+  width: auto;
+  white-space: normal;
+}
+
+span.fancytree-node:hover {
+  color: white !important;
+  background-color: black !important;
+}
+span.fancytree-node:hover span.fancytree-title {
+  color: white;
+}
+
+span.fancytree-node.fancytree-active:hover, 
+span.fancytree-node.fancytree-active:hover span.fancytree-title {
+  color: white;
+}
+
+span.fancytree-expanded.fancytree-has-children, span.fancytree-expanded.fancytree-has-children + ul {
+  background-color: white;
+}
+span.fancytree-expanded.fancytree-has-children:hover {
+  background-color: black;
+}
+
+span.fancytree-node.fancytree-active {
+  background-color: #6aa3d5;
+}
+
+
+</style>
+
 <div class="main-display row-fluid" ng-controller="QDR.SchemaController">
     <div id="schema"></div>
 </div>

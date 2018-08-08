@@ -70,6 +70,7 @@ set(qpid_dispatch_SOURCES
   parse.c
   parse_tree.c
   policy.c
+  proton_utils.c
   remote_sasl.c
   posix/threading.c
   python_embedded.c
@@ -85,6 +86,7 @@ set(qpid_dispatch_SOURCES
   router_core/agent_router.c
   router_core/connections.c
   router_core/error.c
+  router_core/exchange_bindings.c
   router_core/forwarder.c
   router_core/route_control.c
   router_core/router_core.c
@@ -99,6 +101,7 @@ set(qpid_dispatch_SOURCES
   server.c
   timer.c
   trace_mask.c
+  python_utils.c
   )
 
 # USE_LIBWEBSOCKETS is true only if LIBWEBSOCKETS_FOUND

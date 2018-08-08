@@ -35,23 +35,22 @@
 
 struct qd_config_ssl_profile_t {
     DEQ_LINKS(qd_config_ssl_profile_t);
-    uint64_t     identity;
     char        *name;
     char        *ssl_password;
     char        *ssl_trusted_certificate_db;
     char        *ssl_trusted_certificates;
     char        *ssl_uid_format;
-    char        *ssl_display_name_file;
+    char        *uid_name_mapping_file;
     char        *ssl_certificate_file;
     char        *ssl_private_key_file;
-    char        *ciphers;
+    char        *ssl_ciphers;
+    char        *ssl_protocols;
 };
 
 DEQ_DECLARE(qd_config_ssl_profile_t, qd_config_ssl_profile_list_t);
 
 struct qd_config_sasl_plugin_t {
     DEQ_LINKS(qd_config_sasl_plugin_t);
-    uint64_t     identity;
     char        *name;
     char        *auth_service;
     char        *sasl_init_hostname;
@@ -126,7 +125,7 @@ void qd_server_config_free(qd_server_config_t *cf)
     free(cf->port);
     free(cf->host_port);
     free(cf->role);
-    if (cf->http_root)       free(cf->http_root);
+    if (cf->http_root_dir)   free(cf->http_root_dir);
     if (cf->name)            free(cf->name);
     if (cf->protocol_family) free(cf->protocol_family);
     if (cf->sasl_username)   free(cf->sasl_username);
@@ -141,12 +140,13 @@ void qd_server_config_free(qd_server_config_t *cf)
 
     if (cf->ssl_certificate_file)       free(cf->ssl_certificate_file);
     if (cf->ssl_private_key_file)       free(cf->ssl_private_key_file);
-    if (cf->ciphers)                    free(cf->ciphers);
+    if (cf->ssl_ciphers)                free(cf->ssl_ciphers);
+    if (cf->ssl_protocols)              free(cf->ssl_protocols);
     if (cf->ssl_password)               free(cf->ssl_password);
     if (cf->ssl_trusted_certificate_db) free(cf->ssl_trusted_certificate_db);
     if (cf->ssl_trusted_certificates)   free(cf->ssl_trusted_certificates);
     if (cf->ssl_uid_format)             free(cf->ssl_uid_format);
-    if (cf->ssl_display_name_file)      free(cf->ssl_display_name_file);
+    if (cf->ssl_uid_name_mapping_file)  free(cf->ssl_uid_name_mapping_file);
     memset(cf, 0, sizeof(*cf));
 }
 
@@ -290,12 +290,12 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
     qd_error_clear();
 
     bool authenticatePeer   = qd_entity_opt_bool(entity, "authenticatePeer",  false);    CHECK();
-    bool verifyHostName     = qd_entity_opt_bool(entity, "verifyHostName",    true);     CHECK();
+    bool verifyHostName     = qd_entity_opt_bool(entity, "verifyHostname",    true);     CHECK();
     bool requireEncryption  = qd_entity_opt_bool(entity, "requireEncryption", false);    CHECK();
     bool requireSsl         = qd_entity_opt_bool(entity, "requireSsl",        false);    CHECK();
 
     memset(config, 0, sizeof(*config));
-    config->log_message          = qd_entity_opt_string(entity, "logMessage", 0);     CHECK();
+    config->log_message          = qd_entity_opt_string(entity, "messageLoggingComponents", 0);     CHECK();
     config->log_bits             = populate_log_message(config);
     config->port                 = qd_entity_get_string(entity, "port");              CHECK();
     config->name                 = qd_entity_opt_string(entity, "name", 0);           CHECK();
@@ -303,8 +303,8 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
     config->inter_router_cost    = qd_entity_opt_long(entity, "cost", 1);             CHECK();
     config->protocol_family      = qd_entity_opt_string(entity, "protocolFamily", 0); CHECK();
     config->http                 = qd_entity_opt_bool(entity, "http", false);         CHECK();
-    config->http_root            = qd_entity_opt_string(entity, "httpRoot", false);   CHECK();
-    config->http = config->http || config->http_root; /* httpRoot implies http */
+    config->http_root_dir        = qd_entity_opt_string(entity, "httpRootDir", false);   CHECK();
+    config->http = config->http || config->http_root_dir; /* httpRoot implies http */
     config->max_frame_size       = qd_entity_get_long(entity, "maxFrameSize");        CHECK();
     config->max_sessions         = qd_entity_get_long(entity, "maxSessions");         CHECK();
     uint64_t ssn_frames          = qd_entity_opt_long(entity, "maxSessionFrames", 0); CHECK();
@@ -386,12 +386,13 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
         if (ssl_profile) {
             config->ssl_certificate_file = SSTRDUP(ssl_profile->ssl_certificate_file);
             config->ssl_private_key_file = SSTRDUP(ssl_profile->ssl_private_key_file);
-            config->ciphers = SSTRDUP(ssl_profile->ciphers);
+            config->ssl_ciphers = SSTRDUP(ssl_profile->ssl_ciphers);
+            config->ssl_protocols = SSTRDUP(ssl_profile->ssl_protocols);
             config->ssl_password = SSTRDUP(ssl_profile->ssl_password);
             config->ssl_trusted_certificate_db = SSTRDUP(ssl_profile->ssl_trusted_certificate_db);
             config->ssl_trusted_certificates = SSTRDUP(ssl_profile->ssl_trusted_certificates);
             config->ssl_uid_format = SSTRDUP(ssl_profile->ssl_uid_format);
-            config->ssl_display_name_file = SSTRDUP(ssl_profile->ssl_display_name_file);
+            config->ssl_uid_name_mapping_file = SSTRDUP(ssl_profile->uid_name_mapping_file);
         }
     }
 
@@ -425,9 +426,14 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
                         }
                     }
                 }
-                if (auth_ssl_profile->ciphers) {
-                    if (pn_ssl_domain_set_ciphers(config->auth_ssl_conf, auth_ssl_profile->ciphers)) {
+                if (auth_ssl_profile->ssl_ciphers) {
+                    if (pn_ssl_domain_set_ciphers(config->auth_ssl_conf, auth_ssl_profile->ssl_ciphers)) {
                         return qd_error(QD_ERROR_RUNTIME, "Cannot set ciphers. The ciphers string might be invalid. Use openssl ciphers -v <ciphers> to validate");
+                    }
+                }
+                if (auth_ssl_profile->ssl_protocols) {
+                    if (pn_ssl_domain_set_protocols(config->auth_ssl_conf, auth_ssl_profile->ssl_protocols)) {
+                        return qd_error(QD_ERROR_RUNTIME, "Cannot set protocols. The protocols string might be invalid. This list is a space separated string of the allowed TLS protocols (TLSv1 TLSv1.1 TLSv1.2)");
                     }
                 }
 
@@ -468,10 +474,11 @@ static bool config_ssl_profile_free(qd_connection_manager_t *cm, qd_config_ssl_p
     free(ssl_profile->ssl_trusted_certificate_db);
     free(ssl_profile->ssl_trusted_certificates);
     free(ssl_profile->ssl_uid_format);
-    free(ssl_profile->ssl_display_name_file);
+    free(ssl_profile->uid_name_mapping_file);
     free(ssl_profile->ssl_certificate_file);
     free(ssl_profile->ssl_private_key_file);
-    free(ssl_profile->ciphers);
+    free(ssl_profile->ssl_ciphers);
+    free(ssl_profile->ssl_protocols);
     free(ssl_profile);
     return true;
 
@@ -501,8 +508,13 @@ qd_config_ssl_profile_t *qd_dispatch_configure_ssl_profile(qd_dispatch_t *qd, qd
     DEQ_INSERT_TAIL(cm->config_ssl_profiles, ssl_profile);
     ssl_profile->name                       = qd_entity_opt_string(entity, "name", 0); CHECK();
     ssl_profile->ssl_certificate_file       = qd_entity_opt_string(entity, "certFile", 0); CHECK();
-    ssl_profile->ssl_private_key_file       = qd_entity_opt_string(entity, "keyFile", 0); CHECK();
+    ssl_profile->ssl_private_key_file       = qd_entity_opt_string(entity, "privateKeyFile", 0); CHECK();
     ssl_profile->ssl_password               = qd_entity_opt_string(entity, "password", 0); CHECK();
+
+    if (ssl_profile->ssl_password) {
+        qd_log(cm->log_source, QD_LOG_WARNING, "Attribute password of entity sslProfile has been deprecated. Use passwordFile instead.");
+    }
+
 
     if (!ssl_profile->ssl_password) {
         // SSL password not provided. Check if passwordFile property is specified.
@@ -534,11 +546,12 @@ qd_config_ssl_profile_t *qd_dispatch_configure_ssl_profile(qd_dispatch_t *qd, qd
         }
         free(password_file);
     }
-    ssl_profile->ciphers = qd_entity_opt_string(entity, "ciphers", 0); CHECK();
-    ssl_profile->ssl_trusted_certificate_db = qd_entity_opt_string(entity, "certDb", 0); CHECK();
-    ssl_profile->ssl_trusted_certificates   = qd_entity_opt_string(entity, "trustedCerts", 0); CHECK();
-    ssl_profile->ssl_uid_format             = qd_entity_opt_string(entity, "uidFormat", 0); CHECK();
-    ssl_profile->ssl_display_name_file      = qd_entity_opt_string(entity, "displayNameFile", 0); CHECK();
+    ssl_profile->ssl_ciphers   = qd_entity_opt_string(entity, "ciphers", 0);                   CHECK();
+    ssl_profile->ssl_protocols = qd_entity_opt_string(entity, "protocols", 0);                 CHECK();
+    ssl_profile->ssl_trusted_certificate_db = qd_entity_opt_string(entity, "caCertFile", 0);   CHECK();
+    ssl_profile->ssl_trusted_certificates   = qd_entity_opt_string(entity, "trustedCertsFile", 0);   CHECK();
+    ssl_profile->ssl_uid_format             = qd_entity_opt_string(entity, "uidFormat", 0);          CHECK();
+    ssl_profile->uid_name_mapping_file      = qd_entity_opt_string(entity, "uidNameMappingFile", 0); CHECK();
 
     //
     // Process the password to handle any modifications or lookups needed
@@ -560,12 +573,38 @@ qd_config_sasl_plugin_t *qd_dispatch_configure_sasl_plugin(qd_dispatch_t *qd, qd
     qd_connection_manager_t *cm = qd->connection_manager;
 
     qd_config_sasl_plugin_t *sasl_plugin = NEW(qd_config_sasl_plugin_t);
+    ZERO(sasl_plugin);
     DEQ_ITEM_INIT(sasl_plugin);
     DEQ_INSERT_TAIL(cm->config_sasl_plugins, sasl_plugin);
     sasl_plugin->name                       = qd_entity_opt_string(entity, "name", 0); CHECK();
-    sasl_plugin->auth_service               = qd_entity_opt_string(entity, "authService", 0); CHECK();
-    sasl_plugin->sasl_init_hostname         = qd_entity_opt_string(entity, "saslInitHostname", 0); CHECK();
-    sasl_plugin->auth_ssl_profile           = qd_entity_opt_string(entity, "authSslProfile", 0); CHECK();
+
+    char *auth_host = qd_entity_opt_string(entity, "host", 0);
+    char *auth_port = qd_entity_opt_string(entity, "port", 0);
+
+    if (auth_host && auth_port) {
+        int strlen_auth_host = strlen(auth_host);
+        int strlen_auth_port = strlen(auth_port);
+
+        if (strlen_auth_host > 0 && strlen_auth_port > 0) {
+
+            int hplen = strlen(auth_host) + strlen(auth_port) + 2;
+            if (hplen > 2) {
+                sasl_plugin->auth_service = malloc(hplen);
+                snprintf(sasl_plugin->auth_service, hplen, "%s:%s", auth_host, auth_port);
+            }
+        }
+    }
+
+    free(auth_host);
+    free(auth_port);
+
+    if (!sasl_plugin->auth_service) {
+        sasl_plugin->auth_service               = qd_entity_opt_string(entity, "authService", 0); CHECK();
+        qd_log(cm->log_source, QD_LOG_WARNING, "Attribute authService of entity authServicePlugin has been deprecated. Use host and port instead.");
+    }
+
+    sasl_plugin->sasl_init_hostname         = qd_entity_opt_string(entity, "realm", 0); CHECK();
+    sasl_plugin->auth_ssl_profile           = qd_entity_opt_string(entity, "sslProfile", 0); CHECK();
 
     qd_log(cm->log_source, QD_LOG_INFO, "Created SASL plugin config with name %s", sasl_plugin->name);
     return sasl_plugin;
@@ -595,7 +634,7 @@ qd_listener_t *qd_dispatch_configure_listener(qd_dispatch_t *qd, qd_entity_t *en
         qd_listener_decref(li);
         return 0;
     }
-    char *fol = qd_entity_opt_string(entity, "failoverList", 0);
+    char *fol = qd_entity_opt_string(entity, "failoverUrls", 0);
     if (fol) {
         li->config.failover_list = qd_failover_list(fol);
         free(fol);
@@ -621,12 +660,18 @@ qd_error_t qd_entity_refresh_listener(qd_entity_t* entity, void *impl)
 }
 
 
+/**
+ * Calculates the total length of the failover  list string.
+ * For example, the failover list string can look like this - "amqp://0.0.0.0:62616, amqp://0.0.0.0:61616"
+ * This function calculates the length of the above string by adding up the scheme (amqp or qmqps) and host_port for each failover item.
+ * It also assumes that there will be a comma and a space between each failover item.
+ *
+ */
 static int get_failover_info_length(qd_failover_item_list_t   conn_info_list)
 {
     int arr_length = 0;
     qd_failover_item_t *item = DEQ_HEAD(conn_info_list);
 
-    item = DEQ_NEXT(item);
     while(item) {
         if (item->scheme) {
             // The +3 is for the '://'
@@ -637,7 +682,7 @@ static int get_failover_info_length(qd_failover_item_list_t   conn_info_list)
         }
         item = DEQ_NEXT(item);
         if (item) {
-            // This is for the comma between the items
+            // This is for the comma and space between the items
             arr_length += 2;
         }
     }
@@ -649,27 +694,50 @@ static int get_failover_info_length(qd_failover_item_list_t   conn_info_list)
     return arr_length;
 }
 
+/**
+ *
+ * Creates a failover url list. This comma separated failover list shows a list of urls that the router will attempt
+ * to connect to in case the primary connection fails. The router will attempt these failover connections to urls in
+ * the order that they appear in the list.
+ *
+ */
 qd_error_t qd_entity_refresh_connector(qd_entity_t* entity, void *impl)
 {
     qd_connector_t *ct = (qd_connector_t*) impl;
 
-    if (DEQ_SIZE(ct->conn_info_list) > 1) {
-        qd_failover_item_list_t   conn_info_list = ct->conn_info_list;
+    int conn_index = ct->conn_index;
 
-        qd_failover_item_t *item = DEQ_HEAD(conn_info_list);
+    int i = 1;
+    int num_items = 0;
 
-        //
-        // As you can see we are skipping the head of the list. The
-        // first item in the list is always the original connection information
-        // and we dont want to display that information as part of the failover list.
-        //
-        int arr_length = get_failover_info_length(conn_info_list);
-        char failover_info[arr_length];
-        memset(failover_info, 0, sizeof(failover_info));
+    qd_failover_item_list_t   conn_info_list = ct->conn_info_list;
 
-        item = DEQ_NEXT(item);
+    int conn_info_len = DEQ_SIZE(conn_info_list);
 
-        while(item) {
+    qd_failover_item_t *item = DEQ_HEAD(conn_info_list);
+
+    int arr_length = get_failover_info_length(conn_info_list);
+
+    // This is the string that will contain the comma separated failover list
+    char failover_info[arr_length];
+
+    memset(failover_info, 0, sizeof(failover_info));
+
+    while(item) {
+
+        // Break out of the loop when we have hit all items in the list.
+        if (num_items >= conn_info_len)
+            break;
+
+        if (num_items >= 1) {
+            strcat(failover_info, ", ");
+        }
+
+        // We need to go to the elements in the list to get to the
+        // element that matches the connection index. This is the first
+        // url that the router will try to connect on ffailover.
+        if (conn_index == i) {
+            num_items += 1;
             if (item->scheme) {
                 strcat(failover_info, item->scheme);
                 strcat(failover_info, "://");
@@ -677,19 +745,29 @@ qd_error_t qd_entity_refresh_connector(qd_entity_t* entity, void *impl)
             if (item->host_port) {
                 strcat(failover_info, item->host_port);
             }
-            item = DEQ_NEXT(item);
-            if (item) {
-                strcat(failover_info, ", ");
+        }
+        else {
+            if (num_items > 0) {
+                num_items += 1;
+                if (item->scheme) {
+                    strcat(failover_info, item->scheme);
+                    strcat(failover_info, "://");
+                }
+                if (item->host_port) {
+                    strcat(failover_info, item->host_port);
+                }
             }
         }
 
-        if (qd_entity_set_string(entity, "failoverList", failover_info) == 0)
-            return QD_ERROR_NONE;
+        i += 1;
+
+        item = DEQ_NEXT(item);
+        if (item == 0)
+            item = DEQ_HEAD(conn_info_list);
     }
-    else {
-        if (qd_entity_clear(entity, "failoverList") == 0)
-            return QD_ERROR_NONE;
-    }
+
+    if (qd_entity_set_string(entity, "failoverUrls", failover_info) == 0)
+        return QD_ERROR_NONE;
 
     return qd_error_code();
 }
@@ -710,10 +788,13 @@ qd_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_entity_t *
         //
         qd_failover_item_t *item = NEW(qd_failover_item_t);
         ZERO(item);
-        item->scheme   = 0;
+        if (ct->config.ssl_required)
+            item->scheme   = strdup("amqps");
+        else
+            item->scheme   = strdup("amqp");
+
         item->host     = strdup(ct->config.host);
         item->port     = strdup(ct->config.port);
-        item->hostname = 0;
 
         int hplen = strlen(item->host) + strlen(item->port) + 2;
         item->host_port = malloc(hplen);

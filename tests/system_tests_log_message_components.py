@@ -17,12 +17,19 @@
 # under the License.
 #
 
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+import unittest2 as unittest
 import json
 from proton import Message, symbol
 from system_test import TestCase, Qdrouterd, Process, TIMEOUT
 from subprocess import PIPE, STDOUT
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
+from qpid_dispatch_internal.compat import BINARY
 
 
 
@@ -34,11 +41,12 @@ class RouterMessageLogTestBase(TestCase):
             ['--bus',
              address or self.address(),
              '--indent=-1', '--timeout', str(TIMEOUT)],
-            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect)
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
+            universal_newlines=True)
         out = p.communicate(input)[0]
         try:
             p.teardown()
-        except Exception, e:
+        except Exception as e:
             raise Exception("%s\n%s" % (e, out))
         return out
 
@@ -52,7 +60,7 @@ class RouterMessageLogTestAll(RouterMessageLogTestBase):
         config = Qdrouterd.Config([
             ('router', {'mode': 'standalone', 'id': 'QDR'}),
 
-            ('listener', {'port': cls.tester.get_port(), 'logMessage': 'all'}),
+            ('listener', {'port': cls.tester.get_port(), 'messageLoggingComponents': 'all'}),
 
             ('address', {'prefix': 'closest', 'distribution': 'closest'}),
             ('address', {'prefix': 'spread', 'distribution': 'balanced'}),
@@ -134,7 +142,8 @@ class RouterMessageLogTestSome(RouterMessageLogTestBase):
         name = "test-router"
         config = Qdrouterd.Config([
             ('router', {'mode': 'standalone', 'id': 'QDR'}),
-
+            # logMessage has been deprecated. We are using it here so we can make sure that it is still
+            # backward compatible.
             ('listener', {'port': cls.tester.get_port(), 'logMessage': 'message-id,user-id,subject,reply-to'}),
 
             ('address', {'prefix': 'closest', 'distribution': 'closest'}),
@@ -179,7 +188,7 @@ class LogMessageTest(MessagingHandler):
             msg = Message()
             msg.address = self.address
             msg.id = '123455'
-            msg.user_id = 'testuser'
+            msg.user_id = BINARY('testuser')
             msg.subject = 'test-subject'
             msg.content_type = 'text/html; charset=utf-8'
             msg.correlation_id = 89
@@ -203,3 +212,7 @@ class LogMessageTest(MessagingHandler):
 
     def run(self):
         Container(self).run()
+
+
+if __name__ == '__main__':
+    unittest.main()

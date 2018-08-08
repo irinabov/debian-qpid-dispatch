@@ -17,7 +17,12 @@
 # under the License.
 #
 
-import unittest
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+import unittest2 as unittest
 
 from qpid_dispatch_internal.policy.policy_util import HostAddr, is_ipv6_enabled
 from qpid_dispatch_internal.policy.policy_util import HostStruct
@@ -133,6 +138,8 @@ class MockPolicyManager(object):
         print("TRACE: %s" % text)
     def log_error(self, text):
         print("ERROR: %s" % text)
+    def log_warning(self, text):
+        print("WARNING: %s" % text)
 
     def get_agent(self):
         return self.agent
@@ -158,8 +165,8 @@ class PolicyFile(TestCase):
         self.assertTrue(upolicy['maxReceivers']             == 44)
         self.assertTrue(upolicy['allowAnonymousSender'])
         self.assertTrue(upolicy['allowDynamicSource'])
-        self.assertTrue(upolicy['targets'] == 'private')
-        self.assertTrue(upolicy['sources'] == 'private')
+        self.assertTrue(upolicy['targets'] == 'a,private,')
+        self.assertTrue(upolicy['sources'] == 'a,private,')
 
     def test_policy1_test_zeke_bad_IP(self):
         self.assertTrue(
@@ -218,8 +225,8 @@ class PolicyFileApplicationFallback(TestCase):
         self.assertTrue(upolicy['maxReceivers']             == 44)
         self.assertTrue(upolicy['allowAnonymousSender'])
         self.assertTrue(upolicy['allowDynamicSource'])
-        self.assertTrue(upolicy['targets'] == 'private')
-        self.assertTrue(upolicy['sources'] == 'private')
+        self.assertTrue(upolicy['targets'] == 'a,private,')
+        self.assertTrue(upolicy['sources'] == 'a,private,')
 
         # Disable fallback and show failure again
         self.policy.set_default_vhost('')
@@ -315,6 +322,7 @@ class PolicyAppConnectionMgrTests(TestCase):
         self.assertTrue(stats.connections_active == 10000)
         self.assertTrue(stats.connections_approved == 10000)
         self.assertTrue(stats.connections_denied == 1)
+
 
 if __name__ == '__main__':
     unittest.main(main_module())
