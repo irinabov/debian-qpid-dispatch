@@ -17,7 +17,9 @@
  * under the License.
  */
 
-#include <Python.h>
+#include "python_private.h"             // must be first!
+#include <qpid/dispatch/python_embedded.h>
+
 #include <qpid/dispatch/ctools.h>
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/log.h>
@@ -32,7 +34,7 @@
 #include <proton/proactor.h>
 #include <proton/sasl.h>
 
-#include "qpid/dispatch/python_embedded.h"
+
 #include "entity.h"
 #include "entity_cache.h"
 #include "dispatch_private.h"
@@ -92,6 +94,7 @@ char *COMPONENT_SEPARATOR = ";";
 static const int BACKLOG = 50;  /* Listening backlog */
 
 static void setup_ssl_sasl_and_open(qd_connection_t *ctx);
+static qd_failover_item_t *qd_connector_get_conn_info(qd_connector_t *ct);
 
 /**
  * This function is set as the pn_transport->tracer and is invoked when proton tries to write the log message to pn_transport->tracer
@@ -297,16 +300,13 @@ static const char *transport_get_user(qd_connection_t *conn, pn_transport_t *tpo
                     }
                 }
             }
-            if (config->ssl_display_name_file) {
+            if (config->ssl_uid_name_mapping_file) {
                 // Translate extracted id into display name
                 qd_python_lock_state_t lock_state = qd_python_lock();
                 PyObject *result = PyObject_CallMethod((PyObject *)conn->server->py_displayname_obj, "query", "(ss)", config->ssl_profile, user_id );
                 if (result) {
-                    const char *res_string = PyString_AsString(result);
                     free(user_id);
-                    user_id = malloc(strlen(res_string) + 1);
-                    user_id[0] = '\0';
-                    strcat(user_id, res_string);
+                    user_id = py_string_2_c(result);
                     Py_XDECREF(result);
                 } else {
                     qd_log(conn->server->log_source, QD_LOG_DEBUG, "Internal: failed to read displaynameservice query result");
@@ -380,10 +380,17 @@ static qd_error_t listener_setup_ssl(qd_connection_t *ctx, const qd_server_confi
         }
     }
 
-    if (config->ciphers) {
-        if (pn_ssl_domain_set_ciphers(domain, config->ciphers)) {
+    if (config->ssl_ciphers) {
+        if (pn_ssl_domain_set_ciphers(domain, config->ssl_ciphers)) {
             pn_ssl_domain_free(domain);
             return qd_error(QD_ERROR_RUNTIME, "Cannot set ciphers. The ciphers string might be invalid. Use openssl ciphers -v <ciphers> to validate");
+        }
+    }
+
+    if (config->ssl_protocols) {
+        if (pn_ssl_domain_set_protocols(domain, config->ssl_protocols)) {
+            pn_ssl_domain_free(domain);
+            return qd_error(QD_ERROR_RUNTIME, "Cannot set protocols. The protocols string might be invalid. This list is a space separated string of the allowed TLS protocols (TLSv1 TLSv1.1 TLSv1.2)");
         }
     }
 
@@ -638,7 +645,7 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
             pn_sasl_allowed_mechs(sasl, config->sasl_mechanisms);
         if (config->auth_service) {
             qd_log(server->log_source, QD_LOG_INFO, "enabling remote authentication service %s", config->auth_service);
-            qdr_use_remote_authentication_service(tport, config->auth_service, config->sasl_init_hostname, config->auth_ssl_conf);
+            qdr_use_remote_authentication_service(tport, config->auth_service, config->sasl_init_hostname, config->auth_ssl_conf, server->proactor);
         }
         pn_transport_require_auth(tport, config->requireAuthentication);
         pn_transport_require_encryption(tport, config->requireEncryption);
@@ -650,6 +657,7 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
     } else if (ctx->connector) { /* Establishing an outgoing connection */
         config = &ctx->connector->config;
         setup_ssl_sasl_and_open(ctx);
+
     } else {                    /* No connector and no listener */
         connect_fail(ctx, QD_AMQP_COND_INTERNAL_ERROR, "unknown Connection");
         return;
@@ -688,14 +696,33 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event);
 
 static void handle_listener(pn_event_t *e, qd_server_t *qd_server) {
     qd_log_source_t *log = qd_server->log_source;
+
     qd_listener_t *li = (qd_listener_t*) pn_listener_get_context(pn_event_listener(e));
     const char *host_port = li->config.host_port;
+    const char *port = li->config.port;
 
     switch (pn_event_type(e)) {
 
-    case PN_LISTENER_OPEN:
-        qd_log(log, QD_LOG_NOTICE, "Listening on %s", host_port);
+    case PN_LISTENER_OPEN: {
+
+        if (strcmp(port, "0") == 0) {
+            // If a 0 (zero) is specified for a port, get the actual listening port from the listener.
+            pn_listener_t *l = pn_event_listener(e);
+            const pn_netaddr_t *na = pn_netaddr_listening(l);
+            char str[PN_MAX_ADDR] = "";
+            pn_netaddr_str(na, str, sizeof(str));
+            // "str" contains the host and port on which this listener is listening.
+            if (li->config.name)
+                qd_log(log, QD_LOG_NOTICE, "Listening on %s (%s)", str, li->config.name);
+            else
+                qd_log(log, QD_LOG_NOTICE, "Listening on %s", str);
+        }
+        else {
+            qd_log(log, QD_LOG_NOTICE, "Listening on %s", host_port);
+        }
+
         break;
+    }
 
     case PN_LISTENER_ACCEPT:
         qd_log(log, QD_LOG_TRACE, "Accepting connection on %s", host_port);
@@ -744,13 +771,8 @@ static void qd_connection_free(qd_connection_t *ctx)
         ctx->connector->ctx = 0;
         // Increment the connection index by so that we can try connecting to the failover url (if any).
         bool has_failover = qd_connector_has_failover_info(ctx->connector);
-        if (has_failover) {
-            if (DEQ_SIZE(ctx->connector->conn_info_list) == ctx->connector->conn_index)
-                // Start round robin again
-                ctx->connector->conn_index = 1;
-            else
-                ctx->connector->conn_index += 1;
 
+        if (has_failover) {
             // Go thru the failover list round robin.
             // IMPORTANT: Note here that we set the re-try timer to 1 second.
             // We want to quickly keep cycling thru the failover urls every second.
@@ -778,16 +800,7 @@ static void qd_connection_free(qd_connection_t *ctx)
 
     invoke_deferred_calls(ctx, true);  // Discard any pending deferred calls
     sys_mutex_free(ctx->deferred_call_lock);
-
-    if (ctx->policy_settings) {
-        if (ctx->policy_settings->sources)
-            free(ctx->policy_settings->sources);
-        if (ctx->policy_settings->targets)
-            free(ctx->policy_settings->targets);
-        free (ctx->policy_settings);
-        ctx->policy_settings = 0;
-    }
-
+    qd_policy_settings_free(ctx->policy_settings);
     if (ctx->free_user_id) free((char*)ctx->user_id);
     if (ctx->timer) qd_timer_free(ctx->timer);
     free(ctx->name);
@@ -823,6 +836,22 @@ static void startup_timer_handler(void *context)
     qd_connection_invoke_deferred(ctx, timeout_on_handhsake, context);
 }
 
+static void qd_increment_conn_index(qd_connection_t *ctx)
+{
+    if (ctx->connector) {
+        qd_failover_item_t *item = qd_connector_get_conn_info(ctx->connector);
+
+        if (item->retries == 1) {
+            ctx->connector->conn_index += 1;
+            if (ctx->connector->conn_index > DEQ_SIZE(ctx->connector->conn_info_list))
+                ctx->connector->conn_index = 1;
+            item->retries = 0;
+        }
+        else
+            item->retries += 1;
+    }
+
+}
 
 /* Events involving a connection or listener are serialized by the proactor so
  * only one event per connection / listener will be processed at a time.
@@ -861,7 +890,7 @@ static bool handle(qd_server_t *qd_server, pn_event_t *e) {
         }
         break;
     }
-        
+
     case PN_CONNECTION_BOUND:
         on_connection_bound(qd_server, e);
         break;
@@ -876,6 +905,9 @@ static bool handle(qd_server_t *qd_server, pn_event_t *e) {
             ctx->opened = true;
             if (ctx->connector) {
                 ctx->connector->delay = 2000;  // Delay re-connect in case there is a recurring error
+                qd_failover_item_t *item = qd_connector_get_conn_info(ctx->connector);
+                if (item)
+                    item->retries = 0;
             }
         }
         break;
@@ -886,23 +918,24 @@ static bool handle(qd_server_t *qd_server, pn_event_t *e) {
 
     case PN_TRANSPORT_ERROR:
         {
-        pn_transport_t *transport = pn_event_transport(e);
-        pn_condition_t* condition = transport ? pn_transport_condition(transport) : NULL;
-        if (ctx && ctx->connector) { /* Outgoing connection */
-            const qd_server_config_t *config = &ctx->connector->config;
-            if (condition  && pn_condition_is_set(condition)) {
-                qd_log(qd_server->log_source, QD_LOG_INFO, "Connection to %s failed: %s %s", config->host_port,
-                       pn_condition_get_name(condition), pn_condition_get_description(condition));
-            } else {
-                qd_log(qd_server->log_source, QD_LOG_INFO, "Connection to %s failed", config->host_port);
+            pn_transport_t *transport = pn_event_transport(e);
+            pn_condition_t* condition = transport ? pn_transport_condition(transport) : NULL;
+            if (ctx && ctx->connector) { /* Outgoing connection */
+                qd_increment_conn_index(ctx);
+                const qd_server_config_t *config = &ctx->connector->config;
+                if (condition  && pn_condition_is_set(condition)) {
+                    qd_log(qd_server->log_source, QD_LOG_INFO, "Connection to %s failed: %s %s", config->host_port,
+                           pn_condition_get_name(condition), pn_condition_get_description(condition));
+                } else {
+                    qd_log(qd_server->log_source, QD_LOG_INFO, "Connection to %s failed", config->host_port);
+                }
+            } else if (ctx && ctx->listener) { /* Incoming connection */
+                if (condition && pn_condition_is_set(condition)) {
+                    qd_log(ctx->server->log_source, QD_LOG_INFO, "Connection from %s (to %s) failed: %s %s",
+                           ctx->rhost_port, ctx->listener->config.host_port, pn_condition_get_name(condition),
+                           pn_condition_get_description(condition));
+                }
             }
-        } else if (ctx && ctx->listener) { /* Incoming connection */
-            if (condition && pn_condition_is_set(condition)) {
-                qd_log(ctx->server->log_source, QD_LOG_INFO, "Connection from %s (to %s) failed: %s %s",
-                       ctx->rhost_port, ctx->listener->config.host_port, pn_condition_get_name(condition),
-                       pn_condition_get_description(condition));
-            }
-        }
         }
         break;
 
@@ -937,7 +970,7 @@ static void *thread_run(void *arg)
 }
 
 
-qd_failover_item_t *qd_connector_get_conn_info(qd_connector_t *ct) {
+static qd_failover_item_t *qd_connector_get_conn_info(qd_connector_t *ct) {
 
     qd_failover_item_t *item = DEQ_HEAD(ct->conn_info_list);
 
@@ -1052,10 +1085,18 @@ static void setup_ssl_sasl_and_open(qd_connection_t *ctx)
             }
         }
 
-        if (config->ciphers) {
-            if (pn_ssl_domain_set_ciphers(domain, config->ciphers)) {
+        if (config->ssl_ciphers) {
+            if (pn_ssl_domain_set_ciphers(domain, config->ssl_ciphers)) {
                 qd_log(ct->server->log_source, QD_LOG_ERROR,
                        "SSL cipher configuration failed for %s:%s",
+                       config->host, config->port);
+            }
+        }
+
+        if (config->ssl_protocols) {
+            if (pn_ssl_domain_set_protocols(domain, config->ssl_protocols)) {
+                qd_log(ct->server->log_source, QD_LOG_ERROR,
+                       "Permitted TLS protocols configuration failed %s:%s",
                        config->host, config->port);
             }
         }
@@ -1139,6 +1180,7 @@ qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *containe
 void qd_server_free(qd_server_t *qd_server)
 {
     if (!qd_server) return;
+    pn_proactor_free(qd_server->proactor);
     qd_connection_t *ctx = DEQ_HEAD(qd_server->conn_list);
     while (ctx) {
         DEQ_REMOVE_HEAD(qd_server->conn_list);
@@ -1150,7 +1192,6 @@ void qd_server_free(qd_server_t *qd_server)
         ctx = DEQ_HEAD(qd_server->conn_list);
     }
     qd_timer_finalize();
-    pn_proactor_free(qd_server->proactor);
     sys_mutex_free(qd_server->lock);
     sys_cond_free(qd_server->cond);
     Py_XDECREF((PyObject *)qd_server->py_displayname_obj);
@@ -1186,6 +1227,7 @@ void qd_server_run(qd_dispatch_t *qd)
         sys_thread_free(threads[i]);
     }
     free(threads);
+    qd_http_server_stop(qd_server->http); /* Stop HTTP threads immediately */
     qd_http_server_free(qd_server->http);
 
     qd_log(qd_server->log_source, QD_LOG_NOTICE, "Shut Down");
@@ -1335,14 +1377,15 @@ void qd_listener_decref(qd_listener_t* li)
 
 qd_connector_t *qd_server_connector(qd_server_t *server)
 {
-    qd_connector_t *ct        = new_qd_connector_t();
+    qd_connector_t *ct = new_qd_connector_t();
     if (!ct) return 0;
+    ZERO(ct);
     sys_atomic_init(&ct->ref_count, 1);
     ct->server  = server;
     qd_failover_item_list_t conn_info_list;
     DEQ_INIT(conn_info_list);
     ct->conn_info_list = conn_info_list;
-    ct->conn_index = 0;
+    ct->conn_index = 1;
     ct->lock = sys_mutex();
     ct->timer = qd_timer(ct->server->qd, try_open_cb, ct);
     if (!ct->lock || !ct->timer) {

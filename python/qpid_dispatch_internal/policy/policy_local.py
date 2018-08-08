@@ -20,10 +20,19 @@
 """
 
 """
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
 
 import json
 import pdb
-from policy_util import PolicyError, HostStruct, HostAddr, PolicyAppConnectionMgr, is_ipv6_enabled
+from .policy_util import PolicyError, HostStruct, HostAddr, PolicyAppConnectionMgr, is_ipv6_enabled
+from ..compat import PY_STRING_TYPE
+from ..compat import PY_TEXT_TYPE
+from ..compat import dict_iteritems
+from ..compat import dict_keys
+
 
 """
 Entity implementing the business logic of user connection/access policy.
@@ -39,7 +48,8 @@ class PolicyKeys(object):
     KW_IGNORED_NAME             = "name"
     KW_IGNORED_IDENTITY         = "identity"
     KW_IGNORED_TYPE             = "type"
-    KW_VHOST_NAME               = "id"
+    KW_VHOST_NAME               = "hostname"
+    KW_VHOST_DEPRECATED_ID      = "id"
 
     # Policy ruleset key words
     KW_MAXCONN                     = "maxConnections"
@@ -62,6 +72,8 @@ class PolicyKeys(object):
     KW_ALLOW_USERID_PROXY       = "allowUserIdProxy"
     KW_SOURCES                  = "sources"
     KW_TARGETS                  = "targets"
+    KW_SOURCE_PATTERN           = "sourcePattern"
+    KW_TARGET_PATTERN           = "targetPattern"
 
     # Policy stats key words
     KW_CONNECTIONS_APPROVED     = "connectionsApproved"
@@ -85,6 +97,17 @@ class PolicyKeys(object):
 
     # policy stats controlled by C code but referenced by settings
     KW_CSTATS                   = "denialCounts"
+
+    # Username subsitituion token in link source and target names and patterns
+    KC_TOKEN_USER               = "${user}"
+
+    # Link target/source name wildcard tuple keys
+    KC_TUPLE_ABSENT             = 'a'
+    KC_TUPLE_PREFIX             = 'p'
+    KC_TUPLE_SUFFIX             = 's'
+    KC_TUPLE_EMBED              = 'e'
+    KC_TUPLE_WILDCARD           = '*'
+
 #
 #
 class PolicyCompiler(object):
@@ -121,7 +144,9 @@ class PolicyCompiler(object):
         PolicyKeys.KW_ALLOW_ANONYMOUS_SENDER,
         PolicyKeys.KW_ALLOW_USERID_PROXY,
         PolicyKeys.KW_SOURCES,
-        PolicyKeys.KW_TARGETS
+        PolicyKeys.KW_TARGETS,
+        PolicyKeys.KW_SOURCE_PATTERN,
+        PolicyKeys.KW_TARGET_PATTERN
         ]
 
     def __init__(self):
@@ -142,7 +167,7 @@ class PolicyCompiler(object):
         """
         try:
             v_int = int(val)
-        except Exception, e:
+        except Exception as e:
             errors.append("Value '%s' does not resolve to an integer." % val)
             return False
         if v_int < v_min:
@@ -172,15 +197,11 @@ class PolicyCompiler(object):
         """
         key = PolicyKeys.KW_REMOTE_HOSTS
         # convert val string to list of host specs
-        if type(val) is str:
-            # 'abc, def, mytarget'
-            val = [x.strip(' ') for x in val.split(PolicyKeys.KC_CONFIG_LIST_SEP)]
-        elif type(val) is list:
+        if isinstance(val, list):
             # ['abc', 'def', 'mytarget']
             pass
-        elif type(val) is unicode:
-            # u'abc, def, mytarget'
-            val = [x.strip(' ') for x in str(val).split(PolicyKeys.KC_CONFIG_LIST_SEP)]
+        elif isinstance(val, (PY_STRING_TYPE, PY_TEXT_TYPE)):
+            val = [x.strip(' ') for x in val.split(PolicyKeys.KC_CONFIG_LIST_SEP)]
         else:
             errors.append(
                 "Policy vhost '%s' user group '%s' option '%s' has illegal value '%s'. Type must be 'str' or 'list' but is '%s;" %
@@ -190,7 +211,7 @@ class PolicyCompiler(object):
             try:
                 coha = HostAddr(coname, PolicyKeys.KC_CONFIG_IP_SEP)
                 list_out.append(coha)
-            except Exception, e:
+            except Exception as e:
                 errors.append("Policy vhost '%s' user group '%s' option '%s' connectionOption '%s' failed to translate: '%s'." %
                                 (vhostname, groupname, key, coname, e))
                 return False
@@ -224,9 +245,15 @@ class PolicyCompiler(object):
         policy_out[PolicyKeys.KW_ALLOW_USERID_PROXY] = False
         policy_out[PolicyKeys.KW_SOURCES] = ''
         policy_out[PolicyKeys.KW_TARGETS] = ''
+        policy_out[PolicyKeys.KW_SOURCE_PATTERN] = ''
+        policy_out[PolicyKeys.KW_TARGET_PATTERN] = ''
 
         cerror = []
-        for key, val in policy_in.iteritems():
+        user_sources = False
+        user_targets = False
+        user_src_pattern = False
+        user_tgt_pattern = False
+        for key, val in dict_iteritems(policy_in):
             if key not in self.allowed_settings_options:
                 warnings.append("Policy vhost '%s' user group '%s' option '%s' is ignored." %
                                 (vhostname, usergroup, key))
@@ -241,7 +268,7 @@ class PolicyCompiler(object):
                     errors.append("Policy vhost '%s' user group '%s' option '%s' has error '%s'." %
                                   (vhostname, usergroup, key, cerror[0]))
                     return False
-                policy_out[key] = val
+                policy_out[key] = int(val)
             elif key == PolicyKeys.KW_REMOTE_HOSTS:
                 # Conection groups are lists of IP addresses that need to be
                 # converted into binary structures for comparisons.
@@ -253,6 +280,8 @@ class PolicyCompiler(object):
                          PolicyKeys.KW_ALLOW_DYNAMIC_SRC,
                          PolicyKeys.KW_ALLOW_USERID_PROXY
                          ]:
+                if isinstance(val, (PY_STRING_TYPE, PY_TEXT_TYPE)) and val.lower() in ['true', 'false']:
+                    val = True if val == 'true' else False
                 if not type(val) is bool:
                     errors.append("Policy vhost '%s' user group '%s' option '%s' has illegal boolean value '%s'." %
                                   (vhostname, usergroup, key, val))
@@ -260,25 +289,91 @@ class PolicyCompiler(object):
                 policy_out[key] = val
             elif key in [PolicyKeys.KW_USERS,
                          PolicyKeys.KW_SOURCES,
-                         PolicyKeys.KW_TARGETS
+                         PolicyKeys.KW_TARGETS,
+                         PolicyKeys.KW_SOURCE_PATTERN,
+                         PolicyKeys.KW_TARGET_PATTERN
                          ]:
                 # accept a string or list
-                if type(val) is str:
-                    # 'abc, def, mytarget'
-                    val = [x.strip(' ') for x in val.split(PolicyKeys.KC_CONFIG_LIST_SEP)]
-                elif type(val) is list:
+                if isinstance(val, list):
                     # ['abc', 'def', 'mytarget']
                     pass
-                elif type(val) is unicode:
-                    # u'abc, def, mytarget'
-                    val = [x.strip(' ') for x in str(val).split(PolicyKeys.KC_CONFIG_LIST_SEP)]
+                elif isinstance(val, (PY_STRING_TYPE, PY_TEXT_TYPE)):
+                    # 'abc, def, mytarget'
+                    val = [x.strip(' ') for x in val.split(PolicyKeys.KC_CONFIG_LIST_SEP)]
                 else:
                     errors.append("Policy vhost '%s' user group '%s' option '%s' has illegal value '%s'. Type must be 'str' or 'list' but is '%s;" %
                                   (vhostname, usergroup, key, val, type(val)))
                 # deduplicate address lists
                 val = list(set(val))
-                # output result is CSV string with no white space between values: 'abc,def,mytarget'
-                policy_out[key] = ','.join(val)
+                # val is CSV string with no white space between values: 'abc,def,mytarget,tmp-${user}'
+                if key == PolicyKeys.KW_USERS:
+                    # user name list items are literal strings and need no special handling
+                    policy_out[key] = ','.join(val)
+                else:
+                    # source and target names get special handling for the '${user}' substitution token
+                    # The literal string is translated to a (key, prefix, suffix) set of three strings.
+                    # C code does not have to search for the username token and knows with authority
+                    # how to construct match strings.
+                    # A wildcard is also signaled.
+                    utoken = PolicyKeys.KC_TOKEN_USER
+                    eVal = []
+                    for v in val:
+                        vcount = v.count(utoken)
+                        if vcount > 1:
+                            errors.append("Policy vhost '%s' user group '%s' policy key '%s' item '%s' contains multiple user subtitution tokens" %
+                                          (vhostname, usergroup, key, v))
+                            return False
+                        elif vcount == 1:
+                            # a single token is present as a prefix, suffix, or embedded
+                            # construct cChar, S1, S2 encodings to be added to eVal description
+                            if v.startswith(utoken):
+                                # prefix
+                                eVal.append(PolicyKeys.KC_TUPLE_PREFIX)
+                                eVal.append('')
+                                eVal.append(v[v.find(utoken) + len(utoken):])
+                            elif v.endswith(utoken):
+                                # suffix
+                                eVal.append(PolicyKeys.KC_TUPLE_SUFFIX)
+                                eVal.append(v[0:v.find(utoken)])
+                                eVal.append('')
+                            else:
+                                # embedded
+                                if key in [PolicyKeys.KW_SOURCE_PATTERN,
+                                           PolicyKeys.KW_TARGET_PATTERN]:
+                                    errors.append("Policy vhost '%s' user group '%s' policy key '%s' item '%s' may contain match pattern '%s' as a prefix or a suffix only." %
+                                          (vhostname, usergroup, key, v, utoken))
+                                    return False
+                                eVal.append(PolicyKeys.KC_TUPLE_EMBED)
+                                eVal.append(v[0:v.find(utoken)])
+                                eVal.append(v[v.find(utoken) + len(utoken):])
+                        else:
+                            # ${user} token is absent
+                            if v == PolicyKeys.KC_TUPLE_WILDCARD:
+                                eVal.append(PolicyKeys.KC_TUPLE_WILDCARD)
+                                eVal.append('')
+                                eVal.append('')
+                            else:
+                                eVal.append(PolicyKeys.KC_TUPLE_ABSENT)
+                                eVal.append(v)
+                                eVal.append('')
+                    policy_out[key] = ','.join(eVal)
+
+                if key == PolicyKeys.KW_SOURCES:
+                    user_sources = True
+                if key == PolicyKeys.KW_TARGETS:
+                    user_targets = True
+                if key == PolicyKeys.KW_SOURCE_PATTERN:
+                    user_src_pattern = True
+                if key == PolicyKeys.KW_TARGET_PATTERN:
+                    user_tgt_pattern = True
+
+        if user_sources and user_src_pattern:
+            errors.append("Policy vhost '%s' user group '%s' specifies conflicting 'sources' and 'sourcePattern' attributes. Use only one or the other." % (vhostname, usergroup))
+            return False
+        if user_targets and user_tgt_pattern:
+            errors.append("Policy vhost '%s' user group '%s' specifies conflicting 'targets' and 'targetPattern' attributes. Use only one or the other." % (vhostname, usergroup))
+            return False
+
         return True
 
 
@@ -304,7 +399,7 @@ class PolicyCompiler(object):
         policy_out[PolicyKeys.KW_GROUPS] = {}
 
         # validate the options
-        for key, val in policy_in.iteritems():
+        for key, val in dict_iteritems(policy_in):
             if key not in self.allowed_ruleset_options:
                 warnings.append("Policy vhost '%s' option '%s' is ignored." %
                                 (name, key))
@@ -329,7 +424,7 @@ class PolicyCompiler(object):
                     errors.append("Policy vhost '%s' option '%s' must be of type 'dict' but is '%s'" %
                                   (name, key, type(val)))
                     return False
-                for skey, sval in val.iteritems():
+                for skey, sval in dict_iteritems(val):
                     newsettings = {}
                     if not self.compile_app_settings(name, skey, sval, newsettings, warnings, errors):
                         return False
@@ -340,7 +435,7 @@ class PolicyCompiler(object):
         # Create user-to-group map for looking up user's group
         policy_out[PolicyKeys.RULESET_U2G_MAP] = {}
         if PolicyKeys.KW_GROUPS in policy_out:
-            for group, groupsettings in policy_out[PolicyKeys.KW_GROUPS].iteritems():
+            for group, groupsettings in dict_iteritems(policy_out[PolicyKeys.KW_GROUPS]):
                 if PolicyKeys.KW_USERS in groupsettings:
                     users = [x.strip(' ') for x in groupsettings[PolicyKeys.KW_USERS].split(PolicyKeys.KC_CONFIG_LIST_SEP)]
                     for user in users:
@@ -395,6 +490,7 @@ class AppStats(object):
         """Refresh management attributes"""
         entitymap = {}
         entitymap[PolicyKeys.KW_VHOST_NAME] =     self.my_id
+        entitymap[PolicyKeys.KW_VHOST_DEPRECATED_ID]  = self.my_id
         entitymap[PolicyKeys.KW_CONNECTIONS_APPROVED] = self.conn_mgr.connections_approved
         entitymap[PolicyKeys.KW_CONNECTIONS_DENIED] =   self.conn_mgr.connections_denied
         entitymap[PolicyKeys.KW_CONNECTIONS_CURRENT] =  self.conn_mgr.connections_active
@@ -417,7 +513,7 @@ class AppStats(object):
 
 #
 #
-class ConnectionFacts:
+class ConnectionFacts(object):
     def __init__(self, user, host, app, conn_name):
         self.user = user
         self.host = host
@@ -476,6 +572,11 @@ class PolicyLocal(object):
         #  open.hostname is not found in the rulesetdb
         self._default_vhost = ""
 
+        # _use_hostname_patterns
+        #  holds policy setting.
+        #  When true policy ruleset definitions are propagated to C code
+        self.use_hostname_patterns = False
+
     #
     # Service interfaces
     #
@@ -494,6 +595,11 @@ class PolicyLocal(object):
         if len(warnings) > 0:
             for warning in warnings:
                 self._manager.log_warning(warning)
+        # Reject if parse tree optimized name collision
+        if self.use_hostname_patterns:
+            agent = self._manager.get_agent()
+            if not agent.qd.qd_dispatch_policy_host_pattern_add(agent.dispatch, name):
+                raise PolicyError("Policy '%s' optimized pattern conflicts with existing pattern" % name)
         if name not in self.rulesetdb:
             if name not in self.statsdb:
                 self.statsdb[name] = AppStats(name, self._manager, candidate)
@@ -513,6 +619,9 @@ class PolicyLocal(object):
         if name not in self.rulesetdb:
             raise PolicyError("Policy '%s' does not exist" % name)
         # TODO: ruleset lock
+        if self.use_hostname_patterns:
+            agent = self._manager.get_agent()
+            agent.qd.qd_dispatch_policy_host_pattern_remove(agent.dispatch, name)
         del self.rulesetdb[name]
 
     #
@@ -522,7 +631,7 @@ class PolicyLocal(object):
         """
         Return a list of vhost names in this policy
         """
-        return self.rulesetdb.keys()
+        return dict_keys(self.rulesetdb)
 
     def set_default_vhost(self, name):
         """
@@ -560,15 +669,24 @@ class PolicyLocal(object):
         """
         try:
             # choose rule set based on incoming vhost or default vhost
+            # or potential vhost found by pattern matching
             vhost = vhost_in
-            if vhost_in not in self.rulesetdb:
+            if self.use_hostname_patterns:
+                agent = self._manager.get_agent()
+                vhost = agent.qd.qd_dispatch_policy_host_pattern_lookup(agent.dispatch, vhost)
+            if vhost not in self.rulesetdb:
                 if self.default_vhost_enabled():
                     vhost = self._default_vhost
                 else:
                     self._manager.log_info(
                         "DENY AMQP Open for user '%s', rhost '%s', vhost '%s': "
-                        "No policy defined for vhost" % (user, rhost, vhost))
+                        "No policy defined for vhost" % (user, rhost, vhost_in))
                     return ""
+            if vhost != vhost_in:
+                self._manager.log_debug(
+                    "AMQP Open for user '%s', rhost '%s', vhost '%s': "
+                    "proceeds using vhost '%s' ruleset" % (user, rhost, vhost_in, vhost))
+
             ruleset = self.rulesetdb[vhost]
 
             # look up the stats
@@ -630,7 +748,7 @@ class PolicyLocal(object):
             # Return success
             return usergroup
 
-        except Exception, e:
+        except Exception as e:
             self._manager.log_info(
                 "DENY AMQP Open lookup_user failed for user '%s', rhost '%s', vhost '%s': "
                 "Internal error: %s" % (user, rhost, vhost, e))
@@ -649,9 +767,16 @@ class PolicyLocal(object):
         """
         try:
             vhost = vhost_in
+            if self.use_hostname_patterns:
+                agent = self._manager.get_agent()
+                vhost = agent.qd.qd_dispatch_policy_host_pattern_lookup(agent.dispatch, vhost)
             if vhost not in self.rulesetdb:
                 if self.default_vhost_enabled():
                     vhost = self._default_vhost
+            if vhost != vhost_in:
+                self._manager.log_debug(
+                    "AMQP Open lookup settings for vhost '%s': "
+                    "proceeds using vhost '%s' ruleset" % (vhost_in, vhost))
 
             if vhost not in self.rulesetdb:
                 self._manager.log_info(
@@ -670,7 +795,7 @@ class PolicyLocal(object):
             upolicy.update(ruleset[PolicyKeys.KW_GROUPS][groupname])
             upolicy[PolicyKeys.KW_CSTATS] = self.statsdb[vhost].get_cstats()
             return True
-        except Exception, e:
+        except Exception as e:
             return False
 
     def close_connection(self, conn_id):
@@ -685,7 +810,7 @@ class PolicyLocal(object):
                 stats = self.statsdb[facts.app]
                 stats.disconnect(facts.conn_name, facts.user, facts.host)
                 del self._connections[conn_id]
-        except Exception, e:
+        except Exception as e:
             self._manager.log_trace(
                 "Policy internal error closing connection id %s. %s" % (conn_id, str(e)))
 
@@ -696,7 +821,7 @@ class PolicyLocal(object):
         Test function to load a policy.
         @return:
         """
-        ruleset_str = '["vhost", {"id": "photoserver", "maxConnections": 50, "maxConnectionsPerUser": 5, "maxConnectionsPerHost": 20, "allowUnknownUser": true,'
+        ruleset_str = '["vhost", {"hostname": "photoserver", "maxConnections": 50, "maxConnectionsPerUser": 5, "maxConnectionsPerHost": 20, "allowUnknownUser": true,'
         ruleset_str += '"groups": {'
         ruleset_str += '"anonymous":       { "users": "anonymous", "remoteHosts": "*", "maxFrameSize": 111111, "maxMessageSize": 111111, "maxSessionWindow": 111111, "maxSessions": 1, "maxSenders": 11, "maxReceivers": 11, "allowDynamicSource": false, "allowAnonymousSender": false, "sources": "public", "targets": "" },'
         ruleset_str += '"users":           { "users": "u1, u2", "remoteHosts": "*", "maxFrameSize": 222222, "maxMessageSize": 222222, "maxSessionWindow": 222222, "maxSessions": 2, "maxSenders": 22, "maxReceivers": 22, "allowDynamicSource": false, "allowAnonymousSender": false, "sources": "public, private", "targets": "public" },'

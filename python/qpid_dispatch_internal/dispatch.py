@@ -29,10 +29,16 @@ The C library also adds the following C extension types to this module:
 
 This module also prevents the proton python module from being accidentally loaded.
 """
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
 
 import sys, ctypes
 from ctypes import c_char_p, c_long, py_object
 import qpid_dispatch_site
+from .compat import IS_PY2
 
 class CError(Exception):
     """Exception raised if there is an error in a C call"""
@@ -54,7 +60,6 @@ class QdDll(ctypes.PyDLL):
         # No check on qd_error_* functions, it would be recursive
         self._prototype(self.qd_error_code, c_long, [], check=False)
         self._prototype(self.qd_error_message, c_char_p, [], check=False)
-
         self._prototype(self.qd_log_entity, c_long, [py_object])
         self._prototype(self.qd_dispatch_configure_router, None, [self.qd_dispatch_p, py_object])
         self._prototype(self.qd_dispatch_prepare, None, [self.qd_dispatch_p])
@@ -70,12 +75,17 @@ class QdDll(ctypes.PyDLL):
         self._prototype(self.qd_dispatch_configure_address, None, [self.qd_dispatch_p, py_object])
         self._prototype(self.qd_dispatch_configure_link_route, None, [self.qd_dispatch_p, py_object])
         self._prototype(self.qd_dispatch_configure_auto_link, None, [self.qd_dispatch_p, py_object])
+        self._prototype(self.qd_dispatch_configure_exchange, None, [self.qd_dispatch_p, py_object])
+        self._prototype(self.qd_dispatch_configure_binding, None, [self.qd_dispatch_p, py_object])
 
         self._prototype(self.qd_dispatch_configure_policy, None, [self.qd_dispatch_p, py_object])
         self._prototype(self.qd_dispatch_register_policy_manager, None, [self.qd_dispatch_p, py_object])
         self._prototype(self.qd_dispatch_policy_c_counts_alloc, c_long, [], check=False)
         self._prototype(self.qd_dispatch_policy_c_counts_free, None, [c_long], check=False)
         self._prototype(self.qd_dispatch_policy_c_counts_refresh, None, [c_long, py_object])
+        self._prototype(self.qd_dispatch_policy_host_pattern_add, ctypes.c_bool, [self.qd_dispatch_p, py_object])
+        self._prototype(self.qd_dispatch_policy_host_pattern_remove, None, [self.qd_dispatch_p, py_object])
+        self._prototype(self.qd_dispatch_policy_host_pattern_lookup, c_char_p, [self.qd_dispatch_p, py_object])
 
         self._prototype(self.qd_dispatch_register_display_name_service, None, [self.qd_dispatch_p, py_object])
 
@@ -92,16 +102,22 @@ class QdDll(ctypes.PyDLL):
 
         self._prototype(self.qd_log_recent_py, py_object, [c_long])
 
-    def _errcheck(self, result, func, args):
-        if self.qd_error_code():
-            raise CError(self.qd_error_message())
-        return result
-
     def _prototype(self, f, restype, argtypes, check=True):
-        """Set up the return and argument types and the error checker for a ctypes function"""
+        """Set up the return and argument types and the error checker for a
+        ctypes function"""
+
+        def _do_check(result, func, args):
+            if check and self.qd_error_code():
+                raise CError(self.qd_error_message())
+            if restype is c_char_p and result and not IS_PY2:
+                # in python3 c_char_p returns a byte type for the error
+                # message. We need to convert that to a string
+                result = result.decode('utf-8')
+            return result
+
         f.restype = restype
         f.argtypes = argtypes
-        if check: f.errcheck = self._errcheck
+        f.errcheck = _do_check
         return f
 
     def function(self, fname, restype, argtypes, check=True):
@@ -127,6 +143,10 @@ def import_check(name, *args, **kw):
     return builtin_import(name, *args, **kw)
 
 check_forbidden()
-import __builtin__
-builtin_import = __builtin__.__import__
-__builtin__.__import__ = import_check
+try:
+    import builtins
+except:  # py2
+    import __builtin__ as builtins
+
+builtin_import = builtins.__import__
+builtins.__import__ = import_check

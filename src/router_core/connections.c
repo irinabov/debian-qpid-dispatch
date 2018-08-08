@@ -120,6 +120,11 @@ void qdr_connection_closed(qdr_connection_t *conn)
     qdr_action_enqueue(conn->core, action);
 }
 
+bool qdr_connection_route_container(qdr_connection_t *conn)
+{
+    return conn->role == QDR_ROLE_ROUTE_CONTAINER;
+}
+
 
 void qdr_connection_set_context(qdr_connection_t *conn, void *context)
 {
@@ -200,6 +205,7 @@ const char *qdr_connection_get_tenant_space(const qdr_connection_t *conn, int *l
 int qdr_connection_process(qdr_connection_t *conn)
 {
     qdr_connection_work_list_t  work_list;
+    qdr_link_ref_list_t         links_with_work;
     qdr_core_t                 *core = conn->core;
 
     qdr_link_ref_t *ref;
@@ -210,6 +216,7 @@ int qdr_connection_process(qdr_connection_t *conn)
 
     sys_mutex_lock(conn->work_lock);
     DEQ_MOVE(conn->work_list, work_list);
+    DEQ_MOVE(conn->links_with_work, links_with_work);
     sys_mutex_unlock(conn->work_lock);
 
     event_count += DEQ_SIZE(work_list);
@@ -239,10 +246,10 @@ int qdr_connection_process(qdr_connection_t *conn)
         free_link = false;
 
         sys_mutex_lock(conn->work_lock);
-        ref = DEQ_HEAD(conn->links_with_work);
+        ref = DEQ_HEAD(links_with_work);
         if (ref) {
             link = ref->link;
-            qdr_del_link_ref(&conn->links_with_work, ref->link, QDR_LINK_LIST_CLASS_WORK);
+            qdr_del_link_ref(&links_with_work, ref->link, QDR_LINK_LIST_CLASS_WORK);
 
             link_work = DEQ_HEAD(link->work_list);
             if (link_work) {
@@ -397,6 +404,16 @@ const char *qdr_link_name(const qdr_link_t *link)
 }
 
 
+static void qdr_link_setup_histogram(qdr_connection_t *conn, qd_direction_t dir, qdr_link_t *link)
+{
+    if (dir == QD_OUTGOING && conn->role == QDR_ROLE_NORMAL) {
+        link->ingress_histogram = NEW_ARRAY(uint64_t, qd_bitmask_width());
+        for (int i = 0; i < qd_bitmask_width(); i++)
+            link->ingress_histogram[i] = 0;
+    }
+}
+
+
 qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
                                   qd_direction_t    dir,
                                   qdr_terminus_t   *source,
@@ -425,8 +442,10 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
     strcpy(link->name, name);
     link->link_direction = dir;
     link->capacity       = conn->link_capacity;
+    link->credit_pending = conn->link_capacity;
     link->admin_enabled  = true;
     link->oper_status    = QDR_LINK_OPER_DOWN;
+    link->terminus_survives_disconnect = qdr_terminus_survives_disconnect(local_terminus);
 
     link->strip_annotations_in  = conn->strip_annotations_in;
     link->strip_annotations_out = conn->strip_annotations_out;
@@ -435,6 +454,8 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
         link->link_type = QD_LINK_CONTROL;
     else if (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_ROUTER_DATA))
         link->link_type = QD_LINK_ROUTER;
+
+    qdr_link_setup_histogram(conn, dir, link);
 
     action->args.connection.conn   = conn;
     action->args.connection.link   = link;
@@ -821,7 +842,11 @@ static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_li
     // Free the link's name and terminus_addr
     //
     free(link->name);
+    free(link->disambiguated_name);
     free(link->terminus_addr);
+    free(link->ingress_histogram);
+    free(link->insert_prefix);
+    free(link->strip_prefix);
     link->name = 0;
 }
 
@@ -846,14 +871,20 @@ qdr_link_t *qdr_create_link_CT(qdr_core_t       *core,
     link->link_type      = link_type;
     link->link_direction = dir;
     link->capacity       = conn->link_capacity;
+    link->credit_pending = conn->link_capacity;
     link->name           = (char*) malloc(QDR_DISCRIMINATOR_SIZE + 8);
+    link->disambiguated_name = 0;
     link->terminus_addr  = 0;
     qdr_generate_link_name("qdlink", link->name, QDR_DISCRIMINATOR_SIZE + 8);
     link->admin_enabled  = true;
     link->oper_status    = QDR_LINK_OPER_DOWN;
+    link->insert_prefix = 0;
+    link->strip_prefix = 0;
 
     link->strip_annotations_in  = conn->strip_annotations_in;
     link->strip_annotations_out = conn->strip_annotations_out;
+
+    qdr_link_setup_histogram(conn, dir, link);
 
     DEQ_INSERT_TAIL(core->open_links, link);
     qdr_add_link_ref(&conn->links, link, QDR_LINK_LIST_CLASS_CONNECTION);
@@ -900,6 +931,10 @@ void qdr_link_outbound_detach_CT(qdr_core_t *core, qdr_link_t *link, qdr_error_t
         case QDR_CONDITION_COORDINATOR_PRECONDITION_FAILED:
             work->error = qdr_error(QD_AMQP_COND_PRECONDITION_FAILED, "The router can't coordinate transactions by itself, a "
                                                             "linkRoute to a coordinator must be configured to use transactions.");
+            break;
+
+        case QDR_CONDITION_INVALID_LINK_EXPIRATION:
+            work->error = qdr_error("qd:link-expiration", "Requested link expiration not allowed");
             break;
 
         case QDR_CONDITION_NONE:
@@ -1320,6 +1355,17 @@ static void qdr_connection_closed_CT(qdr_core_t *core, qdr_action_t *action, boo
     qdr_connection_free(conn);
 }
 
+static char* disambiguated_link_name(qdr_connection_info_t *conn, char *original)
+{
+    size_t olen = strlen(original);
+    size_t clen = strlen(conn->container);
+    char *name = (char*) malloc(olen + clen + 2);
+    memset(name, 0, olen + clen + 2);
+    strcat(name, original);
+    name[olen] = '@';
+    strcat(name + olen + 1, conn->container);
+    return name;
+}
 
 static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
 {
@@ -1399,11 +1445,21 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
                     //
                     // This is a link-routed destination, forward the attach to the next hop
                     //
-                    success = qdr_forward_attach_CT(core, addr, link, source, target);
-                    if (!success) {
-                        qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_NO_ROUTE_TO_DESTINATION, true);
+                    if (qdr_terminus_survives_disconnect(target) && !core->qd->allow_resumable_link_route) {
+                        qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_INVALID_LINK_EXPIRATION, true);
                         qdr_terminus_free(source);
                         qdr_terminus_free(target);
+                    } else {
+                        if (conn->role != QDR_ROLE_INTER_ROUTER && conn->connection_info) {
+                            link->disambiguated_name = disambiguated_link_name(conn->connection_info, link->name);
+                        }
+                        success = qdr_forward_attach_CT(core, addr, link, source, target);
+
+                        if (!success) {
+                            qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_NO_ROUTE_TO_DESTINATION, true);
+                            qdr_terminus_free(source);
+                            qdr_terminus_free(target);
+                        }
                     }
 
                 }
@@ -1430,12 +1486,17 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
                     qdr_link_outbound_second_attach_CT(core, link, source, target);
 
                     //
-                    // Issue the initial credit only if there are destinations for the address or if the address treatment is multicast.
+                    // Issue the initial credit only if one of the following
+                    // holds:
+                    // - there are destinations for the address
+                    // - if the address treatment is multicast
+                    // - the address is that of an exchange (no subscribers allowed)
                     //
                     if (DEQ_SIZE(addr->subscriptions)
                             || DEQ_SIZE(addr->rlinks)
                             || qd_bitmask_cardinality(addr->rnodes)
-                            || qdr_is_addr_treatment_multicast(addr)) {
+                            || qdr_is_addr_treatment_multicast(addr)
+                            || !!addr->exchange) {
                         qdr_link_issue_credit_CT(core, link, link->capacity, false);
                     }
                 }
@@ -1480,11 +1541,20 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
                 //
                 // This is a link-routed destination, forward the attach to the next hop
                 //
-                bool success = qdr_forward_attach_CT(core, addr, link, source, target);
-                if (!success) {
-                    qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_NO_ROUTE_TO_DESTINATION, true);
+                if (qdr_terminus_survives_disconnect(source) && !core->qd->allow_resumable_link_route) {
+                    qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_INVALID_LINK_EXPIRATION, true);
                     qdr_terminus_free(source);
                     qdr_terminus_free(target);
+                } else {
+                    if (conn->role != QDR_ROLE_INTER_ROUTER && conn->connection_info) {
+                        link->disambiguated_name = disambiguated_link_name(conn->connection_info, link->name);
+                    }
+                    bool success = qdr_forward_attach_CT(core, addr, link, source, target);
+                    if (!success) {
+                        qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_NO_ROUTE_TO_DESTINATION, true);
+                        qdr_terminus_free(source);
+                        qdr_terminus_free(target);
+                    }
                 }
             }
 
@@ -1537,6 +1607,14 @@ static void qdr_link_inbound_second_attach_CT(qdr_core_t *core, qdr_action_t *ac
     // Handle attach-routed links
     //
     if (link->connected_link) {
+        qdr_terminus_t *remote_terminus = link->link_direction == QD_OUTGOING ? target : source;
+        if (link->strip_prefix) {
+            qdr_terminus_strip_address_prefix(remote_terminus, link->strip_prefix);
+        }
+        if (link->insert_prefix) {
+            qdr_terminus_insert_address_prefix(remote_terminus, link->insert_prefix);
+        }
+
         qdr_link_outbound_second_attach_CT(core, link->connected_link, source, target);
         return;
     }
@@ -1646,7 +1724,7 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
         if (dt != QD_LOST)
             qdr_link_outbound_detach_CT(core, link->connected_link, error, QDR_CONDITION_NONE, dt == QD_CLOSED);
         else {
-            qdr_link_outbound_detach_CT(core, link->connected_link, 0, QDR_CONDITION_ROUTED_LINK_LOST, false);
+            qdr_link_outbound_detach_CT(core, link->connected_link, 0, QDR_CONDITION_ROUTED_LINK_LOST, !link->terminus_survives_disconnect);
             qdr_error_free(error);
         }
 

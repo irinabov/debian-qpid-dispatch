@@ -20,6 +20,11 @@
 """
 Configuration file parsing
 """
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
 
 import json, re, sys
 import os
@@ -28,19 +33,27 @@ from qpid_dispatch.management.entity import camelcase
 
 from ..dispatch import QdDll
 from .qdrouter import QdSchema
+from qpid_dispatch_internal.compat import dict_itervalues
+from qpid_dispatch_internal.compat import dict_iteritems
+from qpid_dispatch_internal.compat import PY_STRING_TYPE
+from qpid_dispatch_internal.compat import PY_TEXT_TYPE
 
 class Config(object):
     """Load config entities from qdrouterd.conf and validated against L{QdSchema}."""
 
+    # static property to control depth level while reading the entities
+    child_level = 0
+
     def __init__(self, filename=None, schema=QdSchema(), raw_json=False):
         self.schema = schema
-        self.config_types = [et for et in schema.entity_types.itervalues()
+        self.config_types = [et for et in dict_itervalues(schema.entity_types)
                              if schema.is_configuration(et)]
         if filename:
             try:
                 self.load(filename, raw_json)
-            except Exception, e:
-                raise Exception, "Cannot load configuration file %s: %s" % (filename, e), sys.exc_info()[2]
+            except Exception as e:
+                raise Exception("Cannot load configuration file %s: %s"
+                                % (filename, e))
         else:
             self.entities = []
 
@@ -48,28 +61,42 @@ class Config(object):
     def transform_sections(sections):
         for s in sections:
             s[0] = camelcase(s[0])
-            s[1] = dict((camelcase(k), v) for k, v in s[1].iteritems())
+            s[1] = dict((camelcase(k), v) for k, v in dict_iteritems(s[1]))
             if s[0] == "address":   s[0] = "router.config.address"
             if s[0] == "linkRoute": s[0] = "router.config.linkRoute"
             if s[0] == "autoLink":  s[0] = "router.config.autoLink"
+            if s[0] == "exchange":  s[0] = "router.config.exchange"
+            if s[0] == "binding":   s[0] = "router.config.binding"
 
     @staticmethod
     def _parse(lines):
         """Parse config file format into a section list"""
-        begin = re.compile(r'([\w-]+)[ \t]*{') # WORD {
-        end = re.compile(r'}')                 # }
-        attr = re.compile(r'([\w-]+)[ \t]*:[ \t]*(.+)') # WORD1: VALUE
-        pattern = re.compile(r'([\w-]+)[ \t]*:[ \t]*([\S]+).*')
+        begin = re.compile(r'([\w-]+)[ \t]*{[ \t]*($|#)')             # WORD {
+        end = re.compile(r'^}')                                       # }
+        attr = re.compile(r'([\w-]+)[ \t]*:[ \t]*(.+)')               # WORD1: VALUE
+        child = re.compile(r'([\$]*[\w-]+)[ \t]*:[ \t]*{[ \t]*($|#)') # WORD: {
+
+        # The 'pattern:' and 'bindingKey:' attributes in the schema are special
+        # snowflakes. They allow '#' characters in their value, so they cannot
+        # be treated as comment delimiters
+        special_snowflakes = ['pattern', 'bindingKey']
+        hash_ok = re.compile(r'([\w-]+)[ \t]*:[ \t]*([\S]+).*')
 
         def sub(line):
             """Do substitutions to make line json-friendly"""
             line = line.strip()
             if line.startswith("#"):
                 return ""
-            # 'pattern:' is a special snowflake.  It allows '#' characters in
-            # its value, so they cannot be treated as comment delimiters
-            if line.split(':')[0].strip().lower() == "pattern":
-                line = re.sub(pattern, r'"\1": "\2",', line)
+            if line.split(':')[0].strip() in special_snowflakes:
+                line = re.sub(hash_ok, r'"\1": "\2",', line)
+            elif child.search(line):
+                line = line.split('#')[0].strip()
+                line = re.sub(child, r'"\1": {', line)
+                Config.child_level += 1
+            elif end.search(line) and Config.child_level > 0:
+                line = line.split('#')[0].strip()
+                line = re.sub(end, r'},', line)
+                Config.child_level -= 1
             else:
                 line = line.split('#')[0].strip()
                 line = re.sub(begin, r'["\1", {', line)
@@ -89,8 +116,8 @@ class Config(object):
     def _parserawjson(lines):
         """Parse raw json config file format into a section list"""
         def sub(line):
-            """Do substitutions to make line json-friendly"""
-            line = line.split('#')[0].strip() # Strip comments
+            # ignore comment lines that start with "[whitespace] #"
+            line = "" if line.strip().startswith('#') else line
             return line
         js_text = "%s"%("\n".join([sub(l) for l in lines]))
         sections = json.loads(js_text)
@@ -106,7 +133,7 @@ class Config(object):
         @param source: A file name, open file object or iterable list of lines
         @param raw_json: Source is pure json not needing conf-style substitutions
         """
-        if isinstance(source, basestring):
+        if isinstance(source, (PY_STRING_TYPE, PY_TEXT_TYPE)):
             raw_json |= source.endswith(".json")
             with open(source) as f:
                 self.load(f, raw_json)
@@ -169,16 +196,25 @@ def configure_dispatch(dispatch, lib_handle, filename):
     from qpid_dispatch_internal.display_name.display_name import DisplayNameService
     displayname_service = DisplayNameService()
     qd.qd_dispatch_register_display_name_service(dispatch, displayname_service)
-    policyDir = config.by_type('policy')[0]['policyDir']
-    policyDefaultVhost = config.by_type('policy')[0]['defaultVhost']
+
+    # Configure policy and policy manager before vhosts
+    policyDir           = config.by_type('policy')[0]['policyDir']
+    policyDefaultVhost  = config.by_type('policy')[0]['defaultVhost']
+    useHostnamePatterns = config.by_type('policy')[0]['enableVhostNamePatterns']
+    for a in config.by_type("policy"):
+        configure(a)
+    agent.policy.set_default_vhost(policyDefaultVhost)
+    agent.policy.set_use_hostname_patterns(useHostnamePatterns)
+
     # Remaining configuration
     for t in "sslProfile", "authServicePlugin", "listener", "connector", \
              "router.config.address", "router.config.linkRoute", "router.config.autoLink", \
-             "policy", "vhost":
+             "router.config.exchange", "router.config.binding", \
+             "vhost":
         for a in config.by_type(t):
             configure(a)
             if t == "sslProfile":
-                display_file_name = a.get('displayNameFile')
+                display_file_name = a.get('uidNameMappingFile')
                 if display_file_name:
                     ssl_profile_name = a.get('name')
                     displayname_service.add(ssl_profile_name, display_file_name)
@@ -195,6 +231,3 @@ def configure_dispatch(dispatch, lib_handle, filename):
                 pconfig = PolicyConfig(os.path.join(apath, i))
                 for a in pconfig.by_type("vhost"):
                     agent.configure(a)
-
-    # Set policy default application after all rulesets loaded
-    agent.policy.set_default_vhost(policyDefaultVhost)

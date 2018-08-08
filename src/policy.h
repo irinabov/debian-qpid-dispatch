@@ -28,6 +28,7 @@
 #include "config.h"
 #include "entity.h"
 #include "entity_cache.h"
+#include "parse_tree.h"
 #include <dlfcn.h>
 
 typedef struct qd_policy_denial_counts_s qd_policy_denial_counts_t;
@@ -43,7 +44,6 @@ typedef struct qd_policy_t qd_policy_t;
 
 struct qd_policy__settings_s {
     int  maxFrameSize;
-    int  maxMessageSize;
     int  maxSessionWindow;
     int  maxSessions;
     int  maxSenders;
@@ -53,6 +53,10 @@ struct qd_policy__settings_s {
     bool allowUserIdProxy;
     char *sources;
     char *targets;
+    char *sourcePattern;
+    char *targetPattern;
+    qd_parse_tree_t *sourceParseTree;
+    qd_parse_tree_t *targetParseTree;
     qd_policy_denial_counts_t *denialCounts;
 };
 
@@ -156,4 +160,57 @@ bool qd_policy_approve_amqp_receiver_link(pn_link_t *pn_link, qd_connection_t *q
  **/
 void qd_policy_amqp_open(qd_connection_t *conn);
 
+/** Dispose of policy settings
+ * 
+ * @param settings the settings to be destroyed
+ */
+void qd_policy_settings_free(qd_policy_settings_t *settings);
+
+/** Approve link by source/target name.
+ * @param[in] username authenticated user name
+ * @param[in] settings policy settings
+ * @param[in] proposed the link target name to be approved
+ * @param[in] isReceiver indication to check using receiver settings
+ */
+bool qd_policy_approve_link_name(const char *username,
+                                  const qd_policy_settings_t *settings,
+                                  const char *proposed,
+                                  bool isReceiver
+                                );
+
+/** Add a hostname to the lookup parse_tree
+ * Note that the parse_tree may store an 'optimised' pattern for a given
+ * pattern. Thus the patterns a user puts in may collide with existing
+ * patterns even though the text of the host patterns is different.
+ * This function does not allow new patterns with thier optimizations 
+ * to overwrite existing patterns that may have been optimised.
+ * @param[in] policy qd_policy_t
+ * @param[in] hostPattern the hostname pattern with possible parse_tree wildcards
+ * @return True if the possibly optimised pattern was added to the lookup parse tree
+ */
+bool qd_policy_host_pattern_add(qd_policy_t *policy, const char *hostPattern);
+
+/** Remove a hostname from the lookup parse_tree
+ * @param[in] policy qd_policy_t
+ * @param[in] hostPattern the hostname pattern with possible parse_tree wildcards
+ */
+void qd_policy_host_pattern_remove(qd_policy_t *policy, const char *hostPattern);
+
+/** Look up a hostname in the lookup parse_tree
+ * @param[in] policy qd_policy_t
+ * @param[in] hostname a concrete vhost name
+ * @return the name of the ruleset whose hostname pattern matched this actual hostname
+ */
+char * qd_policy_host_pattern_lookup(qd_policy_t *policy, const char *hostPattern);
+
+/**
+ * Compile raw CSV spec of allowed sources/targets and return
+ * the string of tuples used by policy runtime.
+ * The returned string is allocated here and freed by the caller.
+ * This function does no error checking or logging.
+ *
+ * @param[in] csv the CSV allowed list
+ * @return the ruleset string to be used in policy settings.
+ */
+char * qd_policy_compile_allowed_csv(char * csv);
 #endif

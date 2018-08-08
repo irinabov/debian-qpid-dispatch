@@ -360,9 +360,10 @@ void qdra_config_address_create_CT(qdr_core_t         *core,
         char *pattern = qd_iterator_strncpy(tmp, buf, len + 1);
         qd_iterator_free(tmp);
 
-        while (*pattern && strchr(QD_PARSE_TREE_TOKEN_SEP, *pattern))
+        // note: see parse_tree.c for acceptable separator characters
+        while (*pattern && strchr("./", *pattern))
             pattern++;
-        while (*pattern && strchr(QD_PARSE_TREE_TOKEN_SEP, pattern[strlen(pattern) - 1]))
+        while (*pattern && strchr("./", pattern[strlen(pattern) - 1]))
             pattern[strlen(pattern) - 1] = '\0';
 
         if (!*pattern) {
@@ -393,8 +394,8 @@ void qdra_config_address_create_CT(qdr_core_t         *core,
 
 
         bool waypoint  = waypoint_field  ? qd_parse_as_bool(waypoint_field) : false;
-        int  in_phase  = in_phase_field  ? qd_parse_as_int(in_phase_field)  : -1;
-        int  out_phase = out_phase_field ? qd_parse_as_int(out_phase_field) : -1;
+        long in_phase  = in_phase_field  ? qd_parse_as_long(in_phase_field)  : -1;
+        long out_phase = out_phase_field ? qd_parse_as_long(out_phase_field) : -1;
 
         //
         // Handle the address-phasing logic.  If the phases are provided, use them.  Otherwise

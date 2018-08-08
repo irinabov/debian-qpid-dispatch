@@ -17,7 +17,7 @@
  * under the License.
  */
 
-#include <Python.h>
+#include "python_private.h"
 #include <qpid/dispatch/python_embedded.h>
 #include <qpid/dispatch.h>
 #include <qpid/dispatch/server.h>
@@ -61,7 +61,7 @@ const char     *UNAVAILABLE_DISTRIBUTION = "unavailable";
 qd_dispatch_t *qd_dispatch(const char *python_pkgdir)
 {
     qd_dispatch_t *qd = NEW(qd_dispatch_t);
-    memset(qd, 0, sizeof(qd_dispatch_t));
+    ZERO(qd);
 
     qd_entity_cache_initialize();   /* Must be first */
     qd_alloc_initialize();
@@ -183,17 +183,16 @@ qd_error_t qd_dispatch_configure_router(qd_dispatch_t *qd, qd_entity_t *entity)
 
     qd->router_mode = qd_entity_get_long(entity, "mode"); QD_ERROR_RET();
     qd->thread_count = qd_entity_opt_long(entity, "workerThreads", 4); QD_ERROR_RET();
-    qd->allow_unsettled_multicast = qd_entity_opt_bool(entity, "allowUnsettledMulticast", false); QD_ERROR_RET();
+    qd->allow_resumable_link_route = qd_entity_opt_bool(entity, "allowResumableLinkRoute", true); QD_ERROR_RET();
 
     if (! qd->sasl_config_path) {
-        qd->sasl_config_path = qd_entity_opt_string(entity, "saslConfigPath", 0); QD_ERROR_RET();
+        qd->sasl_config_path = qd_entity_opt_string(entity, "saslConfigDir", 0); QD_ERROR_RET();
     }
     if (! qd->sasl_config_name) {
         qd->sasl_config_name = qd_entity_opt_string(entity, "saslConfigName", "qdrouterd"); QD_ERROR_RET();
     }
-    qd->auth_service = qd_entity_opt_string(entity, "authService", 0); QD_ERROR_RET();
 
-    char *dump_file = qd_entity_opt_string(entity, "debugDump", 0); QD_ERROR_RET();
+    char *dump_file = qd_entity_opt_string(entity, "debugDumpFile", 0); QD_ERROR_RET();
     if (dump_file) {
         qd_alloc_debug_dump(dump_file); QD_ERROR_RET();
         free(dump_file);
@@ -218,6 +217,18 @@ qd_error_t qd_dispatch_configure_link_route(qd_dispatch_t *qd, qd_entity_t *enti
 qd_error_t qd_dispatch_configure_auto_link(qd_dispatch_t *qd, qd_entity_t *entity) {
     if (!qd->router) return qd_error(QD_ERROR_NOT_FOUND, "No router available");
     qd_router_configure_auto_link(qd->router, entity);
+    return qd_error_code();
+}
+
+qd_error_t qd_dispatch_configure_exchange(qd_dispatch_t *qd, qd_entity_t *entity) {
+    if (!qd->router) return qd_error(QD_ERROR_NOT_FOUND, "No router available");
+    qd_router_configure_exchange(qd->router, entity);
+    return qd_error_code();
+}
+
+qd_error_t qd_dispatch_configure_binding(qd_dispatch_t *qd, qd_entity_t *entity) {
+    if (!qd->router) return qd_error(QD_ERROR_NOT_FOUND, "No router available");
+    qd_router_configure_binding(qd->router, entity);
     return qd_error_code();
 }
 
@@ -257,6 +268,29 @@ void qd_dispatch_policy_c_counts_free(long ccounts)
 void qd_dispatch_policy_c_counts_refresh(long ccounts, qd_entity_t *entity)
 {
     qd_policy_c_counts_refresh(ccounts, entity);
+}
+
+bool qd_dispatch_policy_host_pattern_add(qd_dispatch_t *qd, void *py_obj)
+{
+    char *hostPattern = py_string_2_c(py_obj);
+    bool rc = qd_policy_host_pattern_add(qd->policy, hostPattern);
+    free(hostPattern);
+    return rc;
+}
+
+void qd_dispatch_policy_host_pattern_remove(qd_dispatch_t *qd, void *py_obj)
+{
+    char *hostPattern = py_string_2_c(py_obj);
+    qd_policy_host_pattern_remove(qd->policy, hostPattern);
+    free(hostPattern);
+}
+
+char * qd_dispatch_policy_host_pattern_lookup(qd_dispatch_t *qd, void *py_obj)
+{
+    char *hostPattern = py_string_2_c(py_obj);
+    char *rc = qd_policy_host_pattern_lookup(qd->policy, hostPattern);
+    free(hostPattern);
+    return rc;
 }
 
 qd_error_t qd_dispatch_prepare(qd_dispatch_t *qd)

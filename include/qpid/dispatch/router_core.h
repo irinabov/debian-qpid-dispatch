@@ -187,6 +187,8 @@ qdr_connection_t *qdr_connection_opened(qdr_core_t            *core,
  */
 void qdr_connection_closed(qdr_connection_t *conn);
 
+bool qdr_connection_route_container(qdr_connection_t *conn);
+
 /**
  * qdr_connection_set_context
  *
@@ -327,6 +329,18 @@ bool qdr_terminus_is_coordinator(qdr_terminus_t *term);
 bool qdr_terminus_is_dynamic(qdr_terminus_t *term);
 
 /**
+ * qdr_terminus_survives_disconnect
+ *
+ * Indicate whether this terminus will survive disconnection (i.e. if
+ * state is expected to be kept).
+ *
+ * @param term A qdr_terminus pointer returned by qdr_terminus()
+ * @return true iff the terminus has a timeout greater than 0 or an
+ * expiry-policy of never
+ */
+bool qdr_terminus_survives_disconnect(qdr_terminus_t *term);
+
+/**
  * qdr_terminus_set_address
  *
  * Set the terminus address
@@ -347,6 +361,26 @@ void qdr_terminus_set_address_iterator(qdr_terminus_t *term, qd_iterator_t *addr
  * @return A pointer to an iterator or 0 if the terminus is anonymous.
  */
 qd_iterator_t *qdr_terminus_get_address(qdr_terminus_t *term);
+
+/**
+ * qdr_terminus_insert_address_prefix
+ *
+ * Insert the given prefix into the terminus address
+ *
+ * @param term A qdr_terminus pointer returned by qdr_terminus()
+ * @param prefix null-terminated string
+ */
+void qdr_terminus_insert_address_prefix(qdr_terminus_t *term, const char *prefix);
+
+/**
+ * qdr_terminus_strip_address_prefix
+ *
+ * Remove the given prefix from the terminus address
+ *
+ * @param term A qdr_terminus pointer returned by qdr_terminus()
+ * @param prefix null-terminated string
+ */
+void qdr_terminus_strip_address_prefix(qdr_terminus_t *term, const char *prefix);
 
 /**
  * qdr_terminus_dnp_address
@@ -561,13 +595,14 @@ void qdr_link_delete(qdr_link_t *link);
  * @param link_exclusion If present, this is a bitmask of inter-router links that should not be used
  *                       to send this message.  This bitmask is created by the trace_mask module and
  *                       it built on the trace header from a received message.
+ * @param ingress_index The bitmask index of the router that this delivery entered the network through.
  * @return Pointer to the qdr_delivery that will track the lifecycle of this delivery on this link.
  */
 qdr_delivery_t *qdr_link_deliver(qdr_link_t *link, qd_message_t *msg, qd_iterator_t *ingress,
-                                 bool settled, qd_bitmask_t *link_exclusion);
+                                 bool settled, qd_bitmask_t *link_exclusion, int ingress_index);
 qdr_delivery_t *qdr_link_deliver_to(qdr_link_t *link, qd_message_t *msg,
                                     qd_iterator_t *ingress, qd_iterator_t *addr,
-                                    bool settled, qd_bitmask_t *link_exclusion);
+                                    bool settled, qd_bitmask_t *link_exclusion, int ingress_index);
 qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *msg, bool settled,
                                                 const uint8_t *tag, int tag_length,
                                                 uint64_t disposition, pn_data_t* disposition_state);
@@ -625,6 +660,7 @@ bool qdr_delivery_send_complete(const qdr_delivery_t *delivery);
 bool qdr_delivery_tag_sent(const qdr_delivery_t *delivery);
 void qdr_delivery_set_tag_sent(const qdr_delivery_t *delivery, bool tag_sent);
 bool qdr_delivery_receive_complete(const qdr_delivery_t *delivery);
+uint64_t qdr_delivery_disposition(const qdr_delivery_t *delivery);
 void qdr_delivery_set_aborted(const qdr_delivery_t *delivery, bool aborted);
 bool qdr_delivery_is_aborted(const qdr_delivery_t *delivery);
 

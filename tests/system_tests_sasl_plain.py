@@ -17,9 +17,14 @@
 # under the License.
 #
 
-import unittest, os, json
-from subprocess import PIPE, Popen, STDOUT
-from system_test import TestCase, Qdrouterd, main_module, DIR, TIMEOUT, Process
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+import unittest2 as unittest, os
+from subprocess import PIPE, Popen
+from system_test import TestCase, Qdrouterd, main_module, DIR, TIMEOUT
 from qpid_dispatch.management.client import Node
 from proton import SASL
 
@@ -36,7 +41,7 @@ class RouterTestPlainSaslCommon(TestCase):
     def createSaslFiles(cls):
         # Create a sasl database.
         p = Popen(['saslpasswd2', '-c', '-p', '-f', 'qdrouterd.sasldb', '-u', 'domain.com', 'test'],
-                  stdin=PIPE, stdout=PIPE, stderr=PIPE)
+                  stdin=PIPE, stdout=PIPE, stderr=PIPE, universal_newlines=True)
         result = p.communicate('password')
         assert p.returncode == 0, \
             "saslpasswd2 exit status %s, output:\n%s" % (p.returncode, result)
@@ -87,6 +92,7 @@ class RouterTestPlainSasl(RouterTestPlainSaslCommon):
                                  'id': 'QDR.X',
                                  'mode': 'interior',
                                  'saslConfigName': 'tests-mech-PLAIN',
+                                 # Leave as saslConfigPath for testing backward compatibility
                                  'saslConfigPath': os.getcwd()}),
         ])
 
@@ -120,7 +126,8 @@ class RouterTestPlainSasl(RouterTestPlainSaslCommon):
 
         p = self.popen(
             ['qdstat', '-b', str(self.routers[0].addresses[1]), '-c'],
-            name='qdstat-'+self.id(), stdout=PIPE, expect=None)
+            name='qdstat-'+self.id(), stdout=PIPE, expect=None,
+            universal_newlines=True)
         out = p.communicate()[0]
         assert p.returncode == 0, \
             "qdstat exit status %s, output:\n%s" % (p.returncode, out)
@@ -139,7 +146,8 @@ class RouterTestPlainSasl(RouterTestPlainSaslCommon):
         p = self.popen(
             ['qdstat', '-b', str(self.routers[0].addresses[2]), '-c', '--sasl-mechanisms=PLAIN',
              '--sasl-username=test@domain.com', '--sasl-password=password'],
-            name='qdstat-'+self.id(), stdout=PIPE, expect=None)
+            name='qdstat-'+self.id(), stdout=PIPE, expect=None,
+            universal_newlines=True)
 
         out = p.communicate()[0]
         assert p.returncode == 0, \
@@ -170,7 +178,8 @@ class RouterTestPlainSasl(RouterTestPlainSaslCommon):
         p = self.popen(
             ['qdstat', '-b', str(self.routers[0].addresses[2]), '-c', '--sasl-mechanisms=PLAIN',
              '--sasl-username=test@domain.com', '--sasl-password-file=' + password_file],
-            name='qdstat-'+self.id(), stdout=PIPE, expect=None)
+            name='qdstat-'+self.id(), stdout=PIPE, expect=None,
+            universal_newlines=True)
 
         out = p.communicate()[0]
         assert p.returncode == 0, \
@@ -223,16 +232,17 @@ class RouterTestPlainSaslOverSsl(RouterTestPlainSaslCommon):
                                    'sslProfile':'server-ssl-profile',
                                    'saslMechanisms':'PLAIN', 'authenticatePeer': 'yes'}),
                      ('sslProfile', {'name': 'server-ssl-profile',
-                                     'certDb': cls.ssl_file('ca-certificate.pem'),
+                                     'caCertFile': cls.ssl_file('ca-certificate.pem'),
                                      'certFile': cls.ssl_file('server-certificate.pem'),
-                                     'keyFile': cls.ssl_file('server-private-key.pem'),
+                                     'privateKeyFile': cls.ssl_file('server-private-key.pem'),
                                      'ciphers': 'ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:RSA+AESGCM:RSA+AES:!aNULL:!MD5:!DSS',
+                                     'protocols': 'TLSv1.1 TLSv1.2',
                                      'password': 'server-password'}),
                      ('router', {'workerThreads': 1,
                                  'id': 'QDR.X',
                                  'mode': 'interior',
                                  'saslConfigName': 'tests-mech-PLAIN',
-                                 'saslConfigPath': os.getcwd()}),
+                                 'saslConfigDir': os.getcwd()}),
         ])
 
         super(RouterTestPlainSaslOverSsl, cls).router('Y', [
@@ -240,7 +250,7 @@ class RouterTestPlainSaslOverSsl(RouterTestPlainSaslCommon):
                      # we will have SASL plain authentication over SSL.
                      ('connector', {'host': '0.0.0.0', 'role': 'inter-router', 'port': x_listener_port,
                                     'sslProfile': 'client-ssl-profile',
-                                    'verifyHostName': 'no',
+                                    'verifyHostname': 'no',
                                     # Provide a sasl user name and password to connect to QDR.X
                                     'saslMechanisms': 'PLAIN',
                                     'saslUsername': 'test@domain.com',
@@ -250,9 +260,9 @@ class RouterTestPlainSaslOverSsl(RouterTestPlainSaslCommon):
                                  'id': 'QDR.Y'}),
                      ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': y_listener_port}),
                      ('sslProfile', {'name': 'client-ssl-profile',
-                                     'certDb': cls.ssl_file('ca-certificate.pem'),
+                                     'caCertFile': cls.ssl_file('ca-certificate.pem'),
                                      'certFile': cls.ssl_file('client-certificate.pem'),
-                                     'keyFile': cls.ssl_file('client-private-key.pem'),
+                                     'privateKeyFile': cls.ssl_file('client-private-key.pem'),
                                      'password': 'client-password'}),
         ])
 
@@ -277,7 +287,8 @@ class RouterTestPlainSaslOverSsl(RouterTestPlainSaslCommon):
              '--ssl-certificate=' + self.ssl_file('client-certificate.pem'),
              '--ssl-key=' + self.ssl_file('client-private-key.pem'),
              '--ssl-password=client-password'],
-            name='qdstat-'+self.id(), stdout=PIPE, expect=None)
+            name='qdstat-'+self.id(), stdout=PIPE, expect=None,
+            universal_newlines=True)
 
         out = p.communicate()[0]
         assert p.returncode == 0, \
@@ -329,9 +340,9 @@ class RouterTestVerifyHostNameYes(RouterTestPlainSaslCommon):
     @classmethod
     def setUpClass(cls):
         """
-        Tests the verifyHostName property of the connector. The hostname on the server certificate we use is
+        Tests the verifyHostname property of the connector. The hostname on the server certificate we use is
         A1.Good.Server.domain.com and the host is 0.0.0.0 on the client router initiating the SSL connection.
-        Since the host names do not match and the verifyHostName is set to true, the client router
+        Since the host names do not match and the verifyHostname is set to true, the client router
         will NOT be able make a successful SSL connection the server router.
         """
         super(RouterTestVerifyHostNameYes, cls).setUpClass()
@@ -354,20 +365,22 @@ class RouterTestVerifyHostNameYes(RouterTestPlainSaslCommon):
                      ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.tester.get_port(),
                                    'authenticatePeer': 'no'}),
                      ('sslProfile', {'name': 'server-ssl-profile',
-                                     'certDb': cls.ssl_file('ca-certificate.pem'),
+                                     'caCertFile': cls.ssl_file('ca-certificate.pem'),
                                      'certFile': cls.ssl_file('server-certificate.pem'),
-                                     'keyFile': cls.ssl_file('server-private-key.pem'),
+                                     'privateKeyFile': cls.ssl_file('server-private-key.pem'),
                                      'password': 'server-password'}),
                      ('router', {'workerThreads': 1,
                                  'id': 'QDR.X',
                                  'mode': 'interior',
                                  'saslConfigName': 'tests-mech-PLAIN',
-                                 'saslConfigPath': os.getcwd()}),
+                                 'saslConfigDir': os.getcwd()}),
         ])
 
         super(RouterTestVerifyHostNameYes, cls).router('Y', [
                      ('connector', {'host': '127.0.0.1', 'role': 'inter-router', 'port': x_listener_port,
                                     'sslProfile': 'client-ssl-profile',
+                                    # verifyHostName has been deprecated. We are using it here to test
+                                    # backward compatibility.
                                     'verifyHostName': 'yes',
                                     'saslMechanisms': 'PLAIN',
                                     'saslUsername': 'test@domain.com',
@@ -377,9 +390,9 @@ class RouterTestVerifyHostNameYes(RouterTestPlainSaslCommon):
                                  'id': 'QDR.Y'}),
                      ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': y_listener_port}),
                      ('sslProfile', {'name': 'client-ssl-profile',
-                                     'certDb': cls.ssl_file('ca-certificate.pem'),
+                                     'caCertFile': cls.ssl_file('ca-certificate.pem'),
                                      'certFile': cls.ssl_file('client-certificate.pem'),
-                                     'keyFile': cls.ssl_file('client-private-key.pem'),
+                                     'privateKeyFile': cls.ssl_file('client-private-key.pem'),
                                      'password': 'client-password'}),
         ])
 
@@ -395,7 +408,7 @@ class RouterTestVerifyHostNameYes(RouterTestPlainSaslCommon):
         """
         Tests to make sure that there are no 'inter-router' connections.
         The connection to the other router will not happen because the connection failed
-        due to setting 'verifyHostName': 'yes'
+        due to setting 'verifyHostname': 'yes'
         """
         if not SASL.extended():
             self.skipTest("Cyrus library not available. skipping test")
@@ -422,9 +435,9 @@ class RouterTestVerifyHostNameNo(RouterTestPlainSaslCommon):
     @classmethod
     def setUpClass(cls):
         """
-        Tests the verifyHostName property of the connector. The hostname on the server certificate we use is
+        Tests the verifyHostname property of the connector. The hostname on the server certificate we use is
         A1.Good.Server.domain.com and the host is 0.0.0.0 on the client router initiating the SSL connection.
-        Since the host names do not match but verifyHostName is set to false, the client router
+        Since the host names do not match but verifyHostname is set to false, the client router
         will be successfully able to make an SSL connection the server router.
         """
         super(RouterTestVerifyHostNameNo, cls).setUpClass()
@@ -448,15 +461,17 @@ class RouterTestVerifyHostNameNo(RouterTestPlainSaslCommon):
                      ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.tester.get_port(),
                                    'authenticatePeer': 'no'}),
                      ('sslProfile', {'name': 'server-ssl-profile',
+                                     # certDb has been deprecated. We are using it here to test backward compatibility.
                                      'certDb': cls.ssl_file('ca-certificate.pem'),
                                      'certFile': cls.ssl_file('server-certificate.pem'),
+                                     # keyFile has been deprecated. We are using it here to test backward compatibility.
                                      'keyFile': cls.ssl_file('server-private-key.pem'),
                                      'password': 'server-password'}),
                      ('router', {'workerThreads': 1,
                                  'id': 'QDR.X',
                                  'mode': 'interior',
                                  'saslConfigName': 'tests-mech-PLAIN',
-                                 'saslConfigPath': os.getcwd()}),
+                                 'saslConfigDir': os.getcwd()}),
         ])
 
         super(RouterTestVerifyHostNameNo, cls).router('Y', [
@@ -468,16 +483,16 @@ class RouterTestVerifyHostNameNo(RouterTestPlainSaslCommon):
                                     'sslProfile': 'client-ssl-profile',
                                     # Provide a sasl user name and password to connect to QDR.X
                                     'saslMechanisms': 'PLAIN',
-                                    'verifyHostName': 'no',
+                                    'verifyHostname': 'no',
                                     'saslUsername': 'test@domain.com', 'saslPassword': 'password'}),
                      ('router', {'workerThreads': 1,
                                  'mode': 'interior',
                                  'id': 'QDR.Y'}),
                      ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': y_listener_port}),
                      ('sslProfile', {'name': 'client-ssl-profile',
-                                     'certDb': cls.ssl_file('ca-certificate.pem'),
+                                     'caCertFile': cls.ssl_file('ca-certificate.pem'),
                                      'certFile': cls.ssl_file('client-certificate.pem'),
-                                     'keyFile': cls.ssl_file('client-private-key.pem'),
+                                     'privateKeyFile': cls.ssl_file('client-private-key.pem'),
                                      'password': 'client-password'}),
         ])
 
@@ -515,7 +530,7 @@ class RouterTestVerifyHostNameNo(RouterTestPlainSaslCommon):
 
     def test_inter_router_plain_over_ssl_exists(self):
         """
-        Tests to make sure that an inter-router connection exists between the routers since verifyHostName is 'no'.
+        Tests to make sure that an inter-router connection exists between the routers since verifyHostname is 'no'.
         """
         if not SASL.extended():
             self.skipTest("Cyrus library not available. skipping test")
@@ -540,15 +555,16 @@ class RouterTestVerifyHostNameNo(RouterTestPlainSaslCommon):
         local_node.delete(type='connector', name='connectorToX')
         local_node.delete(type='sslProfile', name='client-ssl-profile')
         connections = local_node.query(type='org.apache.qpid.dispatch.connection').get_entities()
-        self.assertNotIn("QDR.X", [c.container for c in connections]) # Should not be present now
+        is_qdr_x = "QDR.X" in [c.container for c in connections]
+        self.assertFalse(is_qdr_x) # Should not be present now
 
         # re-create the ssl profile
         local_node.create({'type': 'sslProfile',
                      'name': 'client-ssl-profile',
                      'certFile': self.ssl_file('client-certificate.pem'),
-                     'keyFile': self.ssl_file('client-private-key.pem'),
+                     'privateKeyFile': self.ssl_file('client-private-key.pem'),
                      'password': 'client-password',
-                     'certDb': self.ssl_file('ca-certificate.pem')})
+                     'caCertFile': self.ssl_file('ca-certificate.pem')})
         # re-create connector
         local_node.create({'type': 'connector',
                      'name': 'connectorToX',
@@ -557,7 +573,7 @@ class RouterTestVerifyHostNameNo(RouterTestPlainSaslCommon):
                      'saslMechanisms': 'PLAIN',
                      'sslProfile': 'client-ssl-profile',
                      'role': 'inter-router',
-                     'verifyHostName': False,
+                     'verifyHostname': False,
                      'saslUsername': 'test@domain.com',
                      'saslPassword': 'password'})
         self.routers[1].wait_connectors()

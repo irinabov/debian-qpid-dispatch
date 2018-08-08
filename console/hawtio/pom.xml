@@ -24,7 +24,7 @@
 
   <groupId>org.apache.qpid</groupId>
   <artifactId>dispatch-hawtio-console</artifactId>
-  <version>1.0.1</version>
+  <version>1.2.0</version>
   <packaging>war</packaging>
   <inceptionYear>2018</inceptionYear>
   <url>https://qpid.apache.org</url>
@@ -53,7 +53,7 @@
       as we build that dynamically using maven-antrun-plugin below. -->
     <!-- plugin-context is what context this plugin will handle requests on
       in the application server -->
-    <plugin-context>/${artifactId}</plugin-context>
+    <plugin-context>/${project.artifactId}</plugin-context>
 
     <!-- plugin-name is the name of our plugin, affects the name used for
       the plugin's mbean -->

@@ -17,10 +17,16 @@
 # under the License.
 #
 
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+import unittest2 as unittest
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
 from proton import Message, Endpoint
-from system_test import TIMEOUT
+from system_test import main_module, TIMEOUT
 
 class Timeout(object):
     def __init__(self, parent):
@@ -205,3 +211,6 @@ class DrainNoMoreMessagesHandler(MessagingHandler):
     def run(self):
         Container(self).run()
 
+
+if __name__ == '__main__':
+    unittest.main(main_module())

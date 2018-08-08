@@ -17,10 +17,10 @@
  * under the License.
  */
 
-#include <Python.h>
 #include "qpid/dispatch/python_embedded.h"
 #include "policy.h"
 #include "policy_internal.h"
+#include "parse_tree.h"
 #include <stdio.h>
 #include <string.h>
 #include "dispatch_private.h"
@@ -32,6 +32,7 @@
 #include <proton/transport.h>
 #include <proton/error.h>
 #include <proton/event.h>
+#include "python_private.h"
 
 
 //
@@ -54,16 +55,32 @@ static char* SESSION_DISALLOWED            = "session disallowed by local policy
 static char* LINK_DISALLOWED               = "link disallowed by local policy";
 
 //
+// username substitution key shared with configuration files and python code
+// substitution triplet keys shared with python code 
+//
+static const char * const user_subst_key        = "${user}";
+static const char * const user_subst_i_absent   = "a";
+static const char * const user_subst_i_prefix   = "p";
+static const char * const user_subst_i_embed    = "e";
+static const char * const user_subst_i_suffix   = "s";
+static const char * const user_subst_i_wildcard = "*";
+
+static void hostname_tree_free(qd_parse_tree_t *hostname_tree);
+
+//
 // Policy configuration/statistics management interface
 //
 struct qd_policy_t {
     qd_dispatch_t        *qd;
     qd_log_source_t      *log_source;
     void                 *py_policy_manager;
+    sys_mutex_t          *tree_lock;
+    qd_parse_tree_t      *hostname_tree;
                           // configured settings
     int                   max_connection_limit;
     char                 *policyDir;
     bool                  enableVhostPolicy;
+    bool                  enableVhostNamePatterns;
                           // live statistics
     int                   connections_processed;
     int                   connections_denied;
@@ -76,14 +93,12 @@ struct qd_policy_t {
 qd_policy_t *qd_policy(qd_dispatch_t *qd)
 {
     qd_policy_t *policy = NEW(qd_policy_t);
+    ZERO(policy);
     policy->qd                   = qd;
     policy->log_source           = qd_log_source("POLICY");
     policy->max_connection_limit = 65535;
-    policy->policyDir            = 0;
-    policy->enableVhostPolicy    = false;
-    policy->connections_processed= 0;
-    policy->connections_denied   = 0;
-    policy->connections_current  = 0;
+    policy->tree_lock            = sys_mutex();
+    policy->hostname_tree        = qd_parse_tree_new(QD_PARSE_TREE_ADDRESS);
 
     qd_log(policy->log_source, QD_LOG_TRACE, "Policy Initialized");
     return policy;
@@ -97,6 +112,9 @@ void qd_policy_free(qd_policy_t *policy)
 {
     if (policy->policyDir)
         free(policy->policyDir);
+    if (policy->tree_lock)
+        sys_mutex_free(policy->tree_lock);
+    hostname_tree_free(policy->hostname_tree);
     free(policy);
 }
 
@@ -112,8 +130,16 @@ qd_error_t qd_entity_configure_policy(qd_policy_t *policy, qd_entity_t *entity)
     policy->policyDir =
         qd_entity_opt_string(entity, "policyDir", 0); CHECK();
     policy->enableVhostPolicy = qd_entity_opt_bool(entity, "enableVhostPolicy", false); CHECK();
-    qd_log(policy->log_source, QD_LOG_INFO, "Policy configured maxConnections: %d, policyDir: '%s', access rules enabled: '%s'",
-           policy->max_connection_limit, policy->policyDir, (policy->enableVhostPolicy ? "true" : "false"));
+    policy->enableVhostNamePatterns = qd_entity_opt_bool(entity, "enableVhostNamePatterns", false); CHECK();
+    qd_log(policy->log_source, QD_LOG_INFO,
+           "Policy configured maxConnections: %d, "
+           "policyDir: '%s',"
+           "access rules enabled: '%s', "
+           "use hostname patterns: '%s'",
+           policy->max_connection_limit,
+           policy->policyDir,
+           (policy->enableVhostPolicy ? "true" : "false"),
+           (policy->enableVhostNamePatterns ? "true" : "false"));
     return QD_ERROR_NONE;
 
 error:
@@ -137,7 +163,7 @@ long qd_policy_c_counts_alloc()
 {
     qd_policy_denial_counts_t * dc = NEW(qd_policy_denial_counts_t);
     assert(dc);
-    memset(dc, 0, sizeof(qd_policy_denial_counts_t));
+    ZERO(dc);
     return (long)dc;
 }
 
@@ -239,6 +265,83 @@ void qd_policy_socket_close(qd_policy_t *policy, const qd_connection_t *conn)
 }
 
 
+// C in the CSV string
+static const char* QPALN_COMMA_SEP =",";
+
+//
+// Given a CSV string defining parser tree specs for allowed sender or
+// receiver links, return a parse_tree
+//
+//  @param config_spec CSV string with link name match patterns
+//     The patterns consist of ('key', 'prefix', 'suffix') triplets describing
+//     the match pattern.
+//  @return pointer to parse tree
+//
+qd_parse_tree_t * qd_policy_parse_tree(const char *config_spec)
+{
+    if (!config_spec || strlen(config_spec) == 0)
+        // empty config specs never match so don't even create parse tree
+        return NULL;
+
+    qd_parse_tree_t *tree = qd_parse_tree_new(QD_PARSE_TREE_ADDRESS);
+    if (!tree)
+        return NULL;
+
+    // make a writable, disposable copy of the csv string
+    char * dup = strdup(config_spec);
+    if (!dup) {
+        qd_parse_tree_free(tree);
+        return NULL;
+    }
+    char * dupend = dup + strlen(dup);
+
+    char * pch = dup;
+    while (pch < dupend) {
+        // the tuple strings
+        char  *pChar, *pS1, *pS2;
+        size_t sChar,  sS1,  sS2;
+
+        // extract control field
+        sChar = strcspn(pch, QPALN_COMMA_SEP);
+        if (sChar != 1) { assert(false); break;}
+        pChar = pch;
+        pChar[sChar] = '\0';
+        pch += sChar + 1;
+        if (pch >= dupend) { assert(false); break; }
+
+        // extract prefix field S1
+        sS1 = strcspn(pch, QPALN_COMMA_SEP);
+        pS1 = pch;
+        pS1[sS1] = '\0';
+        pch += sS1 + 1;
+        if (pch > dupend) { assert(false); break; }
+
+        // extract suffix field S2
+        sS2 = strcspn(pch, QPALN_COMMA_SEP);
+        pS2 = pch;
+        pch += sS2 + 1;
+        pS2[sS2] = '\0';
+
+        size_t sName = sS1 + strlen(user_subst_key) + sS2 + 1; // large enough to handle any case
+        char *pName = (char *)malloc(sName);
+
+        if (!strcmp(pChar, user_subst_i_absent))
+            snprintf(pName, sName, "%s", pS1);
+        else if (!strcmp(pChar, user_subst_i_prefix))
+            snprintf(pName, sName, "%s%s", user_subst_key, pS2);
+        else if (!strcmp(pChar, user_subst_i_embed))
+            snprintf(pName, sName, "%s%s%s", pS1, user_subst_key, pS2);
+        else
+            snprintf(pName, sName, "%s%s", pS1, user_subst_key);
+        qd_parse_tree_add_pattern_str(tree, pName, (void *)1);
+
+        free(pName);
+    }
+    free(dup);
+    return tree;
+}
+
+
 //
 // Functions related to authenticated connection denial.
 // An AMQP Open has been received over some connection.
@@ -272,6 +375,7 @@ bool qd_policy_open_lookup_user(
 {
     // Lookup the user/host/vhost for allow/deny and to get settings name
     bool res = false;
+    name_buf[0] = 0;
     qd_python_lock_state_t lock_state = qd_python_lock();
     PyObject *module = PyImport_ImportModule("qpid_dispatch_internal.policy.policy_manager");
     if (module) {
@@ -281,10 +385,17 @@ bool qd_policy_open_lookup_user(
                                                      (PyObject *)policy->py_policy_manager,
                                                      username, hostip, vhost, conn_name, conn_id);
             if (result) {
-                const char *res_string = PyString_AsString(result);
-                strncpy(name_buf, res_string, name_buf_size);
+                char *res_string = py_obj_2_c_string(result);
+                const size_t res_len = res_string ? strlen(res_string) : 0;
+                if (res_string && res_len < name_buf_size) {
+                    strcpy(name_buf, res_string);
+                } else {
+                    qd_log(policy->log_source, QD_LOG_ERROR,
+                           "Internal: lookup_user: insufficient buffer for name");
+                }
                 Py_XDECREF(result);
-                res = true; // settings name returned
+                free(res_string);
+                res = !!name_buf[0]; // settings name returned
             } else {
                 qd_log(policy->log_source, QD_LOG_DEBUG, "Internal: lookup_user: result");
             }
@@ -314,7 +425,6 @@ bool qd_policy_open_lookup_user(
                                                         vhost, name_buf, upolicy);
                 if (result2) {
                     settings->maxFrameSize         = qd_entity_opt_long((qd_entity_t*)upolicy, "maxFrameSize", 0);
-                    settings->maxMessageSize       = qd_entity_opt_long((qd_entity_t*)upolicy, "maxMessageSize", 0);
                     settings->maxSessionWindow     = qd_entity_opt_long((qd_entity_t*)upolicy, "maxSessionWindow", 0);
                     settings->maxSessions          = qd_entity_opt_long((qd_entity_t*)upolicy, "maxSessions", 0);
                     settings->maxSenders           = qd_entity_opt_long((qd_entity_t*)upolicy, "maxSenders", 0);
@@ -324,6 +434,10 @@ bool qd_policy_open_lookup_user(
                     settings->allowUserIdProxy     = qd_entity_opt_bool((qd_entity_t*)upolicy, "allowUserIdProxy", false);
                     settings->sources              = qd_entity_get_string((qd_entity_t*)upolicy, "sources");
                     settings->targets              = qd_entity_get_string((qd_entity_t*)upolicy, "targets");
+                    settings->sourcePattern        = qd_entity_get_string((qd_entity_t*)upolicy, "sourcePattern");
+                    settings->targetPattern        = qd_entity_get_string((qd_entity_t*)upolicy, "targetPattern");
+                    settings->sourceParseTree      = qd_policy_parse_tree(settings->sourcePattern);
+                    settings->targetParseTree      = qd_policy_parse_tree(settings->targetPattern);
                     settings->denialCounts         = (qd_policy_denial_counts_t*)
                                                     qd_entity_get_long((qd_entity_t*)upolicy, "denialCounts");
                     Py_XDECREF(result2);
@@ -456,44 +570,16 @@ void _qd_policy_deny_amqp_receiver_link(pn_link_t *pn_link, qd_connection_t *qd_
 }
 
 
-//
-//
-#define MIN(a,b) (((a)<(b))?(a):(b))
-
-char * _qd_policy_link_user_name_subst(const char *uname, const char *proposed, char *obuf, int osize)
+/**
+ * Given a char return true if it is a parse_tree token separater
+ */
+bool is_token_sep(char testc)
 {
-    if (strlen(uname) == 0)
-        return NULL;
-
-    const char *duser = "${user}";
-    char *retptr = obuf;
-    const char *wiptr = proposed;
-    const char *findptr = strstr(proposed, uname);
-    if (findptr == NULL) {
-        return NULL;
+    for (const char *ptr = qd_parse_address_token_sep(); *ptr != '\0'; ptr++) {
+        if (*ptr == testc)
+            return true;
     }
-
-    // Copy leading before match
-    int segsize = findptr - wiptr;
-    int copysize = MIN(osize, segsize);
-    if (copysize)
-        strncpy(obuf, wiptr, copysize);
-    wiptr += copysize;
-    osize -= copysize;
-    obuf  += copysize;
-
-    // Copy the substitution string
-    segsize = strlen(duser);
-    copysize = MIN(osize, segsize);
-    if (copysize)
-        strncpy(obuf, duser, copysize);
-    wiptr += strlen(uname);
-    osize -= copysize;
-    obuf  += copysize;
-
-    // Copy trailing after match
-    strncpy(obuf, wiptr, osize);
-    return retptr;
+    return false;
 }
 
 
@@ -501,19 +587,29 @@ char * _qd_policy_link_user_name_subst(const char *uname, const char *proposed, 
 //
 // Size of 'easy' temporary copy of allowed input string
 #define QPALN_SIZE 1024
-// Size of user-name-substituted proposed string.
-#define QPALN_USERBUFSIZE 300
-// C in the CSV string
-#define QPALN_COMMA_SEP ","
-// Wildcard character
+// Wildcard character at end of source/target name strings
 #define QPALN_WILDCARD '*'
 
+#define MIN(a,b) (((a)<(b))?(a):(b))
+
+/**
+ * Given a username and a list of allowed link names 
+ * decide if the proposed link name is approved.
+ * @param[in] username the user name
+ * @param[in] allowed csv of (key, prefix, suffix) tuples
+ * @param[in] proposed the link source/target name to be approved
+ * @return true if the user is allowed to open this link source/target name
+ * 
+ * Concrete example
+ * user: 'bob', allowed (from spec): 'A,B,tmp-${user},C', proposed: 'tmp-bob'
+ * note that allowed above is now a tuple and not simple string fron the spec.
+ */
 bool _qd_policy_approve_link_name(const char *username, const char *allowed, const char *proposed)
 {
     // Verify string sizes are usable
     size_t p_len = strlen(proposed);
     if (p_len == 0) {
-        // degenerate case of blank name being opened. will never match anything.
+        // degenerate case of blank proposed name being opened. will never match anything.
         return false;
     }
     size_t a_len = strlen(allowed);
@@ -522,45 +618,242 @@ bool _qd_policy_approve_link_name(const char *username, const char *allowed, con
         return false;
     }
 
-    // Create a temporary writable copy of incoming allowed list
-    char t_allow[QPALN_SIZE + 1]; // temporary buffer for normal allow lists
-    char * pa = t_allow;
-    if (a_len > QPALN_SIZE) {
-        pa = (char *)malloc(a_len + 1); // malloc a buffer for larger allow lists
+    size_t username_len = strlen(username);
+
+    // make a writable, disposable copy of the csv string
+    char * dup = strdup(allowed);
+    if (!dup) {
+        return false;
     }
-    strncpy(pa, allowed, a_len);
-    pa[a_len] = 0;
-    // Do reverse user substitution into proposed
-    char substbuf[QPALN_USERBUFSIZE];
-    char * prop2 = _qd_policy_link_user_name_subst(username, proposed, substbuf, QPALN_USERBUFSIZE);
-    char *toknext = 0;
-    char *tok = strtok_r(pa, QPALN_COMMA_SEP, &toknext);
-    assert (tok);
+    char * dupend = dup + strlen(dup);
+    char * pch = dup;
+
+    // get a scratch buffer for writing temporary match strings
+    char * pName = (char *)malloc(QPALN_SIZE);
+    if (!pName) {
+        free(dup);
+        return false;
+    }
+    size_t pName_sz = QPALN_SIZE;
+
     bool result = false;
-    while (tok != NULL) {
-        if (*tok == QPALN_WILDCARD) {
+
+    while (pch < dupend) {
+        // the tuple strings
+        char  *pChar, *pS1, *pS2;
+        size_t sChar,  sS1,  sS2;
+
+        // extract control field
+        sChar = strcspn(pch, QPALN_COMMA_SEP);
+        if (sChar != 1) { assert(false); break;}
+        pChar = pch;
+        pChar[sChar] = '\0';
+        pch += sChar + 1;
+        if (pch >= dupend) { assert(false); break; }
+
+        // extract prefix field S1
+        sS1 = strcspn(pch, QPALN_COMMA_SEP);
+        pS1 = pch;
+        pS1[sS1] = '\0';
+        pch += sS1 + 1;
+        if (pch > dupend) { assert(false); break; }
+
+        // extract suffix field S2
+        sS2 = strcspn(pch, QPALN_COMMA_SEP);
+        pS2 = pch;
+        pch += sS2 + 1;
+        pS2[sS2] = '\0';
+
+        // compute size of generated string and make sure
+        // temporary buffer is big enough to hold it.
+        size_t sName = sS1 + username_len + sS2 + 1;
+        if (sName > pName_sz) {
+            size_t newSize = sName + QPALN_SIZE;
+            char * newPtr = (char *)realloc(pName, newSize);
+            if (!newPtr) {
+                break;
+            }
+            pName = newPtr;
+            pName_sz = newSize;
+        }
+
+        // if wildcard then check no more
+        if (*pChar == *user_subst_i_wildcard) {
             result = true;
             break;
         }
-        int matchlen = p_len;
-        int len = strlen(tok);
-        if (tok[len-1] == QPALN_WILDCARD) {
-            matchlen = len - 1;
-            assert(len > 0);
-        }
-        if (strncmp(tok, proposed, matchlen) == 0) {
-            result = true;
+        // From the rule clause construct what the rule is allowing
+        // given the user name associated with this request.
+        int snpN;
+        if (*pChar == *user_subst_i_absent)
+            snpN = snprintf(pName, sName, "%s", pS1);
+        else if (*pChar == *user_subst_i_prefix)
+            snpN = snprintf(pName, sName, "%s%s", username, pS2);
+        else if (*pChar == *user_subst_i_embed)
+            snpN = snprintf(pName, sName, "%s%s%s", pS1, username, pS2);
+        else if (*pChar == *user_subst_i_suffix)
+            snpN = snprintf(pName, sName, "%s%s", pS1, username);
+        else {
+            assert(false);
             break;
         }
-        if (prop2 && strncmp(tok, prop2, matchlen) == 0) {
-            result = true;
-            break;
+
+        size_t rule_len = MIN(snpN, sName); 
+        if (pName[rule_len-1] != QPALN_WILDCARD) {
+            // Rule clauses that do not end with wildcard 
+            // must match entire proposed name string.
+            // pName=tmp-bob-5, proposed can be only 'tmp-bob-5'
+            result = strcmp(proposed, pName) == 0;
+        } else {
+            // Rule clauses that end with wildcard
+            // must match only as many characters as the cluase without the '*'.
+            // pName=tmp*, will match proposed 'tmp', 'tmp-xxx', 'tmp-bob', ...
+            result = strncmp(proposed, pName, rule_len - 1) == 0;
         }
-        tok = strtok_r(NULL, QPALN_COMMA_SEP, &toknext);
+        if (result)
+            break;
     }
-    if (pa != t_allow) {
-        free(pa);
+    free(pName);
+    free(dup);
+
+    return result;
+}
+
+
+bool _qd_policy_approve_link_name_tree(const char *username, const char *allowed, const char *proposed,
+                                       qd_parse_tree_t *tree)
+{
+    // Verify string sizes are usable
+    size_t proposed_len = strlen(proposed);
+    if (proposed_len == 0) {
+        // degenerate case of blank proposed name being opened. will never match anything.
+        return false;
     }
+    size_t a_len = strlen(allowed);
+    if (a_len == 0) {
+        // no names in 'allowed'.
+        return false;
+    }
+
+    size_t username_len = strlen(username);
+    size_t usersubst_len = strlen(user_subst_key);
+
+    // make a writable, disposable copy of the csv string
+    char * dup = strdup(allowed);
+    if (!dup) {
+        return false;
+    }
+    char * dupend = dup + strlen(dup);
+    char * pch = dup;
+
+    // get a scratch buffer for writing temporary match strings
+    char * pName = (char *)malloc(QPALN_SIZE);
+    if (!pName) {
+        free(dup);
+        return false;
+    }
+    size_t pName_sz = QPALN_SIZE;
+
+    bool result = false;
+
+    while (pch < dupend) {
+        // the tuple strings
+        char  *pChar, *pS1, *pS2;
+        size_t sChar,  sS1,  sS2;
+
+        // extract control field
+        sChar = strcspn(pch, QPALN_COMMA_SEP);
+        if (sChar != 1) { assert(false); break;}
+        pChar = pch;
+        pChar[sChar] = '\0';
+        pch += sChar + 1;
+        if (pch >= dupend) { assert(false); break; }
+
+        // extract prefix field S1
+        sS1 = strcspn(pch, QPALN_COMMA_SEP);
+        pS1 = pch;
+        pS1[sS1] = '\0';
+        pch += sS1 + 1;
+        if (pch > dupend) { assert(false); break; }
+
+        // extract suffix field S2
+        sS2 = strcspn(pch, QPALN_COMMA_SEP);
+        pS2 = pch;
+        pch += sS2 + 1;
+        pS2[sS2] = '\0';
+
+        // compute size of generated string and make sure
+        // temporary buffer is big enough to hold it.
+        size_t sName = proposed_len + usersubst_len + 1;
+        if (sName > pName_sz) {
+            size_t newSize = sName + QPALN_SIZE;
+            char * newPtr = (char *)realloc(pName, newSize);
+            if (!newPtr) {
+                break;
+            }
+            pName = newPtr;
+            pName_sz = newSize;
+        }
+
+        // From the rule clause construct what the rule is allowing
+        // given the user name associated with this request.
+        if (*pChar == *user_subst_i_absent) {
+            // Substitution spec is absent. The search string is the literal
+            // S1 in the rule.
+            snprintf(pName, sName, "%s", proposed);
+        }
+        else if (*pChar == *user_subst_i_prefix) {
+            // Substitution spec is prefix.
+            if (strncmp(proposed, username, username_len) != 0)
+                continue; // Denied. Proposed does not have username prefix.
+            // Check that username is not part of a larger token.
+            if (username_len == proposed_len) {
+                // If username is the whole link name then allow if lookup is ok
+            } else {
+                // Proposed is longer than username. Make sure that proposed
+                // is delimited after user name.
+                if (!is_token_sep(proposed[username_len])) {
+                    continue; // denied. proposed has username prefix it it not a delimited user name
+                }
+            }
+            snprintf(pName, sName, "%s%s", user_subst_key, proposed + username_len);
+        }
+        else if (*pChar == *user_subst_i_embed) {
+            assert(false); // not supported
+        }
+        else if (*pChar == *user_subst_i_suffix) {
+            // Check that link name has username suffix
+            if (username_len > proposed_len) {
+                continue; // denied. proposed name is too short to hold username
+            } else {
+                //---
+                // if (username_len == proposed_len) { ... }
+                // unreachable code. substitution-only rule clause is handled by prefix
+                //---
+                if (!is_token_sep(proposed[proposed_len - username_len - 1])) {
+                    continue; // denied. proposed suffix it it not a delimited user name
+                }
+                if (strncmp(&proposed[proposed_len - username_len], username, username_len) != 0) {
+                    continue; // denied. username is not the suffix
+                }
+            }
+            pName[0] = '\0';
+            strncat(pName, proposed, proposed_len - username_len);
+            strcat(pName, user_subst_key);
+        }
+        else {
+            assert(false);
+            break;
+        }
+
+        void * unused_payload = 0;
+        result = qd_parse_tree_retrieve_match_str(tree, pName, &unused_payload);
+        if (result)
+            break;
+    }
+    free(pName);
+    free(dup);
+
     return result;
 }
 
@@ -589,7 +882,7 @@ bool qd_policy_approve_amqp_sender_link(pn_link_t *pn_link, qd_connection_t *qd_
     bool lookup;
     if (target && *target) {
         // a target is specified
-        lookup = _qd_policy_approve_link_name(qd_conn->user_id, qd_conn->policy_settings->targets, target);
+        lookup = qd_policy_approve_link_name(qd_conn->user_id, qd_conn->policy_settings, target, false);
 
         qd_log(qd_server_dispatch(qd_conn->server)->policy->log_source, (lookup ? QD_LOG_TRACE : QD_LOG_INFO),
             "%s AMQP Attach sender link '%s' for user '%s', rhost '%s', vhost '%s' based on link target name",
@@ -651,7 +944,7 @@ bool qd_policy_approve_amqp_receiver_link(pn_link_t *pn_link, qd_connection_t *q
     const char * source = pn_terminus_get_address(pn_link_remote_source(pn_link));
     if (source && *source) {
         // a source is specified
-        bool lookup = _qd_policy_approve_link_name(qd_conn->user_id, qd_conn->policy_settings->sources, source);
+        bool lookup = qd_policy_approve_link_name(qd_conn->user_id, qd_conn->policy_settings, source, true);
 
         qd_log(qd_server_dispatch(qd_conn->server)->policy->log_source, (lookup ? QD_LOG_TRACE : QD_LOG_INFO),
             "%s AMQP Attach receiver link '%s' for user '%s', rhost '%s', vhost '%s' based on link source name",
@@ -690,8 +983,10 @@ void qd_policy_amqp_open(qd_connection_t *qd_conn) {
 #define SETTINGS_NAME_SIZE 256
         char settings_name[SETTINGS_NAME_SIZE];
         uint32_t conn_id = qd_conn->connection_id;
-        qd_conn->policy_settings = NEW(qd_policy_settings_t); // TODO: memory pool for settings
-        memset(qd_conn->policy_settings, 0, sizeof(qd_policy_settings_t));
+        if (!qd_conn->policy_settings) {
+            qd_conn->policy_settings = NEW(qd_policy_settings_t); // TODO: memory pool for settings
+            ZERO(qd_conn->policy_settings);
+        }
 
         if (qd_policy_open_lookup_user(policy, qd_conn->user_id, hostip, vhost, conn_name,
                                        settings_name, SETTINGS_NAME_SIZE, conn_id,
@@ -718,4 +1013,188 @@ void qd_policy_amqp_open(qd_connection_t *qd_conn) {
     } else {
         qd_policy_private_deny_amqp_connection(conn, QD_AMQP_COND_RESOURCE_LIMIT_EXCEEDED, CONNECTION_DISALLOWED);
     }
+}
+
+
+void qd_policy_settings_free(qd_policy_settings_t *settings)
+{
+    if (!settings) return;
+    if (settings->sources)         free(settings->sources);
+    if (settings->targets)         free(settings->targets);
+    if (settings->sourcePattern)   free(settings->sourcePattern);
+    if (settings->targetPattern)   free(settings->targetPattern);
+    if (settings->sourceParseTree) qd_parse_tree_free(settings->sourceParseTree);
+    if (settings->targetParseTree) qd_parse_tree_free(settings->targetParseTree);
+    free (settings);
+}
+
+
+bool qd_policy_approve_link_name(const char *username,
+                                 const qd_policy_settings_t *settings,
+                                 const char *proposed,
+                                 bool isReceiver)
+{
+    if (isReceiver) {
+        if (settings->sourceParseTree) {
+            return _qd_policy_approve_link_name_tree(username, settings->sourcePattern, proposed, settings->sourceParseTree);
+        } else if (settings->sources) {
+            return _qd_policy_approve_link_name(username, settings->sources, proposed);
+        }
+    } else {
+        if (settings->targetParseTree) {
+            return _qd_policy_approve_link_name_tree(username, settings->targetPattern, proposed, settings->targetParseTree);
+        } else if (settings->targets) {
+            return _qd_policy_approve_link_name(username, settings->targets, proposed);
+        }
+    }
+    return false;
+}
+
+
+// Add a hostname to the lookup parse_tree
+bool qd_policy_host_pattern_add(qd_policy_t *policy, const char *hostPattern)
+{
+    void *payload = strdup(hostPattern);
+    sys_mutex_lock(policy->tree_lock);
+    void *oldp = qd_parse_tree_add_pattern_str(policy->hostname_tree, hostPattern, payload);
+    if (oldp) {
+        void *recovered = qd_parse_tree_add_pattern_str(policy->hostname_tree, (char *)oldp, oldp);
+        assert (recovered);
+        (void)recovered;        /* Silence compiler complaints of unused variable */
+    }
+    sys_mutex_unlock(policy->tree_lock);
+    if (oldp) {
+        free(payload);
+        qd_log(policy->log_source,
+            QD_LOG_WARNING,
+            "vhost hostname pattern '%s' failed to replace optimized pattern '%s'",
+            hostPattern, oldp);
+    }
+    return oldp == 0;
+}
+
+
+// Remove a hostname from the lookup parse_tree
+void qd_policy_host_pattern_remove(qd_policy_t *policy, const char *hostPattern)
+{
+    sys_mutex_lock(policy->tree_lock);
+    void *oldp = qd_parse_tree_remove_pattern_str(policy->hostname_tree, hostPattern);
+    sys_mutex_unlock(policy->tree_lock);
+    if (oldp) {
+        free(oldp);
+    } else {
+        qd_log(policy->log_source, QD_LOG_WARNING, "vhost hostname pattern '%s' for removal not found", hostPattern);
+    }
+}
+
+
+// Look up a hostname in the lookup parse_tree
+char * qd_policy_host_pattern_lookup(qd_policy_t *policy, const char *hostPattern)
+{
+    void *payload = 0;
+    sys_mutex_lock(policy->tree_lock);
+    bool matched = qd_parse_tree_retrieve_match_str(policy->hostname_tree, hostPattern, &payload);
+    sys_mutex_unlock(policy->tree_lock);
+    if (!matched) {
+        payload = 0;
+    }
+    qd_log(policy->log_source, QD_LOG_TRACE, "vhost hostname pattern '%s' lookup returned '%s'", 
+           hostPattern, (payload ? (char *)payload : "null"));
+    return payload;
+}
+
+
+// free the hostname parse tree and associated resources
+//
+static bool _hostname_tree_free_payload(void *handle,
+                                        const char *pattern,
+                                        void *payload)
+{
+    free(payload);
+    return true;
+}
+
+static void hostname_tree_free(qd_parse_tree_t *hostname_tree)
+{
+    qd_parse_tree_walk(hostname_tree, _hostname_tree_free_payload, NULL);
+    qd_parse_tree_free(hostname_tree);
+}
+
+// Convert naked CSV allow list into parsed settings 3-tuple
+// Note that this logic is also present in python compile_app_settings.
+char * qd_policy_compile_allowed_csv(char * csv)
+{
+    size_t csv_len = strlen(csv);
+    size_t usersubst_len = strlen(user_subst_key);
+
+    size_t n_commas = 0;
+    char * pch = strchr(csv, *QPALN_COMMA_SEP);
+    while (pch != NULL) {
+        n_commas++;
+        pch = strchr(pch + 1, *QPALN_COMMA_SEP);
+    }
+
+    size_t result_size = csv_len + 3 * (n_commas + 1) + 1; // each token gets ctrl char and 2 commas
+    char * result = (char *)malloc(result_size);
+    if (!result)
+        return NULL;
+    result[0] = '\0';
+
+    char * dup = strdup(csv);
+    if (!dup) {
+        free(result);
+        return NULL;
+    }
+    char * dupend = dup + csv_len;
+
+    size_t tok_size = 0;
+    char * sep = "";
+    for (pch = dup; pch < dupend; pch += tok_size + 1) {
+        // isolate token
+        char * pcomma = strchr(pch, *QPALN_COMMA_SEP);
+        if (!pcomma) pcomma = dupend;
+        *pcomma = '\0';
+        tok_size = pcomma - pch;
+
+        strcat(result, sep);
+        sep = ",";
+        char * psubst = strstr(pch, user_subst_key);
+        if (psubst) {
+            // substitute token is present
+            if (psubst == pch) {
+                // token is a prefix
+                strcat(result, user_subst_i_prefix);
+                strcat(result, ",,");
+                strcat(result, pch + usersubst_len);
+            } else if (psubst == pch + tok_size - usersubst_len) {
+                // token is a suffix
+                strcat(result, user_subst_i_suffix);
+                strcat(result, ",");
+                strncat(result, pch, tok_size - usersubst_len);
+                strcat(result, ",");
+            } else {
+                // token is embedded
+                strcat(result, user_subst_i_embed);
+                strcat(result, ",");
+                strncat(result, pch, psubst - pch);
+                strcat(result, ",");
+                strncat(result, psubst + usersubst_len, tok_size - (psubst - pch) - usersubst_len);
+            }
+        } else {
+            // substitute token is absent
+            if (strcmp(pch, user_subst_i_wildcard) == 0) {
+                // token is wildcard
+                strcat(result, user_subst_i_wildcard);
+                strcat(result, ",,");
+            } else {
+                // token is ordinary string
+                strcat(result, user_subst_i_absent);
+                strcat(result, ",");
+                strcat(result, pch);
+                strcat(result, ",");
+            }
+        }
+    }
+    free(dup);
+    return result;
 }

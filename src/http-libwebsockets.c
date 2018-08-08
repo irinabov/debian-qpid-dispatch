@@ -278,8 +278,8 @@ static void listener_start(qd_http_listener_t *hl, qd_http_server_t *hs) {
     struct lws_http_mount *m = &hl->mount;
     m->mountpoint = "/";    /* URL mount point */
     m->mountpoint_len = strlen(m->mountpoint); /* length of the mountpoint */
-    m->origin = (config->http_root && *config->http_root) ? /* File system root */
-        config->http_root : QPID_CONSOLE_STAND_ALONE_INSTALL_DIR;
+    m->origin = (config->http_root_dir && *config->http_root_dir) ? /* File system root */
+        config->http_root_dir : QPID_CONSOLE_STAND_ALONE_INSTALL_DIR;
     m->def = "index.html";  /* Default file name */
     m->origin_protocol = LWSMPRO_FILE; /* mount type is a directory in a filesystem */
     m->extra_mimetypes = mime_types;
@@ -295,13 +295,13 @@ static void listener_start(qd_http_listener_t *hl, qd_http_server_t *hs) {
         info.ssl_cert_filepath = config->ssl_certificate_file;
         info.ssl_private_key_filepath = config->ssl_private_key_file;
         info.ssl_private_key_password = config->ssl_password;
-        info.ssl_ca_filepath = config->ssl_trusted_certificates;
-        info.ssl_cipher_list = config->ciphers;
+        info.ssl_ca_filepath = config->ssl_trusted_certificates ? config->ssl_trusted_certificates : config->ssl_trusted_certificate_db;
+        info.ssl_cipher_list = config->ssl_ciphers;
 
         info.options |=
             LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT |
             (config->ssl_required ? 0 : LWS_SERVER_OPTION_ALLOW_NON_SSL_ON_SSL_PORT) |
-            (config->requireAuthentication ? LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT : 0);
+            ((config->requireAuthentication && info.ssl_ca_filepath) ? LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT : 0);
     }
     info.vhost_name = hl->listener->config.host_port;
     hl->vhost = lws_create_vhost(hs->context, &info);
@@ -340,20 +340,14 @@ static int callback_http(struct lws *wsi, enum lws_callback_reasons reason,
                          void *user, void *in, size_t len)
 {
     switch (reason) {
-
     case LWS_CALLBACK_PROTOCOL_DESTROY:
         qd_http_listener_free(wsi_listener(wsi));
-        return -1;
-
-    case LWS_CALLBACK_HTTP: {
-        /* Called if file mount can't find the file */
-        lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, (char*)in);
-        return -1;
+        break;
+      default:
+        break;
     }
-
-    default:
-        return 0;
-    }
+    /* Do default HTTP handling for all the cases we don't care about. */
+    return lws_callback_http_dummy(wsi, reason, user, in, len);
 }
 
 /* Wake up a connection managed by the http server thread */
@@ -514,7 +508,7 @@ static void* http_thread_run(void* v) {
     return NULL;
 }
 
-void qd_http_server_free(qd_http_server_t *hs) {
+void qd_http_server_stop(qd_http_server_t *hs) {
     if (!hs) return;
     if (hs->thread) {
         /* Thread safe, stop via work queue then clean up */
@@ -524,6 +518,11 @@ void qd_http_server_free(qd_http_server_t *hs) {
         sys_thread_free(hs->thread);
         hs->thread = NULL;
     }
+}
+
+void qd_http_server_free(qd_http_server_t *hs) {
+    if (!hs) return;
+    qd_http_server_stop(hs);
     work_queue_destroy(&hs->work);
     if (hs->context) lws_context_destroy(hs->context);
     free(hs);

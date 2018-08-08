@@ -16,6 +16,19 @@ KIND, either express or implied.  See the License for the
 specific language governing permissions and limitations
 under the License.
 -->
+
+<style>
+    .page-menu-button {
+        display: none;
+    }
+
+  @media (max-width: 768px) {
+    div.aChart {
+        width: 380px;
+        margin-left: 0;
+    }
+}
+</style>
 <div class="main-display row-fluid qdrCharts" ng-controller="QDR.ChartsController">
     <div ng-show="hasCharts()">
         <div ng-repeat="chart in svgCharts" class="chartContainer">
@@ -24,7 +37,7 @@ under the License.
                 <button ng-click="editChart(chart)" title="Configure"><span class="fa-edit"></span></button>
 <!--                <button ng-click="zoomChart(chart)" title="Zoom {{chart.zoomed ? 'in' : 'out'}}" ng-if="!chart.chart.request().nodeList"><i ng-class="chart.zoomed ? 'fa-zoom-in' : 'icon-zoom-out'"></i></button> -->
             </p><div style="clear:both"></div>
-            <div id="{{chart.chart.id()}}" class="aChart d3Chart"></div>
+            <div id="{{chart.chart.id()}}" class="line-chart-pf aChart d3Chart"></div>
         </div>
         <div ng-init="chartsLoaded()"></div>
     </div>

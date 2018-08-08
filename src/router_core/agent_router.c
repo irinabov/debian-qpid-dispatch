@@ -18,32 +18,37 @@
  */
 
 #include "agent_router.h"
+
 #include "config.h"
 #include <inttypes.h>
 #include <stdio.h>
 
-#define QDR_ROUTER_NAME                   0
-#define QDR_ROUTER_IDENTITY               1
-#define QDR_ROUTER_ID                     2
-#define QDR_ROUTER_TYPE                   3
-#define QDR_ROUTER_MODE                   4
-#define QDR_ROUTER_AREA                   5
-#define QDR_ROUTER_VERSION                6
-#define QDR_ROUTER_HELLO_INTERVAL         7
-#define QDR_ROUTER_HELLO_MAX_AGE          8
-#define QDR_ROUTER_RA_INTERVAL            9
-#define QDR_ROUTER_RA_INTERVAL_FLUX       10
-#define QDR_ROUTER_REMOTE_LS_MAX_AGE      11
-#define QDR_ROUTER_ADDR_COUNT             12
-#define QDR_ROUTER_LINK_COUNT             13
-#define QDR_ROUTER_NODE_COUNT             14
-#define QDR_ROUTER_LINK_ROUTE_COUNT       15
-#define QDR_ROUTER_AUTO_LINK_COUNT        16
-#define QDR_ROUTER_WORKER_THREADS         17
-#define QDR_ROUTER_DEBUG_DUMP             18
-#define QDR_ROUTER_SASL_CONFIG_PATH       19
-#define QDR_ROUTER_SASL_CONFIG_NAME       20
-#define QDR_ROUTER_CONNECTION_COUNT       21
+
+#define QDR_ROUTER_NAME                                0
+#define QDR_ROUTER_IDENTITY                            1
+#define QDR_ROUTER_ID                                  2
+#define QDR_ROUTER_TYPE                                3
+#define QDR_ROUTER_MODE                                4
+#define QDR_ROUTER_AREA                                5
+#define QDR_ROUTER_VERSION                             6
+#define QDR_ROUTER_ADDR_COUNT                          7
+#define QDR_ROUTER_LINK_COUNT                          8
+#define QDR_ROUTER_NODE_COUNT                          9
+#define QDR_ROUTER_LINK_ROUTE_COUNT                    10
+#define QDR_ROUTER_AUTO_LINK_COUNT                     11
+#define QDR_ROUTER_CONNECTION_COUNT                    12
+#define QDR_ROUTER_PRESETTLED_DELIVERIES               13
+#define QDR_ROUTER_DROPPED_PRESETTLED_DELIVERIES       14
+#define QDR_ROUTER_ACCEPTED_DELIVERIES                 15
+#define QDR_ROUTER_REJECTED_DELIVERIES                 16
+#define QDR_ROUTER_RELEASED_DELIVERIES                 17
+#define QDR_ROUTER_MODIFIED_DELIVERIES                 18
+#define QDR_ROUTER_DELIVERIES_INGRESS                  19
+#define QDR_ROUTER_DELIVERIES_EGRESS                   20
+#define QDR_ROUTER_DELIVERIES_TRANSIT                  21
+#define QDR_ROUTER_DELIVERIES_INGRESS_ROUTE_CONTAINER  22
+#define QDR_ROUTER_DELIVERIES_EGRESS_ROUTE_CONTAINER   23
+
 
 const char *qdr_router_columns[] =
     {"name",
@@ -53,21 +58,23 @@ const char *qdr_router_columns[] =
      "mode",
      "area",
      "version",
-     "helloInterval",
-     "helloMaxAge",
-     "raInterval",
-     "raIntervalFlux",
-     "remoteLsMaxAge",
      "addrCount",
      "linkCount",
      "nodeCount",
      "linkRouteCount",
-     "autoLinkCount", // The connection id of the owner connection
-     "workerThreads",
-     "debugDump",
-     "saslConfigPath",
-     "saslConfigName",
+     "autoLinkCount",
      "connectionCount",
+     "presettledDeliveries",
+     "droppedPresettledDeliveries",
+     "acceptedDeliveries",
+     "rejectedDeliveries",
+     "releasedDeliveries",
+     "modifiedDeliveries",
+     "deliveriesIngress",
+     "deliveriesEgress",
+     "deliveriesTransit",
+     "deliveriesIngressRouteContainer",
+     "deliveriesEgressRouteContainer",
      0};
 
 
@@ -111,10 +118,6 @@ static void qdr_agent_write_column_CT(qd_composed_field_t *body, int col, qdr_co
         qd_compose_insert_string(body, QPID_DISPATCH_VERSION);
         break;
 
-    case QDR_ROUTER_HELLO_INTERVAL:
-        qd_compose_insert_null(body);
-        break;
-
     case QDR_ROUTER_ADDR_COUNT:
         qd_compose_insert_ulong(body, DEQ_SIZE(core->addrs));
         break;
@@ -145,6 +148,50 @@ static void qdr_agent_write_column_CT(qd_composed_field_t *body, int col, qdr_co
             qd_compose_insert_string(body, core->router_id);
         else
             qd_compose_insert_null(body);
+        break;
+
+    case QDR_ROUTER_PRESETTLED_DELIVERIES:
+        qd_compose_insert_ulong(body, core->presettled_deliveries);
+        break;
+
+    case QDR_ROUTER_DROPPED_PRESETTLED_DELIVERIES:
+        qd_compose_insert_ulong(body, core->dropped_presettled_deliveries);
+        break;
+
+    case QDR_ROUTER_ACCEPTED_DELIVERIES:
+        qd_compose_insert_ulong(body, core->accepted_deliveries);
+        break;
+
+    case QDR_ROUTER_REJECTED_DELIVERIES:
+        qd_compose_insert_ulong(body, core->rejected_deliveries);
+        break;
+
+    case QDR_ROUTER_RELEASED_DELIVERIES:
+        qd_compose_insert_ulong(body, core->released_deliveries);
+        break;
+
+    case QDR_ROUTER_MODIFIED_DELIVERIES:
+        qd_compose_insert_ulong(body, core->modified_deliveries);
+        break;
+
+    case QDR_ROUTER_DELIVERIES_INGRESS:
+        qd_compose_insert_ulong(body, core->deliveries_ingress);
+        break;
+
+    case QDR_ROUTER_DELIVERIES_EGRESS:
+        qd_compose_insert_ulong(body, core->deliveries_egress);
+        break;
+
+    case QDR_ROUTER_DELIVERIES_TRANSIT:
+        qd_compose_insert_ulong(body, core->deliveries_transit);
+        break;
+
+    case QDR_ROUTER_DELIVERIES_INGRESS_ROUTE_CONTAINER:
+        qd_compose_insert_ulong(body, core->deliveries_ingress_route_container);
+        break;
+
+    case QDR_ROUTER_DELIVERIES_EGRESS_ROUTE_CONTAINER:
+        qd_compose_insert_ulong(body, core->deliveries_egress_route_container);
         break;
 
     default:

@@ -17,9 +17,14 @@
 # under the License
 #
 
-import json, unittest, os
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
 
-from system_test import TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR, wait_port
+import json, unittest2 as unittest, os
+
+from system_test import TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR
 from subprocess import PIPE, STDOUT
 from qpid_dispatch_internal.compat import dictify
 from qpid_dispatch_internal.management.qdrouter import QdSchema
@@ -40,15 +45,15 @@ class QdmanageTest(TestCase):
         config_1 = Qdrouterd.Config([
             ('router', {'mode': 'interior', 'id': 'R1'}),
             ('sslProfile', {'name': 'server-ssl',
-                             'certDb': cls.ssl_file('ca-certificate.pem'),
+                             'caCertFile': cls.ssl_file('ca-certificate.pem'),
                              'certFile': cls.ssl_file('server-certificate.pem'),
-                             'keyFile': cls.ssl_file('server-private-key.pem'),
+                             'privateKeyFile': cls.ssl_file('server-private-key.pem'),
                              'password': 'server-password'}),
             ('listener', {'port': cls.tester.get_port()}),
             ('connector', {'role': 'inter-router', 'port': cls.inter_router_port}),
             ('address', {'name': 'test-address', 'prefix': 'abcd', 'distribution': 'multicast'}),
-            ('linkRoute', {'name': 'test-link-route', 'prefix': 'xyz', 'dir': 'in'}),
-            ('autoLink', {'name': 'test-auto-link', 'addr': 'mnop', 'dir': 'out'}),
+            ('linkRoute', {'name': 'test-link-route', 'prefix': 'xyz', 'direction': 'in'}),
+            ('autoLink', {'name': 'test-auto-link', 'addr': 'mnop', 'direction': 'out'}),
             ('listener', {'port': cls.tester.get_port(), 'sslProfile': 'server-ssl'}),
             ('address', {'name': 'pattern-address', 'pattern': 'a/*/b/#/c', 'distribution': 'closest'})
         ])
@@ -67,12 +72,13 @@ class QdmanageTest(TestCase):
     def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
         p = self.popen(
             ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address(), '--indent=-1', '--timeout', str(TIMEOUT)],
-            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect)
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
+            universal_newlines=True)
         out = p.communicate(input)[0]
         try:
             p.teardown()
-        except Exception, e:
-            raise Exception("%s\n%s" % (e, out))
+        except Exception as e:
+            raise Exception(out if out else str(e))
         return out
 
     def assert_entity_equal(self, expect, actual, copy=None):
@@ -122,14 +128,14 @@ class QdmanageTest(TestCase):
         expect = {'type': DUMMY, 'name': 'mydummyx', 'arg1': 'foo'}
         check('create', expect, json.dumps(expect), copy=['identity'])
 
-        expect_list = [{'type': DUMMY, 'name': 'mydummyx%s' % i} for i in xrange(3)]
+        expect_list = [{'type': DUMMY, 'name': 'mydummyx%s' % i} for i in range(3)]
         check_list('create', expect_list, json.dumps(expect_list), copy=['identity'])
 
         expect['arg1'] = 'bar'
         expect['num1'] = 42
         check('update', expect, json.dumps(expect))
 
-        for i in xrange(3):
+        for i in range(3):
             expect_list[i]['arg1'] = 'bar'
             expect_list[i]['num1'] = i
         check_list('update', expect_list, json.dumps(expect_list))
@@ -177,7 +183,45 @@ class QdmanageTest(TestCase):
 
     def test_get_types(self):
         out = json.loads(self.run_qdmanage("get-types"))
-        self.assertEqual(len(out), 25)
+        self.assertEqual(len(out), 28)
+
+    def test_get_attributes(self):
+        out = json.loads(self.run_qdmanage("get-attributes"))
+        self.assertEqual(len(out), 28)
+
+    def test_get_attributes(self):
+        out = json.loads(self.run_qdmanage("get-attributes"))
+        self.assertEqual(len(out), 28)
+
+    def test_get_operations(self):
+        out = json.loads(self.run_qdmanage("get-operations"))
+        self.assertEqual(len(out), 28)
+        self.assertEqual(out['org.apache.qpid.dispatch.sslProfile'], [u'CREATE', u'DELETE', u'READ'])
+
+    def test_get_types_with_ssl_profile_type(self):
+        out = json.loads(self.run_qdmanage("get-types --type=org.apache.qpid.dispatch.sslProfile"))
+        self.assertEqual(out['org.apache.qpid.dispatch.sslProfile'], [u'org.apache.qpid.dispatch.configurationEntity', u'org.apache.qpid.dispatch.entity'])
+
+    def test_get_ssl_profile_type_attributes(self):
+        out = json.loads(self.run_qdmanage('get-attributes --type=org.apache.qpid.dispatch.sslProfile'))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(out['org.apache.qpid.dispatch.sslProfile']), 12)
+
+    def test_get_ssl_profile_attributes(self):
+        out = json.loads(self.run_qdmanage('get-attributes org.apache.qpid.dispatch.sslProfile'))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(out['org.apache.qpid.dispatch.sslProfile']), 12)
+
+    def test_get_ssl_profile_type_operations(self):
+        out = json.loads(self.run_qdmanage('get-operations --type=org.apache.qpid.dispatch.sslProfile'))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(out['org.apache.qpid.dispatch.sslProfile']), 3)
+
+    def test_get_ssl_profile_operations(self):
+        out = json.loads(self.run_qdmanage('get-operations org.apache.qpid.dispatch.sslProfile'))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(out['org.apache.qpid.dispatch.sslProfile']), 3)
+
 
     def test_get_log(self):
         log = json.loads(self.run_qdmanage("get-log limit=1"))[0]
@@ -219,16 +263,16 @@ class QdmanageTest(TestCase):
         exception = False
         try:
             # Try to not set 'output'
-            json.loads(self.run_qdmanage("UPDATE --type org.apache.qpid.dispatch.log --name log/DEFAULT output="))
+            json.loads(self.run_qdmanage("UPDATE --type org.apache.qpid.dispatch.log --name log/DEFAULT outputFile="))
         except Exception as e:
             exception = True
-            self.assertTrue("InternalServerErrorStatus: CError: Configuration: Failed to open log file ''" in e.message)
+            self.assertTrue("InternalServerErrorStatus: CError: Configuration: Failed to open log file ''" in str(e))
         self.assertTrue(exception)
 
         # Set a valid 'output'
         output = json.loads(self.run_qdmanage("UPDATE --type org.apache.qpid.dispatch.log --name log/DEFAULT "
-                                              "enable=trace+ output=A.log"))
-        self.assertEqual("A.log", output['output'])
+                                              "enable=trace+ outputFile=A.log"))
+        self.assertEqual("A.log", output['outputFile'])
         self.assertEqual("trace+", output['enable'])
 
     def create(self, type, name, port):
@@ -250,17 +294,25 @@ class QdmanageTest(TestCase):
         self.assertEqual(output[1]['pattern'], "a/*/b/#/c")
         self.assertTrue('prefix' not in output[1])
 
+    def test_create_address(self):
+        long_type = 'org.apache.qpid.dispatch.router.config.address'
+        create_command = 'CREATE --type=' + long_type + ' pattern="a.b.#" ingressPhase=5 egressPhase=6'
+        output = json.loads(self.run_qdmanage(create_command))
+        self.assertEqual(output['egressPhase'], 6)
+        self.assertEqual(output['ingressPhase'], 5)
+
     def test_check_link_route_name(self):
         long_type = 'org.apache.qpid.dispatch.router.config.linkRoute'
         query_command = 'QUERY --type=' + long_type
         output = json.loads(self.run_qdmanage(query_command))
         self.assertEqual(output[0]['name'], "test-link-route")
+        self.assertEqual(output[0]['direction'], "in")
         self.assertEqual(output[0]['dir'], "in")
         self.assertEqual(output[0]['prefix'], "xyz")
 
     def test_specify_container_id_connection_link_route(self):
         long_type = 'org.apache.qpid.dispatch.router.config.linkRoute'
-        create_command = 'CREATE --type=' + long_type + ' prefix=abc containerId=id1 connection=conn1 dir=out'
+        create_command = 'CREATE --type=' + long_type + ' prefix=abc containerId=id1 connection=conn1 direction=out'
         output = self.run_qdmanage(create_command, expect=Process.EXIT_FAIL)
         self.assertIn("Both connection and containerId cannot be specified", output)
 
@@ -269,12 +321,33 @@ class QdmanageTest(TestCase):
         query_command = 'QUERY --type=' + long_type
         output = json.loads(self.run_qdmanage(query_command))
         self.assertEqual(output[0]['name'], "test-auto-link")
-        self.assertEqual(output[0]['dir'], "out")
+        self.assertEqual(output[0]['direction'], "out")
         self.assertEqual(output[0]['addr'], "mnop")
+
+    def test_create_auto_link_with_phase(self):
+        long_type = 'org.apache.qpid.dispatch.router.config.autoLink'
+        create_command = 'CREATE --type=' + long_type + ' addr=xyz containerId=id1 direction=out phase=2'
+        output = json.loads(self.run_qdmanage(create_command))
+        self.assertEqual(output['phase'], 2)
+
+    def test_create_auto_link_with_dir(self):
+        long_type = 'org.apache.qpid.dispatch.router.config.autoLink'
+        create_command = 'CREATE --type=' + long_type + ' addr=defgh containerId=id2 dir=out phase=2'
+        output = json.loads(self.run_qdmanage(create_command))
+        self.assertEqual(output['dir'], 'out')
+        self.assertEqual(output['direction'], 'out')
+
+    def test_create_link_route_with_dir(self):
+        long_type = 'org.apache.qpid.dispatch.router.config.linkRoute'
+        create_command = 'CREATE --type=' + long_type + ' pattern=mnb dir=out'
+        output = json.loads(self.run_qdmanage(create_command))
+        self.assertEqual(output['dir'], 'out')
+        self.assertEqual(output['direction'], 'out')
+
 
     def test_specify_container_id_connection_auto_link(self):
         long_type = 'org.apache.qpid.dispatch.router.config.autoLink'
-        create_command = 'CREATE --type=' + long_type + ' addr=abc containerId=id1 connection=conn1 dir=out'
+        create_command = 'CREATE --type=' + long_type + ' addr=abc containerId=id1 connection=conn1 direction=out'
         output = self.run_qdmanage(create_command, expect=Process.EXIT_FAIL)
         self.assertIn("Both connection and containerId cannot be specified", output)
 
@@ -340,15 +413,15 @@ class QdmanageTest(TestCase):
             self.run_qdmanage(delete_command)
         except Exception as e:
             exception_occurred = True
-            self.assertTrue("NotFoundStatus: No entity with name='" + name + "'" in e.message)
+            self.assertTrue(("NotFoundStatus: No entity with name=%s" % name) in str(e))
 
         self.assertTrue(exception_occurred)
 
     def test_create_delete_ssl_profile(self):
         ssl_profile_name = 'ssl-profile-test'
         ssl_create_command = 'CREATE --type=sslProfile certFile=' + self.ssl_file('server-certificate.pem') + \
-                         ' keyFile=' + self.ssl_file('server-private-key.pem') + ' password=server-password' + \
-                         ' name=' + ssl_profile_name + ' certDb=' + self.ssl_file('ca-certificate.pem')
+                         ' privateKeyFile=' + self.ssl_file('server-private-key.pem') + ' password=server-password' + \
+                         ' name=' + ssl_profile_name + ' caCertFile=' + self.ssl_file('ca-certificate.pem')
         output = json.loads(self.run_qdmanage(ssl_create_command))
         self.assertEqual(output['name'], ssl_profile_name)
         self.run_qdmanage('DELETE --type=sslProfile --name=' +

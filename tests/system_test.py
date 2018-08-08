@@ -28,24 +28,37 @@ Features:
 - Sundry other tools.
 """
 
-import errno, os, time, socket, random, subprocess, shutil, unittest, __main__, re
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+import errno, os, time, socket, random, subprocess, shutil, unittest, __main__, re, sys
 from copy import copy
+try:
+    import queue as Queue   # 3.x
+except ImportError:
+    import Queue as Queue   # 2.7
+from threading import Thread
+
 import proton
-from proton import Message
+from proton import Message, Timeout
+from proton.utils import BlockingConnection
 from qpid_dispatch.management.client import Node
+from qpid_dispatch_internal.compat import dict_iteritems
 
 # Optional modules
 MISSING_MODULES = []
 
 try:
     import qpidtoollibs
-except ImportError, err:
+except ImportError as err:
     qpidtoollibs = None         # pylint: disable=invalid-name
     MISSING_MODULES.append(str(err))
 
 try:
     import qpid_messaging as qm
-except ImportError, err:
+except ImportError as err:
     qm = None                   # pylint: disable=invalid-name
     MISSING_MODULES.append(str(err))
 
@@ -119,7 +132,7 @@ def retry_exception(function, timeout=TIMEOUT, delay=.001, max_delay=1, exceptio
     while True:
         try:
             return function()
-        except Exception, e:    # pylint: disable=broad-except
+        except Exception as e:    # pylint: disable=broad-except
             if exception_test:
                 exception_test(e)
             delay = retry_delay(deadline, delay, max_delay)
@@ -143,7 +156,7 @@ def port_available(port, protocol_family='IPv4'):
     try:
         s.connect((host, port))
         s.close()
-    except socket.error, e:
+    except socket.error as e:
         return e.errno == errno.ECONNREFUSED
     except:
         pass
@@ -160,7 +173,7 @@ def wait_port(port, protocol_family='IPv4', **retry_kwargs):
     try:
         retry_exception(lambda: s.connect((host, port)), exception_test=check,
                         **retry_kwargs)
-    except Exception, e:
+    except Exception as e:
         raise Exception("wait_port timeout on host %s port %s: %s"%(host, port, e))
 
     finally: s.close()
@@ -168,13 +181,13 @@ def wait_port(port, protocol_family='IPv4', **retry_kwargs):
 def wait_ports(ports, **retry_kwargs):
     """Wait up to timeout for all ports (on host) to be connectable.
     Takes same keyword arguments as retry to control the timeout"""
-    for port, protocol_family in ports.iteritems():
+    for port, protocol_family in dict_iteritems(ports):
         wait_port(port=port, protocol_family=protocol_family, **retry_kwargs)
 
 def message(**properties):
     """Convenience to create a proton.Message with properties set"""
     m = Message()
-    for name, value in properties.iteritems():
+    for name, value in dict_iteritems(properties):
         getattr(m, name)        # Raise exception if not a valid message attribute.
         setattr(m, name, value)
     return m
@@ -220,7 +233,7 @@ class Process(subprocess.Popen):
                 super(Process, self).__init__(args, **kwargs)
                 with open(self.outfile + '.cmd', 'w') as f:
                     f.write("%s\npid=%s\n" % (' '.join(args), self.pid))
-            except Exception, e:
+            except Exception as e:
                 raise Exception("subprocess.Popen(%s, %s) failed: %s: %s" %
                                 (args, kwargs, type(e).__name__, e))
 
@@ -276,7 +289,7 @@ class Qdrouterd(Process):
             'listener': {'host':'0.0.0.0', 'saslMechanisms':'ANONYMOUS', 'idleTimeoutSeconds': '120',
                          'authenticatePeer': 'no', 'role': 'normal'},
             'connector': {'host':'127.0.0.1', 'saslMechanisms':'ANONYMOUS', 'idleTimeoutSeconds': '120'},
-            'router': {'mode': 'standalone', 'id': 'QDR', 'debugDump': 'qddebug.txt'}
+            'router': {'mode': 'standalone', 'id': 'QDR', 'debugDumpFile': 'qddebug.txt'}
         }
 
         def sections(self, name):
@@ -290,29 +303,42 @@ class Qdrouterd(Process):
             """Fill in default values in gconfiguration"""
             for name, props in self:
                 if name in Qdrouterd.Config.DEFAULTS:
-                    for n,p in Qdrouterd.Config.DEFAULTS[name].iteritems():
+                    for n,p in dict_iteritems(Qdrouterd.Config.DEFAULTS[name]):
                         props.setdefault(n,p)
 
         def __str__(self):
             """Generate config file content. Calls default() first."""
-            def props(p):
-                return "".join(["    %s: %s\n"%(k, v) for k, v in p.iteritems()])
-            self.defaults()
-            return "".join(["%s {\n%s}\n"%(n, props(p)) for n, p in self])
+            def tabs(level):
+                return "    " * level
 
-    def __init__(self, name=None, config=Config(), pyinclude=None, wait=True):
+            def sub_elem(l, level):
+                return "".join(["%s%s: {\n%s%s}\n" % (tabs(level), n, props(p, level + 1), tabs(level)) for n, p in l])
+
+            def child(v, level):
+                return "{\n%s%s}" % (sub_elem(v, level), tabs(level - 1))
+
+            def props(p, level):
+                return "".join(
+                    ["%s%s: %s\n" % (tabs(level), k, v if not isinstance(v, list) else child(v, level + 1)) for k, v in
+                     dict_iteritems(p)])
+
+            self.defaults()
+            return "".join(["%s {\n%s}\n"%(n, props(p, 1)) for n, p in self])
+
+    def __init__(self, name=None, config=Config(), pyinclude=None, wait=True, perform_teardown=True):
         """
         @param name: name used for for output files, default to id from config.
         @param config: router configuration
         @keyword wait: wait for router to be ready (call self.wait_ready())
         """
         self.config = copy(config)
+        self.perform_teardown = perform_teardown
         if not name: name = self.config.router_id
         assert name
         default_log = [l for l in config if (l[0] == 'log' and l[1]['module'] == 'DEFAULT')]
         if not default_log:
             config.append(
-                ('log', {'module':'DEFAULT', 'enable':'trace+', 'source': 'true', 'output':name+'.log'}))
+                ('log', {'module':'DEFAULT', 'enable':'trace+', 'includeSource': 'true', 'outputFile':name+'.log'}))
         args = ['qdrouterd', '-c', config.write(name)]
         env_home = os.environ.get('QPID_DISPATCH_HOME')
         if pyinclude:
@@ -336,6 +362,10 @@ class Qdrouterd(Process):
         if self._management:
             try: self._management.close()
             except: pass
+
+        if not self.perform_teardown:
+            return
+
         super(Qdrouterd, self).teardown()
 
     @property
@@ -470,33 +500,6 @@ class Qdrouterd(Process):
     def wait_router_connected(self, router_id, **retry_kwargs):
         retry(lambda: self.is_router_connected(router_id), **retry_kwargs)
 
-class Messenger(proton.Messenger):
-    """Convenience additions to proton.Messenger"""
-
-    def __init__(self, name=None, timeout=TIMEOUT, blocking=True):
-        super(Messenger, self).__init__(name)
-        self.timeout = timeout
-        self.blocking = blocking
-
-    def flush(self):
-        """Call work() till there is no work left."""
-        while self.work(0.1):
-            pass
-
-    def fetch(self, accept=True):
-        """Fetch a single message"""
-        msg = Message()
-        self.recv(1)
-        self.get(msg)
-        if accept:
-            self.accept()
-        return msg
-
-    def subscribe(self, source, **retry_args):
-        """Do a proton.Messenger.subscribe and wait till the address is available."""
-        subscription = super(Messenger, self).subscribe(source)
-        assert retry(lambda: subscription.address, **retry_args) # Wait for address
-        return subscription
 
 class Tester(object):
     """Tools for use by TestCase
@@ -538,8 +541,8 @@ class Tester(object):
                     if cleanup:
                         cleanup()
                         break
-            except Exception, e:
-                errors.append(e)
+            except Exception as exc:
+                errors.append(exc)
         if errors:
             raise RuntimeError("Errors during teardown: \n\n%s" % "\n\n".join([str(e) for e in errors]))
 
@@ -557,14 +560,6 @@ class Tester(object):
     def qdrouterd(self, *args, **kwargs):
         """Return a Qdrouterd that will be cleaned up on teardown"""
         return self.cleanup(Qdrouterd(*args, **kwargs))
-
-    def messenger(self, name=None, cleanup=True, **kwargs):
-        """Return a started Messenger that will be cleaned up on teardown."""
-        m = Messenger(name or os.path.basename(self.directory), **kwargs)
-        m.start()
-        if cleanup:
-            self.cleanup(m)
-        return m
 
     port_range = (20000, 30000)
     next_port = random.randint(port_range[0], port_range[1])
@@ -636,7 +631,7 @@ class TestCase(unittest.TestCase, Tester): # pylint: disable=too-many-public-met
         if hasattr(unittest.TestCase, 'skipTest'):
             unittest.TestCase.skipTest(self, reason)
         else:
-            print "Skipping test", self.id(), reason
+            print("Skipping test %s: %s" % (self.id(), reason))
 
     # Hack to support tearDownClass on older versions of python.
     # The default TestLoader sorts tests alphabetically so we insert
@@ -661,6 +656,47 @@ class TestCase(unittest.TestCase, Tester): # pylint: disable=too-many-public-met
             """For python < 2.7: assert re.search(regexp, text)"""
             assert re.search(regexp, text), msg or "Can't find %r in '%s'" %(regexp, text)
 
+
+class SkipIfNeeded(object):
+    """
+    Decorator class that can be used along with test methods
+    to provide skip test behavior when using both python2.6 or
+    a greater version.
+    This decorator can be used with sub-classes of TestCase and the
+    sub-class must contain a dictionary named "skip" (test_name as key
+    and 0[run] or 1[skip] as the value).
+    """
+    def __init__(self, test_name, reason):
+        self.test_name = test_name
+        self.reason = reason
+
+    def __call__(self, f):
+
+        def wrap(*args, **kwargs):
+            """
+            Wraps original test method's invocation looking for an instance
+            attribute named "skip" (should be a dictionary composed by
+            "test_name" as a key and value of 0 [run] or 1 [skip]).
+            When running test with python < 2.7, if the "skip" dictionary
+            contains the given test_name with a value of 1, the original
+            method won't be called. If running python >= 2.7, then
+            skipTest will be called with given "reason" and original method
+            will be invoked.
+            :param args:
+            :return:
+            """
+            instance = args[0]
+            if isinstance(instance, TestCase) and hasattr(instance, "skip") and instance.skip[self.test_name]:
+                if sys.version_info < (2, 7):
+                    print("%s -> skipping (python<2.7) ..." % self.test_name)
+                    return
+                else:
+                    instance.skipTest(self.reason)
+            return f(*args, **kwargs)
+
+        return wrap
+
+
 def main_module():
     """
     Return the module name of the __main__ module - i.e. the filename with the
@@ -670,3 +706,67 @@ def main_module():
             unittest.main(module=main_module())
     """
     return os.path.splitext(os.path.basename(__main__.__file__))[0]
+
+
+class AsyncTestReceiver(object):
+    """
+    A simple receiver that runs in the background and queues any received
+    messages.  Messages can be retrieved from this thread via the queue member
+    """
+    Empty = Queue.Empty
+
+    def __init__(self, address, source, credit=100, timeout=0.1,
+                 conn_args=None, link_args=None):
+        """
+        Runs a BlockingReceiver in a separate thread.
+
+        :param address: address of router (URL)
+        :param source: the node address to consume from
+        :param credit: max credit for receiver
+        :param timeout: receive poll frequency in seconds
+        :param conn_args: map of BlockingConnection arguments
+        :param link_args: map of BlockingReceiver arguments
+        """
+        super(AsyncTestReceiver, self).__init__()
+        self.queue = Queue.Queue()
+        kwargs = {'url': address}
+        if conn_args:
+            kwargs.update(conn_args)
+        self._conn = BlockingConnection(**kwargs)
+        kwargs = {'address': source,
+                  'credit': credit}
+        if link_args:
+            kwargs.update(link_args)
+        self._rcvr = self._conn.create_receiver(**kwargs)
+        self._thread = Thread(target=self._poll)
+        self._run = True
+        self._timeout = timeout
+        self._thread.start()
+
+    def _poll(self):
+        """
+        Thread main loop
+        """
+
+        while self._run:
+            try:
+                msg = self._rcvr.receive(timeout=self._timeout)
+            except Timeout:
+                continue
+            try:
+                self._rcvr.accept()
+            except IndexError:
+                # PROTON-1743
+                pass
+            self.queue.put(msg)
+        self._rcvr.close()
+        self._conn.close()
+
+    def stop(self, timeout=10):
+        """
+        Called to terminate the AsyncTestReceiver
+        """
+        self._run = False
+        self._thread.join(timeout=timeout)
+
+

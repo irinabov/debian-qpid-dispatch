@@ -17,21 +17,26 @@
 # under the License.
 #
 
-import unittest
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+import unittest2 as unittest
 from time import sleep, time
 from subprocess import PIPE, STDOUT
 
 from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, Process
 
-from proton import Message, Endpoint
+from proton import Message
 from proton.handlers import MessagingHandler
 from proton.reactor import AtMostOnce, Container, DynamicNodeProperties, LinkOption
-from proton.utils import BlockingConnection, LinkDetached
-
+from proton.utils import BlockingConnection
 from system_tests_drain_support import DrainMessagesHandler, DrainOneMessageHandler, DrainNoMessagesHandler, DrainNoMoreMessagesHandler
 
 from qpid_dispatch.management.client import Node
 from qpid_dispatch.management.error import NotFoundStatus
+
 
 class LinkRouteTest(TestCase):
     """
@@ -105,18 +110,19 @@ class LinkRouteTest(TestCase):
                    # This is an on-demand connection made from QDR.B's ephemeral port to d_listener_port
                    ('connector', {'name': 'routerD', 'role': 'route-container', 'host': '0.0.0.0', 'port': d_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
 
-                   #('linkRoute', {'prefix': 'org.apache', 'connection': 'broker', 'dir': 'in'}),
-                   ('linkRoute', {'prefix': 'org.apache', 'containerId': 'QDR.A', 'dir': 'in'}),
-                   ('linkRoute', {'prefix': 'org.apache', 'containerId': 'QDR.A', 'dir': 'out'}),
+                   #('linkRoute', {'prefix': 'org.apache', 'connection': 'broker', 'direction': 'in'}),
+                   ('linkRoute', {'prefix': 'org.apache', 'containerId': 'QDR.A', 'direction': 'in'}),
+                   ('linkRoute', {'prefix': 'org.apache', 'containerId': 'QDR.A', 'direction': 'out'}),
 
-                   ('linkRoute', {'prefix': 'pulp.task', 'connection': 'test-tag', 'dir': 'in'}),
-                   ('linkRoute', {'prefix': 'pulp.task', 'connection': 'test-tag', 'dir': 'out'}),
+                   ('linkRoute', {'prefix': 'pulp.task', 'connection': 'test-tag', 'direction': 'in'}),
+                   ('linkRoute', {'prefix': 'pulp.task', 'connection': 'test-tag', 'direction': 'out'}),
 
                    # addresses matching pattern 'a.*.toA.#' route to QDR.A
-                   ('linkRoute', {'pattern': 'a.*.toA.#', 'containerId': 'QDR.A', 'dir': 'in'}),
-                   ('linkRoute', {'pattern': 'a.*.toA.#', 'containerId': 'QDR.A', 'dir': 'out'}),
+                   ('linkRoute', {'pattern': 'a.*.toA.#', 'containerId': 'QDR.A', 'direction': 'in'}),
+                   ('linkRoute', {'pattern': 'a.*.toA.#', 'containerId': 'QDR.A', 'direction': 'out'}),
 
                    # addresses matching pattern 'a.*.toD.#' route to QDR.D
+                   # Dont change dir to direction here so we can make sure that the dir attribute is still working.
                    ('linkRoute', {'pattern': 'a.*.toD.#', 'containerId': 'QDR.D', 'dir': 'in'}),
                    ('linkRoute', {'pattern': 'a.*.toD.#', 'containerId': 'QDR.D', 'dir': 'out'})
 
@@ -131,17 +137,17 @@ class LinkRouteTest(TestCase):
                    ('listener', {'host': '0.0.0.0', 'role': 'inter-router', 'port': c_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
                    # The dot(.) at the end is ignored by the address hashing scheme.
 
-                   ('linkRoute', {'prefix': 'org.apache.', 'dir': 'in'}),
-                   ('linkRoute', {'prefix': 'org.apache.', 'dir': 'out'}),
+                   ('linkRoute', {'prefix': 'org.apache.', 'direction': 'in'}),
+                   ('linkRoute', {'prefix': 'org.apache.', 'direction': 'out'}),
 
-                   ('linkRoute', {'prefix': 'pulp.task', 'dir': 'in'}),
-                   ('linkRoute', {'prefix': 'pulp.task', 'dir': 'out'}),
+                   ('linkRoute', {'prefix': 'pulp.task', 'direction': 'in'}),
+                   ('linkRoute', {'prefix': 'pulp.task', 'direction': 'out'}),
 
-                   ('linkRoute', {'pattern': 'a.*.toA.#', 'dir': 'in'}),
-                   ('linkRoute', {'pattern': 'a.*.toA.#', 'dir': 'out'}),
+                   ('linkRoute', {'pattern': 'a.*.toA.#', 'direction': 'in'}),
+                   ('linkRoute', {'pattern': 'a.*.toA.#', 'direction': 'out'}),
 
-                   ('linkRoute', {'pattern': 'a.*.toD.#', 'dir': 'in'}),
-                   ('linkRoute', {'pattern': 'a.*.toD.#', 'dir': 'out'})
+                   ('linkRoute', {'pattern': 'a.*.toD.#', 'direction': 'in'}),
+                   ('linkRoute', {'pattern': 'a.*.toD.#', 'direction': 'out'})
 
                 ]
                )
@@ -166,7 +172,8 @@ class LinkRouteTest(TestCase):
             cmd = cmd + args
         p = self.popen(
             cmd,
-            name='qdstat-'+self.id(), stdout=PIPE, expect=None)
+            name='qdstat-'+self.id(), stdout=PIPE, expect=None,
+            universal_newlines=True)
 
         out = p.communicate()[0]
         assert p.returncode == 0, "qdstat exit status %s, output:\n%s" % (p.returncode, out)
@@ -175,11 +182,12 @@ class LinkRouteTest(TestCase):
     def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
         p = self.popen(
             ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address(), '--indent=-1', '--timeout', str(TIMEOUT)],
-            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect)
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
+            universal_newlines=True)
         out = p.communicate(input)[0]
         try:
             p.teardown()
-        except Exception, e:
+        except Exception as e:
             raise Exception("%s\n%s" % (e, out))
         return out
 
@@ -192,8 +200,8 @@ class LinkRouteTest(TestCase):
         out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
 
         # Make sure there is a dir of in and out.
-        self.assertTrue('"dir": "in"' in out)
-        self.assertTrue('"dir": "out"' in out)
+        self.assertTrue('"direction": "in"' in out)
+        self.assertTrue('"direction": "out"' in out)
         self.assertTrue('"containerId": "QDR.A"' in out)
 
         # Use the long type and make sure that qdmanage does not mess up the long type
@@ -201,8 +209,8 @@ class LinkRouteTest(TestCase):
         out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
 
         # Make sure there is a dir of in and out.
-        self.assertTrue('"dir": "in"' in out)
-        self.assertTrue('"dir": "out"' in out)
+        self.assertTrue('"direction": "in"' in out)
+        self.assertTrue('"direction": "out"' in out)
         self.assertTrue('"containerId": "QDR.A"' in out)
 
         identity = out[out.find("identity") + 12: out.find("identity") + 13]
@@ -215,9 +223,9 @@ class LinkRouteTest(TestCase):
             # This identity should not be found
             cmd = 'READ --type=linkRoute --identity=9999'
             out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
-        except Exception, e:
+        except Exception as e:
             exception_occurred = True
-            self.assertTrue("NotFoundStatus: Not Found" in e.message)
+            self.assertTrue("NotFoundStatus: Not Found" in str(e))
 
         self.assertTrue(exception_occurred)
 
@@ -226,13 +234,13 @@ class LinkRouteTest(TestCase):
             # There is no identity specified, this is a bad request
             cmd = 'READ --type=linkRoute'
             out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
-        except Exception, e:
+        except Exception as e:
             exception_occurred = True
-            self.assertTrue("BadRequestStatus: No name or identity provided" in e.message)
+            self.assertTrue("BadRequestStatus: No name or identity provided" in str(e))
 
         self.assertTrue(exception_occurred)
 
-        cmd = 'CREATE --type=autoLink addr=127.0.0.1 dir=in connection=routerC'
+        cmd = 'CREATE --type=autoLink addr=127.0.0.1 direction=in connection=routerC'
         out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
 
         identity = out[out.find("identity") + 12: out.find("identity") + 14]
@@ -578,11 +586,15 @@ class LinkRouteTest(TestCase):
         We are deleting the link route using qdmanage short name. This should be the last test to run
         """
 
-        # First delete linkRoutes on QDR.B
         local_node = Node.connect(self.routers[1].addresses[0], timeout=TIMEOUT)
-        result_list = local_node.query(type='org.apache.qpid.dispatch.router.config.linkRoute').results
-        self.assertEqual(8, len(result_list))
+        res = local_node.query(type='org.apache.qpid.dispatch.router')
+        results = res.results[0]
+        attribute_list = res.attribute_names
 
+        result_list = local_node.query(type='org.apache.qpid.dispatch.router.config.linkRoute').results
+        self.assertEqual(results[attribute_list.index('linkRouteCount')], len(result_list))
+
+        # First delete linkRoutes on QDR.B
         for rid in range(8):
             cmd = 'DELETE --type=linkRoute --identity=' + result_list[rid][1]
             self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
@@ -612,6 +624,11 @@ class LinkRouteTest(TestCase):
         cmd = 'QUERY --type=linkRoute'
         out = self.run_qdmanage(cmd=cmd, address=addr)
         self.assertEquals(out.rstrip(), '[]')
+
+        res = local_node.query(type='org.apache.qpid.dispatch.router')
+        results = res.results[0]
+        attribute_list = res.attribute_names
+        self.assertEqual(results[attribute_list.index('linkRouteCount')], 0)
 
         blocking_connection = BlockingConnection(addr, timeout=3)
 
@@ -704,6 +721,37 @@ class LinkRouteTest(TestCase):
         test.run()
         self.assertEqual(None, test.error)
 
+    def _multi_link_send_receive(self, send_host, receive_host, name):
+        senders = ["%s/%s" % (send_host, address) for address in ["org.apache.foo", "org.apache.bar"]]
+        receivers = ["%s/%s" % (receive_host, address) for address in ["org.apache.foo", "org.apache.bar"]]
+        test = MultiLinkSendReceive(senders, receivers, name)
+        test.run()
+        self.assertEqual(None, test.error)
+
+    def test_same_name_route_receivers_through_B(self):
+        self._multi_link_send_receive(self.routers[0].addresses[0], self.routers[1].addresses[0], "recv_through_B")
+
+    def test_same_name_route_senders_through_B(self):
+        self._multi_link_send_receive(self.routers[1].addresses[0], self.routers[0].addresses[0], "send_through_B")
+
+    def test_same_name_route_receivers_through_C(self):
+        self._multi_link_send_receive(self.routers[0].addresses[0], self.routers[2].addresses[0], "recv_through_C")
+
+    def test_same_name_route_senders_through_C(self):
+        self._multi_link_send_receive(self.routers[2].addresses[0], self.routers[0].addresses[0], "send_through_C")
+
+    def test_echo_detach_received(self):
+        """
+        Create two receivers to link routed address org.apache.dev
+        Create a sender to the same address that the receiver is listening on and send 100 messages.
+        After the receivers receive 10 messages each, the receivers will detach and expect to receive ten
+        detaches in response.
+
+        """
+        test = EchoDetachReceived(self.routers[2].addresses[0], self.routers[2].addresses[0])
+        test.run()
+        self.assertEqual(None, test.error)
+
 
 class Timeout(object):
     def __init__(self, parent):
@@ -728,7 +776,10 @@ class DeliveryTagsTest(MessagingHandler):
         self.delivery_tag_verified = False
         # The delivery tag we are going to send in the transfer frame
         # We will later make sure that the same delivery tag shows up on the receiving end in the link routed case.
-        self.delivery_tag = '92319'
+        # KAG: force the literal to type 'str' due to SWIG weirdness: on 2.X a
+        # delivery tag cannot be unicode (must be binary), but on 3.X it must
+        # be unicode!  See https://issues.apache.org/jira/browse/PROTON-1843
+        self.delivery_tag = str('92319')
         self.error = None
 
     def timeout(self):
@@ -1074,6 +1125,103 @@ class DetachMixedCloseTest(MessagingHandler):
     def run(self):
         Container(self).run()
 
+
+# Test to validate fix for DISPATCH-927
+class EchoDetachReceived(MessagingHandler):
+    def __init__(self, sender_address, recv_address):
+        super(EchoDetachReceived, self).__init__()
+        self.sender_address = sender_address
+        self.recv_address = recv_address
+        self.dest = "org.apache.dev"
+        self.num_msgs = 100
+        self.num_receivers = 10
+        self.msgs_sent = 0
+        self.receiver_conn = None
+        self.sender_conn = None
+        self.sender = None
+        self.receiver_dict = {}
+        self.error = None
+        self.receiver_attaches = 0
+        self.timer = None
+        self.sender_attached = False
+        self.received_msgs_dict = {}
+        self.receiver_detach_dict = {}
+        self.num_detaches_echoed = 0
+
+    @property
+    def msgs_received(self):
+        return sum(self.received_msgs_dict.values())
+
+    def timeout(self):
+
+        self.bail("Timeout Expired: msgs_sent=%d msgs_received=%d, number of detaches received=%d"
+                  % (self.msgs_sent, self.msgs_received, self.num_detaches_echoed))
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+
+        # Create two separate connections for sender and receivers
+        self.receiver_conn = event.container.connect(self.recv_address)
+        self.sender_conn = event.container.connect(self.sender_address)
+        for i in range(self.num_receivers):
+            name = "R%d" % i
+            self.receiver_dict[name] = event.container.create_receiver(self.receiver_conn, self.dest, name=name)
+            self.received_msgs_dict[name] = 0
+
+    def bail(self, text=None):
+        self.error = text
+        self.sender_conn.close()
+        self.receiver_conn.close()
+        self.timer.cancel()
+
+    def on_link_opened(self, event):
+        if event.receiver:
+            if event.receiver.name in list(self.receiver_dict):
+                self.receiver_attaches+=1
+            # The response receiver attaches have been received. The receiver sent attaches which was link routed
+            # all the way to the 'broker' router and the response attaches have come back.
+            # It is now time to create the sender.
+            if self.receiver_attaches == self.num_receivers:
+                self.sender = event.container.create_sender(self.sender_conn, self.dest)
+
+        elif event.sender:
+            if not self.sender_attached:
+                if event.sender == self.sender:
+                    # The sender attaches were link routed as well and the response attach has been received.
+                    self.sender_attached = True
+
+    def on_sendable(self, event):
+        # The sender will send 100 messages
+        if self.receiver_attaches == self.num_receivers and self.sender_attached:
+            if self.msgs_sent < self.num_msgs:
+                msg = Message(body="Hello World")
+                self.sender.send(msg)
+                self.msgs_sent += 1
+
+    def on_message(self, event):
+        if event.receiver and event.receiver.name in list(self.receiver_dict):
+            self.received_msgs_dict[event.receiver.name] += 1
+
+        if sum(self.received_msgs_dict.values()) == self.num_msgs:
+            # The receivers have received a total of 100 messages. Close the receivers. The detach sent by these
+            # receivers will travel all the way over the link route and the 'broker' router will respond with a
+            # detach
+            for receiver in list(self.receiver_dict):
+                self.receiver_dict[receiver].close()
+
+    def on_link_closed(self, event):
+        if event.receiver.name in list(self.receiver_dict) and event.receiver.name not in list(self.receiver_detach_dict):
+            self.receiver_detach_dict[event.receiver.name] = event.receiver
+            self.num_detaches_echoed += 1
+
+        # Terminate the test only if both detach frames have been received.
+        if all(receiver in list(self.receiver_detach_dict) for receiver in list(self.receiver_dict)):
+            self.bail()
+
+    def run(self):
+        Container(self).run()
+
+
 class TerminusAddrTest(MessagingHandler):
     """
     This tests makes sure that the link route address is visible in the output of qdstat -l command.
@@ -1185,6 +1333,110 @@ class TerminusAddrTest(MessagingHandler):
     def run(self):
         Container(self).run()
 
+class MultiLinkSendReceive(MessagingHandler):
+    class SendState(object):
+        def __init__(self, link):
+            self.link = link
+            self.sent = False
+            self.accepted = False
+            self.done = False
+            self.closed = False
+
+        def send(self, subject, body):
+            if not self.sent:
+                self.link.send(Message(subject=subject,body=body,address=self.link.target.address))
+                self.sent = True
+
+        def on_accepted(self):
+            self.accepted = True
+            self.done = True
+
+        def close(self):
+            if not self.closed:
+                self.closed = True
+                self.link.close()
+                self.link.connection.close()
+
+    class RecvState(object):
+        def __init__(self, link):
+            self.link = link
+            self.received = False
+            self.done = False
+            self.closed = False
+
+        def on_message(self):
+            self.received = True
+            self.done = True
+
+        def close(self):
+            if not self.closed:
+                self.closed = True
+                self.link.close()
+                self.link.connection.close()
+
+    def __init__(self, send_urls, recv_urls, name, message=None):
+        super(MultiLinkSendReceive, self).__init__()
+        self.send_urls = send_urls
+        self.recv_urls = recv_urls
+        self.senders = {}
+        self.receivers = {}
+        self.message = message or "SendReceiveTest"
+        self.sent = False
+        self.error = None
+        self.name = name
+
+    def close(self):
+        for sender in self.senders.values():
+            sender.close()
+        for receiver in self.receivers.values():
+            receiver.close()
+
+    def all_done(self):
+        for sender in self.senders.values():
+            if not sender.done:
+                return False
+        for receiver in self.receivers.values():
+            if not receiver.done:
+                return False
+        return True
+
+    def timeout(self):
+        self.error = "Timeout Expired"
+        self.close()
+
+    def stop_if_all_done(self):
+        if self.all_done():
+            self.stop()
+
+    def stop(self):
+        self.close()
+        self.timer.cancel()
+
+    def on_start(self, event):
+        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
+        event.container.container_id = None
+        for u in self.send_urls:
+            s = self.SendState(event.container.create_sender(u, name=self.name))
+            self.senders[s.link.connection.container] = s
+        for u in self.recv_urls:
+            r = self.RecvState(event.container.create_receiver(u, name=self.name))
+            self.receivers[r.link.connection.container] = r
+
+    def on_sendable(self, event):
+        self.senders[event.connection.container].send(self.name, self.message)
+
+    def on_message(self, event):
+        if self.message != event.message.body:
+            error = "Incorrect message. Got %s, expected %s" % (event.message.body, self.message.body)
+        self.receivers[event.connection.container].on_message()
+        self.stop_if_all_done()
+
+    def on_accepted(self, event):
+        self.senders[event.connection.container].on_accepted()
+        self.stop_if_all_done()
+
+    def run(self):
+        Container(self).run()
 
 if __name__ == '__main__':
     unittest.main(main_module())

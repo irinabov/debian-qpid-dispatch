@@ -16,53 +16,51 @@ KIND, either express or implied.  See the License for the
 specific language governing permissions and limitations
 under the License.
 */
-/**
- * @module QDR
- */
-var QDR = (function(QDR) {
+/* global angular */
+import { QDR_SETTINGS_KEY, QDRLogger} from './qdrGlobals.js';
 
-  /**
-   * @method SettingsController
-   * @param $scope
-   * @param QDRServer
-   *
-   * Controller that handles the QDR settings page
-   */
+export class SettingsController {
+  constructor(QDRService, QDRChartService, $scope, $log, $timeout) {
+    this.controllerName = 'QDR.SettingsController';
 
-  QDR.module.controller("QDR.SettingsController", ['$scope', 'QDRService', '$timeout', '$location', function($scope, QDRService, $timeout, $location) {
-
+    let QDRLog = new QDRLogger($log, 'SettingsController');
     $scope.connecting = false;
     $scope.connectionError = false;
     $scope.connectionErrorText = undefined;
     $scope.forms = {};
 
-    $scope.formEntity = angular.fromJson(localStorage[QDR.SETTINGS_KEY]) || {
+    $scope.formEntity = angular.fromJson(localStorage[QDR_SETTINGS_KEY]) || {
       address: '',
       port: '',
       username: '',
       password: '',
       autostart: false
     };
+    $scope.formEntity.password = '';
 
     $scope.$watch('formEntity', function(newValue, oldValue) {
       if (newValue !== oldValue) {
-        localStorage[QDR.SETTINGS_KEY] = angular.toJson(newValue);
+        let pass = newValue.password;
+        newValue.password = '';
+        localStorage[QDR_SETTINGS_KEY] = angular.toJson(newValue);
+        newValue.password = pass;
       }
     }, true);
 
     $scope.buttonText = function() {
-      if (QDRService.isConnected()) {
-        return "Disconnect";
+      if (QDRService.management.connection.is_connected()) {
+        return 'Disconnect';
       } else {
-        return "Connect";
+        return 'Connect';
       }
     };
 
+    // connect/disconnect button clicked
     $scope.connect = function() {
-      if (QDRService.connected) {
+      if (QDRService.management.connection.is_connected()) {
         $timeout( function () {
           QDRService.disconnect();
-        })
+        });
         return;
       }
 
@@ -71,118 +69,45 @@ var QDR = (function(QDR) {
         $scope.connecting = true;
         // timeout so connecting animation can display
         $timeout(function () {
-          doConnect()
-        })
-      }
-    }
-
-    var doConnect = function(opts) {
-      if (!$scope.formEntity.address)
-        $scope.formEntity.address = "localhost"
-      if (!$scope.formEntity.port)
-        $scope.formEntity.port = 5673
-
-      var failed = function() {
-        $timeout(function() {
-          QDR.log.debug("disconnect action called");
-          $scope.connecting = false;
-          $scope.connectionErrorText = QDRService.errorText;
-          $scope.connectionError = true;
-        })
-      }
-      QDRService.addDisconnectAction(failed);
-      QDRService.addConnectAction(function() {
-        QDRService.delDisconnectAction(failed)
-        QDRService.getSchema(function () {
-          QDR.log.info("got schema after connection")
-          QDRService.addUpdatedAction("initialized", function () {
-            QDRService.delUpdatedAction("initialized")
-            QDR.log.info("got initial topology")
-            $timeout(function() {
-              $scope.connecting = false;
-              if ($location.path().startsWith(QDR.pluginRoot)) {
-                  var searchObject = $location.search();
-                  var goto = "overview";
-                  if (searchObject.org && searchObject.org !== "connect") {
-                    goto = searchObject.org;
-                  }
-                  $location.search('org', null)
-                  $location.path(QDR.pluginRoot + "/" + goto);
-              }
-            })
-          })
-          QDR.log.info("requesting a topology")
-          QDRService.setUpdateEntities([])
-          QDRService.topology.get()
-        })
-      });
-      var options = {address: $scope.formEntity.address, port: $scope.formEntity.port}
-      // if we have already successfully connected (the test connections succeeded)
-      if (opts && opts.connection) {
-        options.connection = opts.connection
-        options.context = opts.context
-      }
-      QDRService.connect(options);
-    }
-  }]);
-
-
-  QDR.module.directive('posint', function() {
-    return {
-      require: 'ngModel',
-
-      link: function(scope, elem, attr, ctrl) {
-        // input type number allows + and - but we don't want them so filter them out
-        elem.bind('keypress', function(event) {
-          var nkey = !event.charCode ? event.which : event.charCode;
-          var skey = String.fromCharCode(nkey);
-          var nono = "-+.,"
-          if (nono.indexOf(skey) >= 0) {
-            event.preventDefault();
-            return false;
-          }
-          // firefox doesn't filter out non-numeric input. it just sets the ctrl to invalid
-          if (/[\!\@\#\$\%^&*\(\)]/.test(skey) && event.shiftKey || // prevent shift numbers
-            !( // prevent all but the following
-              nkey <= 0 || // arrows
-              nkey == 8 || // delete|backspace
-              nkey == 13 || // enter
-              (nkey >= 37 && nkey <= 40) || // arrows
-              event.ctrlKey || event.altKey || // ctrl-v, etc.
-              /[0-9]/.test(skey)) // numbers
-          ) {
-            event.preventDefault();
-            return false;
-          }
-        })
-          // check the current value of input
-        var _isPortInvalid = function(value) {
-          var port = value + ''
-          var isErrRange = false;
-          // empty string is valid
-          if (port.length !== 0) {
-            var n = ~~Number(port);
-            if (n < 1 || n > 65535) {
-              isErrRange = true;
-            }
-          }
-          ctrl.$setValidity('range', !isErrRange)
-          return isErrRange;
-        }
-
-        //For DOM -> model validation
-        ctrl.$parsers.unshift(function(value) {
-          return _isPortInvalid(value) ? undefined : value;
-        });
-
-        //For model -> DOM validation
-        ctrl.$formatters.unshift(function(value) {
-          _isPortInvalid(value);
-          return value;
+          doConnect();
         });
       }
     };
-  });
 
-  return QDR;
-}(QDR || {}));
+    var doConnect = function() {
+      QDRLog.info('doConnect called on connect page');
+      if (!$scope.formEntity.address)
+        $scope.formEntity.address = 'localhost';
+      if (!$scope.formEntity.port)
+        $scope.formEntity.port = 5673;
+
+      var failed = function() {
+        $timeout(function() {
+          $scope.connecting = false;
+          $scope.connectionErrorText = 'Unable to connect to ' + $scope.formEntity.address + ':' + $scope.formEntity.port;
+          $scope.connectionError = true;
+        });
+      };
+      let options = {address: $scope.formEntity.address, 
+        port: $scope.formEntity.port, 
+        password: $scope.formEntity.password,
+        username: $scope.formEntity.username,
+        reconnect: true};
+      QDRService.connect(options)
+        .then( function () {
+          // register a callback for when the node list is available (needed for loading saved charts)
+          QDRService.management.topology.addUpdatedAction('initChartService', function() {
+            QDRService.management.topology.delUpdatedAction('initChartService');
+            QDRChartService.init(); // initialize charting service after we are connected
+          });
+          // get the list of nodes
+          QDRService.management.topology.startUpdating(false);
+          // will have redirected to last known page or /overview
+        }, function (e) {
+          failed(e);
+        });
+    };
+  }
+}
+SettingsController.$inject = ['QDRService', 'QDRChartService', '$scope', '$log', '$timeout'];
+

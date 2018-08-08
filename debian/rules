@@ -18,7 +18,6 @@ override_dh_auto_configure:
 
 override_dh_auto_install:
 	dh_auto_install
-	chmod +x debian/tmp/usr/lib/qpid-dispatch/tests/ssl_certs/gencerts.sh
 	cp -a debian/tmp/usr/lib/python2.7/site-packages debian/tmp/usr/lib/python2.7/dist-packages
 
 override_dh_auto_test:

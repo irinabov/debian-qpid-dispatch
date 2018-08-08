@@ -17,19 +17,27 @@
 # under the License.
 #
 
-import unittest, os, json
-from subprocess import PIPE, Popen, STDOUT
-from system_test import TestCase, Qdrouterd, main_module, DIR, TIMEOUT, Process
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+
+import unittest2 as unittest
+import os
+from subprocess import PIPE, Popen
+from system_test import TestCase, Qdrouterd, main_module
 from proton import SASL
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
+
 
 class AuthServicePluginTest(TestCase):
     @classmethod
     def createSaslFiles(cls):
         # Create a sasl database.
         p = Popen(['saslpasswd2', '-c', '-p', '-f', 'qdrouterd.sasldb', '-u', 'domain.com', 'test'],
-                  stdin=PIPE, stdout=PIPE, stderr=PIPE)
+                  stdin=PIPE, stdout=PIPE, stderr=PIPE, universal_newlines=True)
         result = p.communicate('password')
         assert p.returncode == 0, \
             "saslpasswd2 exit status %s, output:\n%s" % (p.returncode, result)
@@ -75,7 +83,7 @@ sql_select: dummy select
 
         cls.router_port = cls.tester.get_port()
         cls.tester.qdrouterd('router', Qdrouterd.Config([
-                     ('authServicePlugin', {'name':'myauth', 'authService': '127.0.0.1:%d' % auth_service_port}),
+                     ('authServicePlugin', {'name':'myauth', 'host': '127.0.0.1', 'port': auth_service_port}),
                      ('listener', {'host': '0.0.0.0', 'port': cls.router_port, 'role': 'normal', 'saslPlugin':'myauth', 'saslMechanisms':'PLAIN'}),
                      ('router', {'mode': 'standalone', 'id': 'router'})
         ])).wait_ready()
@@ -107,6 +115,45 @@ sql_select: dummy select
         self.assertEqual('amqp:unauthorized-access', test.error.name)
         self.assertEqual(test.error.description.startswith('Authentication failed'), True)
 
+
+class AuthServicePluginDeprecatedTest(AuthServicePluginTest):
+    @classmethod
+    def setUpClass(cls):
+        """
+        Tests the delegation of sasl auth to an external auth service.
+
+        Creates two routers, one acts as the authe service, the other configures the auth service plugin
+        to point at this auth service.
+
+        """
+        super(AuthServicePluginTest, cls).setUpClass()
+
+        if not SASL.extended():
+            return
+
+        cls.createSaslFiles()
+
+        print('launching auth service...')
+        auth_service_port = cls.tester.get_port()
+        cls.tester.qdrouterd('auth_service', Qdrouterd.Config([
+                     ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': auth_service_port,
+                                   'saslMechanisms':'PLAIN', 'authenticatePeer': 'yes'}),
+                     ('router', {'workerThreads': 1,
+                                 'id': 'auth_service',
+                                 'mode': 'standalone',
+                                 'saslConfigName': 'tests-mech-PLAIN',
+                                 'saslConfigPath': os.getcwd()})
+        ])).wait_ready()
+
+        cls.router_port = cls.tester.get_port()
+        cls.tester.qdrouterd('router', Qdrouterd.Config([
+                     ('authServicePlugin', {'name':'myauth', 'authService': '127.0.0.1:%d' % auth_service_port}),
+                     ('listener', {'host': '0.0.0.0', 'port': cls.router_port, 'role': 'normal',
+                                   'saslPlugin':'myauth', 'saslMechanisms':'PLAIN'}),
+                     ('router', {'mode': 'standalone', 'id': 'router'})
+        ])).wait_ready()
+
+
 class SimpleConnect(MessagingHandler):
     def __init__(self, url, username, password):
         super(SimpleConnect, self).__init__()
@@ -134,6 +181,7 @@ class SimpleConnect(MessagingHandler):
 
     def run(self):
         Container(self).run()
+
 
 if __name__ == '__main__':
     unittest.main(main_module())

@@ -30,9 +30,12 @@
 #define QDR_CONFIG_LINK_ROUTE_DISTRIBUTION  4
 #define QDR_CONFIG_LINK_ROUTE_CONNECTION    5
 #define QDR_CONFIG_LINK_ROUTE_CONTAINER_ID  6
-#define QDR_CONFIG_LINK_ROUTE_DIR           7
-#define QDR_CONFIG_LINK_ROUTE_OPER_STATUS   8
-#define QDR_CONFIG_LINK_ROUTE_PATTERN       9
+#define QDR_CONFIG_LINK_ROUTE_DIRECTION     7
+#define QDR_CONFIG_LINK_ROUTE_DIR           8
+#define QDR_CONFIG_LINK_ROUTE_OPER_STATUS   9
+#define QDR_CONFIG_LINK_ROUTE_PATTERN       10
+#define QDR_CONFIG_LINK_ROUTE_ADD_EXTERNAL_PREFIX 11
+#define QDR_CONFIG_LINK_ROUTE_DEL_EXTERNAL_PREFIX 12
 
 const char *qdr_config_link_route_columns[] =
     {"name",
@@ -42,9 +45,12 @@ const char *qdr_config_link_route_columns[] =
      "distribution",
      "connection",
      "containerId",
+     "direction",
      "dir",
      "operStatus",
      "pattern",
+     "addExternalPrefix",
+     "delExternalPrefix",
      0};
 
 const char *CONFIG_LINKROUTE_TYPE = "org.apache.qpid.dispatch.router.config.linkRoute";
@@ -96,6 +102,20 @@ static void qdr_config_link_route_insert_column_CT(qdr_link_route_t *lr, int col
             qd_compose_insert_null(body);
         break;
 
+    case QDR_CONFIG_LINK_ROUTE_ADD_EXTERNAL_PREFIX:
+        if (lr->add_prefix)
+            qd_compose_insert_string(body, lr->add_prefix);
+        else
+            qd_compose_insert_null(body);
+        break;
+
+    case QDR_CONFIG_LINK_ROUTE_DEL_EXTERNAL_PREFIX:
+        if (lr->del_prefix)
+            qd_compose_insert_string(body, lr->del_prefix);
+        else
+            qd_compose_insert_null(body);
+        break;
+
     case QDR_CONFIG_LINK_ROUTE_DISTRIBUTION:
         switch (lr->treatment) {
         case QD_TREATMENT_LINK_BALANCED: text = "linkBalanced"; break;
@@ -130,6 +150,7 @@ static void qdr_config_link_route_insert_column_CT(qdr_link_route_t *lr, int col
         break;
 
     case QDR_CONFIG_LINK_ROUTE_DIR:
+    case QDR_CONFIG_LINK_ROUTE_DIRECTION:
         text = lr->dir == QD_INCOMING ? "in" : "out";
         qd_compose_insert_string(body, text);
         break;
@@ -280,9 +301,9 @@ static const char *qdra_link_route_direction_CT(qd_parsed_field_t *field, qd_dir
             *dir = QD_OUTGOING;
             return 0;
         }
-        return "Invalid value for 'dir'";
+        return "Invalid value for 'direction'";
     }
-    return "Missing value for 'dir'";
+    return "Missing value for 'direction'";
 }
 
 
@@ -383,15 +404,24 @@ void qdra_config_link_route_create_CT(qdr_core_t        *core,
             break;
         }
 
+
         //
         // Extract the fields from the request
         //
         qd_parsed_field_t *prefix_field     = qd_parse_value_by_key(in_body, qdr_config_link_route_columns[QDR_CONFIG_LINK_ROUTE_PREFIX]);
         qd_parsed_field_t *pattern_field    = qd_parse_value_by_key(in_body, qdr_config_link_route_columns[QDR_CONFIG_LINK_ROUTE_PATTERN]);
+        qd_parsed_field_t *add_prefix_field    = qd_parse_value_by_key(in_body, qdr_config_link_route_columns[QDR_CONFIG_LINK_ROUTE_ADD_EXTERNAL_PREFIX]);
+        qd_parsed_field_t *del_prefix_field    = qd_parse_value_by_key(in_body, qdr_config_link_route_columns[QDR_CONFIG_LINK_ROUTE_DEL_EXTERNAL_PREFIX]);
         qd_parsed_field_t *distrib_field    = qd_parse_value_by_key(in_body, qdr_config_link_route_columns[QDR_CONFIG_LINK_ROUTE_DISTRIBUTION]);
         qd_parsed_field_t *connection_field = qd_parse_value_by_key(in_body, qdr_config_link_route_columns[QDR_CONFIG_LINK_ROUTE_CONNECTION]);
         qd_parsed_field_t *container_field  = qd_parse_value_by_key(in_body, qdr_config_link_route_columns[QDR_CONFIG_LINK_ROUTE_CONTAINER_ID]);
-        qd_parsed_field_t *dir_field        = qd_parse_value_by_key(in_body, qdr_config_link_route_columns[QDR_CONFIG_LINK_ROUTE_DIR]);
+        qd_parsed_field_t *dir_field        = qd_parse_value_by_key(in_body, qdr_config_link_route_columns[QDR_CONFIG_LINK_ROUTE_DIRECTION]);
+        if (! dir_field) {
+            dir_field        = qd_parse_value_by_key(in_body, qdr_config_link_route_columns[QDR_CONFIG_LINK_ROUTE_DIR]);
+            if (dir_field)
+                qd_log(core->agent_log, QD_LOG_WARNING, "The 'dir' attribute of linkRoute has been deprecated. Use 'direction' instead");
+        }
+
 
         //
         // Both connection and containerId cannot be specified because both can represent different connections. Only one those
@@ -405,13 +435,13 @@ void qdra_config_link_route_create_CT(qdr_core_t        *core,
         }
 
         //
-        // The dir field is mandatory.
+        // The direction field is mandatory.
         // Either a prefix or a pattern field is mandatory.  However prefix and pattern
         // are mutually exclusive. Fail if either both or none are given.
         //
         const char *msg = NULL;
         if (!dir_field) {
-            msg = "No 'dir' attribute provided - it is mandatory";
+            msg = "No 'direction' attribute provided - it is mandatory";
         } else if (!prefix_field && !pattern_field) {
             msg = "Either a 'prefix' or 'pattern' attribute must be provided";
         } else if (prefix_field && pattern_field) {
@@ -446,7 +476,7 @@ void qdra_config_link_route_create_CT(qdr_core_t        *core,
         // The request is good.  Create the entity.
         //
 
-        lr = qdr_route_add_link_route_CT(core, name, prefix_field, pattern_field, container_field, connection_field, trt, dir);
+        lr = qdr_route_add_link_route_CT(core, name, prefix_field, pattern_field, add_prefix_field, del_prefix_field, container_field, connection_field, trt, dir);
 
         //
         // Compose the result map for the response.
