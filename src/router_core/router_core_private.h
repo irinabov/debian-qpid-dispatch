@@ -36,6 +36,7 @@ typedef struct qdr_link_route_t      qdr_link_route_t;
 typedef struct qdr_auto_link_t       qdr_auto_link_t;
 typedef struct qdr_conn_identifier_t qdr_conn_identifier_t;
 typedef struct qdr_connection_ref_t  qdr_connection_ref_t;
+typedef struct qdr_exchange          qdr_exchange_t;
 
 qdr_forwarder_t *qdr_forwarder_CT(qdr_core_t *core, qd_address_treatment_t treatment);
 int qdr_forward_message_CT(qdr_core_t *core, qdr_address_t *addr, qd_message_t *msg, qdr_delivery_t *in_delivery,
@@ -49,6 +50,7 @@ typedef enum {
     QDR_CONDITION_FORBIDDEN,
     QDR_CONDITION_WRONG_ROLE,
     QDR_CONDITION_COORDINATOR_PRECONDITION_FAILED,
+    QDR_CONDITION_INVALID_LINK_EXPIRATION,
     QDR_CONDITION_NONE
 } qdr_condition_t;
 
@@ -106,6 +108,7 @@ struct qdr_action_t {
             qdr_error_t      *error;
             qd_detach_type_t  dt;
             int               credit;
+            bool              more;  // true if there are more frames arriving, false otherwise
             bool              drain;
             uint8_t           tag[32];
             int               tag_length;
@@ -346,9 +349,11 @@ struct qdr_delivery_t {
     qd_bitmask_t           *link_exclusion;
     qdr_address_t          *tracking_addr;
     int                     tracking_addr_bit;
+    int                     ingress_index;
     qdr_link_work_t        *link_work;         ///< Delivery work item for this delivery
     qdr_subscription_list_t subscriptions;
     qdr_delivery_ref_list_t peers;             /// Use this list if there if the delivery has more than one peer.
+    bool                    multicast;         /// True if this delivery is targeted for a multicast address.
 
 };
 
@@ -381,6 +386,7 @@ struct qdr_link_t {
     qd_direction_t           link_direction;
     qdr_link_work_list_t     work_list;
     char                    *name;
+    char                    *disambiguated_name;
     char                    *terminus_addr;
     int                      detach_count;       ///< 0, 1, or 2 depending on the state of the lifecycle
     qdr_address_t           *owning_addr;        ///< [ref] Address record that owns this link
@@ -394,19 +400,24 @@ struct qdr_link_t {
     qdr_link_oper_status_t   oper_status;
     int                      capacity;
     int                      credit_to_core; ///< Number of the available credits incrementally given to the core
+    int                      credit_pending; ///< Number of credits to be issued once consumers are available
     bool                     admin_enabled;
     bool                     strip_annotations_in;
     bool                     strip_annotations_out;
-    bool                     flow_started;   ///< for incoming, true iff initial credit has been granted
     bool                     drain_mode;
     bool                     stalled_outbound;  ///< Indicates that this link is stalled on outbound buffer backpressure
+    char                    *strip_prefix;
+    char                    *insert_prefix;
+    bool                     terminus_survives_disconnect;
 
-    uint64_t total_deliveries;
-    uint64_t presettled_deliveries;
-    uint64_t accepted_deliveries;
-    uint64_t rejected_deliveries;
-    uint64_t released_deliveries;
-    uint64_t modified_deliveries;
+    uint64_t  total_deliveries;
+    uint64_t  presettled_deliveries;
+    uint64_t  dropped_presettled_deliveries;
+    uint64_t  accepted_deliveries;
+    uint64_t  rejected_deliveries;
+    uint64_t  released_deliveries;
+    uint64_t  modified_deliveries;
+    uint64_t *ingress_histogram;
 };
 
 ALLOC_DECLARE(qdr_link_t);
@@ -448,6 +459,7 @@ struct qdr_address_t {
     int                        ref_count;     ///< Number of link-routes + auto-links referencing this address
     bool                       block_deletion;
     bool                       local;
+    bool                       router_control_only; ///< If set, address is only for deliveries arriving on a control link
     uint32_t                   tracked_deliveries;
     uint64_t                   cost_epoch;
 
@@ -461,7 +473,18 @@ struct qdr_address_t {
     // State for "balanced" treatment
     //
     int *outstanding_deliveries;
-    
+
+    //
+    // State for "exchange" treatment
+    //
+    qdr_exchange_t      *exchange;  // weak ref
+
+    //
+    // State for "link balanced" treatment
+    //
+    char *add_prefix;
+    char *del_prefix;
+
     /**@name Statistics */
     ///@{
     uint64_t deliveries_ingress;
@@ -469,6 +492,9 @@ struct qdr_address_t {
     uint64_t deliveries_transit;
     uint64_t deliveries_to_container;
     uint64_t deliveries_from_container;
+    uint64_t deliveries_egress_route_container;
+    uint64_t deliveries_ingress_route_container;
+
     ///@}
 };
 
@@ -573,6 +599,8 @@ struct qdr_link_route_t {
     bool                    active;
     bool                    is_prefix;
     char                   *pattern;
+    char                   *add_prefix;
+    char                   *del_prefix;
 };
 
 ALLOC_DECLARE(qdr_link_route_t);
@@ -616,6 +644,7 @@ struct qdr_conn_identifier_t {
 };
 
 ALLOC_DECLARE(qdr_conn_identifier_t);
+DEQ_DECLARE(qdr_exchange_t, qdr_exchange_list_t);
 
 
 struct qdr_core_t {
@@ -699,7 +728,24 @@ struct qdr_core_t {
     uint64_t              next_identifier;
     sys_mutex_t          *id_lock;
 
+    qdr_exchange_list_t   exchanges;
     qdr_forwarder_t      *forwarders[QD_TREATMENT_LINK_BALANCED + 1];
+
+
+    // Overall delivery counters
+    uint64_t           presettled_deliveries;
+    uint64_t           dropped_presettled_deliveries;
+    uint64_t           accepted_deliveries;
+    uint64_t           rejected_deliveries;
+    uint64_t           released_deliveries;
+    uint64_t           modified_deliveries;
+    uint64_t           deliveries_ingress;
+    uint64_t           deliveries_egress;
+    uint64_t           deliveries_transit;
+    uint64_t           deliveries_egress_route_container;
+    uint64_t           deliveries_ingress_route_container;
+
+
 };
 
 void *router_core_thread(void *arg);

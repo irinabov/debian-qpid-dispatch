@@ -397,83 +397,61 @@
                     "type": "string",
                     "description": "Software Version"
                 },
-                "helloInterval": {
+                "hostName": {
+                    "type": "string",
+                    "description": "hostName of machine on which router is running"
+                },
+                "helloIntervalSeconds": {
                     "type": "integer",
                     "default": 1,
                     "description": "Interval in seconds between HELLO messages sent to neighbor routers.",
+                    "deprecationName": "helloInterval",
                     "create": true
                 },
-                "helloMaxAge": {
+                "helloMaxAgeSeconds": {
                     "type": "integer",
                     "default": 3,
                     "description": "Time in seconds after which a neighbor is declared lost if no HELLO is received.",
+                    "deprecationName": "helloMaxAge",
                     "create": true
                 },
-                "raInterval": {
+                "raIntervalSeconds": {
                     "type": "integer",
                     "default": 30,
                     "description": "Interval in seconds between Router-Advertisements sent to all routers in a stable network.",
+                    "deprecationName": "raInterval",
                     "create": true
                 },
-                "raIntervalFlux": {
+                "raIntervalFluxSeconds": {
                     "type": "integer",
                     "default": 4,
                     "description": "Interval in seconds between Router-Advertisements sent to all routers during topology fluctuations.",
+                    "deprecationName": "raIntervalFlux",
                     "create": true
                 },
-                "remoteLsMaxAge": {
+                "remoteLsMaxAgeSeconds": {
                     "type": "integer",
                     "default": 60,
                     "description": "Time in seconds after which link state is declared stale if no RA is received.",
+                    "deprecationName": "remoteLsMaxAge",
                     "create": true
                 },
-                "addrCount": {
-                    "type": "integer",
-                    "description":"Number of addresses known to the router.",
-                    "graph": true
-                },
-                "linkCount": {
-                    "type": "integer",
-                    "description":"Number of links attached to the router node.",
-                    "graph": true
-                },
-                "nodeCount": {
-                    "type": "integer",
-                    "description":"Number of known peer router nodes.",
-                    "graph": true
-                },
-                "linkRouteCount": {
-                    "type": "integer",
-                    "description":"Number of link routes attached to the router node.",
-                    "graph": true
-                },
-                "autoLinkCount": {
-                    "type": "integer",
-                    "description":"Number of auto links attached to the router node.",
-                    "graph": true
-                },
-                "connectionCount": {
-                    "type": "integer",
-                    "description":"Number of open connections to the router node.",
-                    "graph": true
-                },
-
                 "workerThreads": {
                     "type": "integer",
                     "default": 4,
                     "description": "The number of threads that will be created to process message traffic and other application work (timers, non-amqp file descriptors, etc.) .",
                     "create": true
-
                 },
-                "debugDump": {
+                "debugDumpFile": {
                     "type": "path",
-                    "description": "A file to dump debugging information that can't be logged normally.",
+                    "description": "The absolute path to the location for the debug dump file. The router writes debug-level information to this file if the logger is not available.",
+                    "deprecationName": "debugDump",
                     "create": true
-
                 },
-                "saslConfigPath": {
+                "saslConfigDir": {
                     "type": "path",
                     "description": "Absolute path to the SASL configuration file.",
+                    "deprecationName": "saslConfigPath",
                     "required": false,
                     "create": true
                 },
@@ -484,9 +462,16 @@
                     "required": false,
                     "create": true
                 },
+                "allowResumableLinkRoute": {
+                    "type": "boolean",
+                    "description": "Whether links can be routed where timeout is non-zero or expiry-policy is not link-detach",
+                    "create": true,
+                    "required": false,
+                    "default": true
+                },                
                 "allowUnsettledMulticast": {
                     "type": "boolean",
-                    "description": "If true, allow senders to send unsettled deliveries to multicast addresses.  These deliveries shall be settled by the ingress router.  If false, unsettled deliveries to multicast addresses shall be rejected.",
+                    "description": "(DEPRECATED) If true, allow senders to send unsettled deliveries to multicast addresses.  These deliveries shall be settled by the ingress router.  If false, unsettled deliveries to multicast addresses shall be rejected.",
                     "create": true,
                     "required": false,
                     "default": false
@@ -497,10 +482,94 @@
                     "create": true,
                     "required": false,
                     "default": "balanced"
-                }
+                },
+	            "addrCount": {
+	                "type": "integer",
+	                "description":"Number of addresses known to the router.",
+	                "graph": true
+	            },
+	            "linkCount": {
+	                "type": "integer",
+	                "description":"Number of links attached to the router node.",
+	                "graph": true
+	            },
+	            "nodeCount": {
+	                "type": "integer",
+	                "description":"Number of known peer router nodes.",
+	                "graph": true
+	            },
+	            "linkRouteCount": {
+	                "type": "integer",
+	                "description":"Number of link routes attached to the router node.",
+	                "graph": true
+	            },
+	            "autoLinkCount": {
+	                "type": "integer",
+	                "description":"Number of auto links attached to the router node.",
+	                "graph": true
+	            },
+	            "connectionCount": {
+	                "type": "integer",
+	                "description":"Number of open connections to the router node.",
+	                "graph": true
+	            },
+                "presettledDeliveries": {
+                    "type": "integer",
+                    "description":"Number of presettled deliveries handled by the router.",
+                    "graph": true
+                },
+                "droppedPresettledDeliveries": {
+                    "type": "integer",
+                    "description":"Number of presettled deliveries that were dropped by the router.",
+                    "graph": true
+                },
+                "acceptedDeliveries": {
+                    "type": "integer",
+                    "description":"Number of deliveries whose delivery state was set to ACCEPTED by the router. These deliveries were successfully processed by the router.",
+                    "graph": true
+                },
+                "rejectedDeliveries": {
+                    "type": "integer",
+                    "description":"Number of deliveries whose delivery state was set to REJECTED by the router. These deliveries were Invalid and unprocessable.",
+                    "graph": true
+                },
+                "releasedDeliveries": {
+                    "type": "integer",
+                    "description":"Number of deliveries whose delivery state was set to RELEASED by the router. These deliveries was not (and will not be) processed",
+                    "graph": true
+                },
+                "modifiedDeliveries": {
+                    "type": "integer",
+                    "description":"Number of deliveries whose delivery state was set to MODIFIED by the router. These deliveries were modified but not processed.",
+                    "graph": true
+                },
+                "deliveriesIngress": {
+                    "type": "integer",
+                    "description":"Number of deliveries that were sent to it by a sender that is directly attached to the router.",
+                    "graph": true
+                },
+                "deliveriesEgress": {
+                    "type": "integer",
+                    "description":"Number of deliveries that were sent by the router to a receiver that is directly attached to the router.",
+                    "graph": true
+                },
+                "deliveriesTransit": {
+                    "type": "integer",
+                    "description":"Number of deliveries that were sent to another router in the network.",
+                    "graph": true
+                },                
+                "deliveriesIngressRouteContainer": {
+                    "type": "integer",
+                    "description":"Number of deliveries that were received from router container connections.",
+                    "graph": true
+                },                
+                "deliveriesEgressRouteContainer": {
+                    "type": "integer",
+                    "description":"Number of deliveries that were sent to route container connections.",
+                    "graph": true
+                }                
             }
-        },
-
+        },       
         "sslProfile": {
             "description":"Attributes for setting TLS/SSL configuration for connections.",
             "referential": true,
@@ -511,10 +580,16 @@
                     "type": "string",
                     "description": "Specifies the enabled ciphers so the SSL Ciphers can be hardened. In other words, use this field to disable weak ciphers. The ciphers are specified in the format understood by the OpenSSL library. For example, ciphers can be set to ALL:!aNULL:!EXPORT56:RC4+RSA:+HIGH:+MEDIUM:+LOW:+SSLv2:+EXP; -- The full list of allowed ciphers can be viewed using the openssl ciphers command",
                     "create": true
-                },            
-                "certDb": {
+                },      
+                "protocols": {
+                    "type": "string",
+                    "description": "The TLS protocols that this sslProfile can use. You can specify a list of one or more of TLSv1, TLSv1.1, or TLSv1.2. To specify multiple protocols, separate the protocols with a space. For example, to permit the sslProfile to use TLS v1.1 and TLS v1.2 only, you would set the value to TLSv1.1 TLSv1.2. If you do not specify a value, the sslProfile uses the TLS protocol specified by the system-wide configuration.",
+                    "create": true
+                },                            
+                "caCertFile": {
                     "type": "path",
                     "description": "The absolute path to the database that contains the public certificates of trusted certificate authorities (CA).",
+                    "deprecationName": "certDb",
                     "create": true
                 },
                 "certFile": {
@@ -523,21 +598,23 @@
                     "create": true
 
                 },
-                "keyFile": {
+                "privateKeyFile": {
                     "type": "path",
                     "description": "The absolute path to the file containing the PEM-formatted private key for the above certificate.",
+                    "deprecationName": "keyFile",
                     "create": true
 
                 },
                 "passwordFile": {
                     "type": "path",
-                    "description": "If the above private key is password protected, this is the absolute path to a file containing the password that unlocks the certificate key.",
+                    "description": "If the above private key is password protected, this is the absolute path to a file containing the password that unlocks the certificate key. This file should be permission protected to limit access",
                     "create": true
 
                 },
                 "password": {
                     "type": "string",
-                    "description": "An alternative to storing the password in a file referenced by passwordFile is to supply the password right here in the configuration file.  This takes precedence over the passwordFile if both are specified.",
+                    "description": "(DEPRECATED) An alternative to storing the password in a file referenced by passwordFile is to supply the password right here in the configuration file.  This takes precedence over the passwordFile if both are specified. This attribute has been deprecated because it is unsafe to store plain text passwords in config files. Use the passwordFile instead",
+                    "deprecated": true,
                     "create": true
 
                 },
@@ -546,9 +623,10 @@
                     "description": "A list of x509 client certificate fields that will be used to build a string that will uniquely identify the client certificate owner. For e.g. a value of 'cou' indicates that the uid will consist of c - common name concatenated with o - organization-company name concatenated with u - organization unit; or a value of 'o2' indicates that the uid will consist of o (organization name) concatenated with 2 (the sha256 fingerprint of the entire certificate) . Allowed values can be any combination of 'c'( ISO3166 two character country code), 's'(state or province), 'l'(Locality; generally - city), 'o'(Organization - Company Name), 'u'(Organization Unit - typically certificate type or brand), 'n'(CommonName - typically a user name for client certificates) and '1'(sha1 certificate fingerprint, as displayed in the fingerprints section when looking at a certificate with say a web browser is the hash of the entire certificate) and 2 (sha256 certificate fingerprint) and 5 (sha512 certificate fingerprint). The user identifier (uid) that is generated based on the uidFormat is a string which has a semi-colon as a separator between the components",
                     "create": true
                 },
-                "displayNameFile": {
+                "uidNameMappingFile": {
                     "type": "string",
                     "description": "The absolute path to the file containing the unique id to display name mapping",
+                    "deprecationName": "displayNameFile",
                     "create": true
                 }
             }
@@ -562,20 +640,35 @@
             "attributes": {
                 "authService": {
                     "type": "string",
-                    "description": "Address of a service to delegate authentication to.",
-                    "required": true,
+                    "description": "(DEPRECATED) Address of a service to delegate authentication to. This attribute has been deprecated. Use the host and port attributes instead.",
+                    "deprecated": true,
                     "create": true
                 },
-                "saslInitHostname": {
+                "host": {
+                    "description":"A host name, IPV4 or IPV6 literal, of the service to delegate to.",
+                    "type": "string",
+                    "default": "",
+                    "create": true
+                },
+                "port": {
+                    "description": "Port number of the service delegated host.",
+                    "type": "string",
+                    "default": "amqp",
+                    "create": true
+
+                },                
+                "realm": {
                     "type": "string",
                     "description": "Value to set for hostname field on sasl-init",
                     "required": false,
+                    "deprecationName": "saslInitHostname",
                     "create": true
                 },
-                "authSslProfile": {
+                "sslProfile": {
                     "type": "string",
                     "required": false,
                     "description": "Name of the sslProfile to use for the authentication service.",
+                    "deprecationName": "authSslProfile",
                     "create": true
                 }
             }
@@ -593,15 +686,16 @@
                     "create": true
                 },
                 "port": {
-                    "description": "Port number or symbolic service name.",
+                    "description": "Port number or symbolic service name.  If '0', the router shall assign an ephemeral port to the listener and log the port number with a log of the form 'SERVER (notice) Listening on <host>:<assigned-port> (<listener-name>)'",
                     "type": "string",
                     "default": "amqp",
                     "create": true
 
                 },
-                "protocolFamily": {
+                "socketAddressFamily": {
                     "type": ["IPv4", "IPv6"],
                     "required": false,
+                    "deprecationName": "protocolFamily",
                     "description": "['IPv4', 'IPv6'] IPv4: Internet Protocol version 4; IPv6: Internet Protocol version 6.  If not specified, the protocol family will be automatically determined from the address.",
                     "create": true
                 },
@@ -658,9 +752,10 @@
                     "description": "yes: Require the use of SSL or TLS on the connection; no: Allow clients to connect without SSL or TLS.",
                     "create": true
                 },
-                "trustedCerts": {
+                "trustedCertsFile": {
                     "type": "path",
                     "description": "This optional setting can be used to reduce the set of available CAs for client authentication.  If used, this setting must provide the absolute path to a PEM file that contains the trusted certificates.",
+                    "deprecationName": "trustedCerts",
                     "create": true
                 },
                 "maxFrameSize": {
@@ -714,10 +809,11 @@
                     "default": false,
                     "description": "If true, apply multi-tenancy to endpoints connected at this listener.  The address space is defined by the virtual host (hostname field in the Open)."
                 },
-                "failoverList": {
+                "failoverUrls": {
                     "type": "string",
                     "create": true,
                     "required": false,
+                    "deprecationName": "failoverList",
                     "description": "A comma-separated list of failover urls to be supplied to connected clients.  Form: [(amqp|amqps|ws|wss)://]host_or_ip[:port]"
                 },
                 "http": {
@@ -726,15 +822,17 @@
                     "description": "Accept HTTP connections that can upgrade to AMQP over WebSocket. Plain AMQP connections are not accepted on this listener.",
                     "create": true
                 },
-                "httpRoot": {
+                "httpRootDir": {
                     "type": "path",
                     "description": "Serve HTTP files from this directory, defaults to the installed stand-alone console directory",
+                    "deprecationName": "httpRoot",
                     "create": true
                 },
-                "logMessage": {
+                "messageLoggingComponents": {
                     "type": "string",
                     "default": "none",
                     "description": "A comma separated list that indicates which components of the message should be logged. Defaults to 'none' (log nothing). If you want all properties and application properties of the message logged use 'all'. Specific components of the message can be logged by indicating the components via a comma separated list. The components are message-id, user-id, to, subject, reply-to, correlation-id, content-type, content-encoding, absolute-expiry-time, creation-time, group-id, group-sequence, reply-to-group-id, app-properties. The application-data part of the bare message will not be logged. No spaces are allowed",
+                    "deprecationName": "logMessage",
                     "create": true
                 }
             }
@@ -777,7 +875,7 @@
                 },
                 "cost": {
                     "type": "integer",
-                    "default": "1",
+                    "default": 1,
                     "required": false,
                     "create": true,
                     "description": "For the 'inter-router' role only.  This value assigns a cost metric to the inter-router connection.  The default (and minimum) value is one.  Higher values represent higher costs.  The cost is used to influence the routing algorithm as it attempts to use the path with the lowest total cost from ingress to egress."
@@ -836,10 +934,11 @@
                     "required": false,
                     "description": "The capacity of links within this connection, in terms of message deliveries.  The capacity is the number of messages that can be in-flight concurrently for each link."
                 },
-                "verifyHostName": {
+                "verifyHostname": {
                     "type": "boolean",
                     "default": true,
                     "description": "yes: Ensures that when initiating a connection (as a client) the host name in the URL to which this connector connects to matches the host name in the digital certificate that the peer sends back as part of the SSL connection; no: Does not perform host name verification",
+                    "deprecationName": "verifyHostName",
                     "create": true
                 },
                 "saslUsername": {
@@ -855,15 +954,17 @@
                     "create": true,
                     "hidden": true
                 },
-                "logMessage": {
+                "messageLoggingComponents": {
                     "type": "string",
                     "default": "none",
                     "description": "A comma separated list that indicates which components of the message should be logged (no spaces allowed between list components). Defaults to 'none' (log nothing). If you want all properties and application properties of the message logged use 'all'. Specific components of the message can be logged by indicating the components via a comma separated list. The components are message-id, user-id, to, subject, reply-to, correlation-id, content-type, content-encoding, absolute-expiry-time, creation-time, group-id, group-sequence, reply-to-group-id, app-properties. The application-data part of the bare message will not be logged. This log message is written to the MESSAGE logging module. In the 'log' entity, set 'module' property to MESSAGE or DEFAULT and 'enable' to trace+ to see this log message",
+                    "deprecationName": "logMessage",
                     "create": true
                 },
-                "failoverList": {
+                "failoverUrls": {
                     "type": "string",
                     "description": "A read-only, comma-separated list of failover urls. ",
+                    "deprecationName": "failoverList",
                     "create": false
                     
                 }            
@@ -902,19 +1003,22 @@
                     "description": "Levels are: trace, debug, info, notice, warning, error, critical. The enable string is a comma-separated list of levels. A level may have a trailing '\\+' to enable that level and above. For example 'trace,debug,warning+' means enable trace, debug, warning, error and critical. The value 'none' means disable logging for the module.",
                     "update": true
                 },
-                "timestamp": {
+                "includeTimestamp": {
                     "type": "boolean",
                     "description": "Include timestamp in log messages.",
+                    "deprecationName": "timestamp",
                     "update": true
                 },
-                "source": {
+                "includeSource": {
                     "type": "boolean",
                     "description": "Include source file and line number in log messages.",
+                    "deprecationName": "source",
                     "update": true
                 },
-                "output": {
+                "outputFile": {
                     "type": "string",
                     "description": "Where to send log messages. Can be 'stderr', 'stdout', 'syslog' or a file name.",
+                    "deprecationName": "output",
                     "update": true
                 }
             }
@@ -926,30 +1030,37 @@
             "attributes": {
                 "traceCount": {
                     "description": "How many trace-level events have happened on this log.",
+                    "graph": true,
                     "type": "integer"
                 } ,
                 "debugCount": {
                     "description": "How many debug-level events have happened on this log.",
+                    "graph": true,
                     "type": "integer"
                 } ,
                 "infoCount": {
                     "description": "How many info-level events have happened on this log.",
+                    "graph": true,
                     "type": "integer"
                 } ,
                 "noticeCount": {
                     "description": "How many notice-level events have happened on this log.",
+                    "graph": true,
                     "type": "integer"
                 } ,
                 "warningCount": {
                     "description": "How many warning-level events have happened on this log.",
+                    "graph": true,
                     "type": "integer"
                 } ,
                 "errorCount": {
                     "description": "How many error-level events have happened on this log.",
+                    "graph": true,
                     "type": "integer"
                 } ,
                 "criticalCount": {
                     "description": "How many critical-level events have happened on this log.",
+                    "graph": true,
                     "type": "integer"
                 }
             }
@@ -1018,6 +1129,18 @@
                     "create": true,
                     "required": false
                 },
+                "addExternalPrefix": {
+                    "type": "string",
+                    "description": "add the specified prefix to the address of the remote terminus on the route container link",
+                    "create": true,
+                    "required": false
+                },
+                "delExternalPrefix": {
+                    "type": "string",
+                    "description": "remove the specified prefix to the address of the remote terminus on the route container link",
+                    "create": true,
+                    "required": false
+                },
                 "containerId": {
                     "type": "string",
                     "description": "ContainerID for the target container. Only one of containerId or connection should be specified for a linkRoute. Specifying both will result in the linkRoute not being created.",
@@ -1037,10 +1160,11 @@
                     "required": false,
                     "default": "linkBalanced"
                 },
-                "dir": {
+                "direction": {
                     "type": ["in", "out"],
                     "description": "The permitted direction of links: 'in' means client senders; 'out' means client receivers",
                     "create": true,
+                    "deprecationName": "dir",
                     "required": true
                 },
                 "operStatus": {
@@ -1062,10 +1186,11 @@
                     "create": true,
                     "required": true
                 },
-                "dir": {
+                "direction": {
                     "type": ["in", "out"],
                     "description": "The direction of the link to be created.  In means into the router, out means out of the router.",
                     "create": true,
+                    "deprecationName": "dir",
                     "required": true
                 },
                 "phase": {
@@ -1106,6 +1231,106 @@
                     "type": "string",
                     "description": "The error description from the last attach failure",
                     "create": false
+                }
+            }
+        },
+
+        "router.config.exchange": {
+            "description":"[EXPERIMENTAL] Defines a topic exchange.",
+            "extends": "configurationEntity",
+            "operations": ["CREATE", "DELETE"],
+            "attributes": {
+                "address": {
+                    "description": "The address of the exchange. Used by the message publisher as the target for sending messages.",
+                    "type": "string",
+                    "create": true,
+                    "required": true
+                },
+                "phase": {
+                    "type": "integer",
+                    "description": "The address phase for the exchange.  Defaults to '0'.",
+                    "create": true,
+                    "required": false
+                },
+                "alternateAddress": {
+                    "description": "The address to forward the message to if no bindings are matched.",
+                    "type": "string",
+                    "create": true,
+                    "required": false
+                },
+                "alternatePhase": {
+                    "type": "integer",
+                    "description": "The address phase for the alternateAddress.  Defaults to '0'.",
+                    "create": true,
+                    "required": false
+                },
+                "matchMethod": {
+                    "description": "Key matching algorithm used. 'amqp' uses the legacy AMQP topic exchange wildcard match method as described in the pre-1.0 drafts. 'mqtt' uses the MQTT topic filter wildcard match method.",
+                    "type": ["amqp", "mqtt"],
+                    "default": "amqp",
+                    "required": false,
+                    "create": true
+                },
+                "bindingCount": {
+                    "description": "The number of bindings associated with this exchange.",
+                    "type": "integer",
+                    "create": false
+                },
+                "receivedCount": {
+                    "description": "The total number of deliveries received by this exchange.",
+                    "type": "integer",
+                    "create": false
+                },
+                "droppedCount": {
+                    "description": "The total number of deliveries dropped due to the lack of an outgoing subscription.",
+                    "type": "integer",
+                    "create": false
+                },
+                "forwardedCount": {
+                    "description": "The total number of deliveries forwarded via matched bindings or to the alternateAddress",
+                    "type": "integer",
+                    "create": false
+                },
+                "divertedCount": {
+                    "description": "A count of those deliveries that were forwarded via the alternateAddress only.  This is a subset of the forwardedCount.",
+                    "type": "integer",
+                    "create": false
+                }
+            }
+        },
+
+        "router.config.binding": {
+            "description":"[EXPERIMENTAL] Defines a keyed next hop binding for a topic exchange. The subject field of the messages arriving at the exchange is compared against the binding's key value using the exchange's matchMethod.  If the subject matches the key the message is forwarded to the nextHopAddress. The nextHopAddress overrides the message's original destination.",
+            "extends": "configurationEntity",
+            "operations": ["CREATE", "DELETE"],
+            "attributes": {
+                "exchangeName": {
+                    "description": "The name of the exchange to bind.",
+                    "type": "string",
+                    "create": true,
+                    "required": true
+                },
+                "bindingKey": {
+                    "description": "Pattern to compare against incoming message's subject.  The key is a string of zero or more tokens and wildcards. The format depends on the matchMethod configured for the exchange. For AMQP each token is delimited by the '.' character and wild-card tokens '*' matches a single token and '#' matches zero or more tokens. For MQTT each token is delimited by the '/' character and wildcard tokens '+' matches a single token and '#' matches zero or more tokens at the end of the topic. If a key is not provided the binding will match all messages arriving at the exchange (fanout behavior).",
+                    "type": "string",
+                    "create": true,
+                    "required": false
+                },
+                "nextHopAddress": {
+                    "description": "The address to forward the message to when the message's topic string matches the binding key pattern.  This address is used by message consumers as the source of incoming messages.",
+                    "type": "string",
+                    "create": true,
+                    "required": true
+                },
+                "nextHopPhase": {
+                    "type": "integer",
+                    "description": "The address phase used when forwarding messages that match this binding.",
+                    "create": true,
+                    "required": false
+                },
+                "matchedCount": {
+                    "description": "Total number of deliveries that matched this binding.",
+                    "type": "integer"
                 }
             }
         },
@@ -1167,6 +1392,11 @@
                     "graph": true,
                     "description": "The total number of pre-settled deliveries."
                 },
+                "droppedPresettledCount": {
+                    "type": "integer",
+                    "graph": true,
+                    "description": "The total number of pre-settled deliveries that were dropped."
+                },
                 "acceptedCount": {
                     "type": "integer",
                     "graph": true,
@@ -1186,6 +1416,10 @@
                     "type": "integer",
                     "graph": true,
                     "description": "The total number of modified deliveries."
+                },
+                "ingressHistogram": {
+                    "type": "list",
+                    "description": "For outgoing links on connections with 'normal' role.  This histogram shows the number of settled deliveries on the link that ingressed the network at each interior router node."
                 }
             }
         },
@@ -1240,6 +1474,16 @@
                 "deliveriesFromContainer": {
                     "type": "integer",
                     "description": "The number of deliveries to this address that were originated from an in-process entity",
+                    "graph": true
+                },
+                "deliveriesIngressRouteContainer": {
+                    "type": "integer",
+                    "description": "Number of deliveries that were received from a route-container address.",
+                    "graph": true
+                },
+                "deliveriesEgressRouteContainer": {
+                    "type": "integer",
+                    "description": "Number of deliveries that were sent to a route-container address.",
                     "graph": true
                 },
                 "key": {
@@ -1304,6 +1548,10 @@
                 "lastTopoChange": {
                      "description": "Timestamp showing the most recent change to this node's neighborhood.",
                      "type": "integer"
+                },
+                "index": {
+                    "description": "Index number used in statistics histograms for this router node.  This index is specific to this router.",
+                    "type": "integer"
                 }
 
             }
@@ -1431,28 +1679,35 @@
                 "maxConnections": {
                     "type": "integer",
                     "default": 65535,
-                    "description": "Global maximum number of concurrent client connections allowed. This limit is always enforced even if no other policy settings have been defined.",
+                    "description": "The maximum number of concurrent client connections allowed for this router. This limit is always enforced, even if no other policy settings have been defined. The limit is applied to all incoming connections regardless of remote host, authenticated user, or targeted vhost.",
                     "required": false,
                     "create": true
                 },
                 "enableVhostPolicy": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Enable vhost policy user groups, connection denial, and resource limit enforcement",
+                    "description": "Enables the router to enforce the connection denials and resource limits defined in the configured vhost policies.",
+                    "required": false,
+                    "create": true
+                },
+                "enableVhostNamePatterns": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable vhost name patterns. When false vhost hostnames are treated as literal strings. When true vhost hostnames are treated as match patterns.",
                     "required": false,
                     "create": true
                 },
                 "policyDir": {
                     "type": "path",
                     "default": "",
-                    "description": "Absolute path to a directory that holds vhost definition .json files. All vhost definitions in all .json files in this directory are processed.",
+                    "description": "The absolute path to a directory that holds vhost policy definition files in JSON format (*.json). The router processes all of the vhost policies in each JSON file that is in this directory.",
                     "required": false,
                     "create": true
                 },
                 "defaultVhost": {
                     "type": "string",
                     "default": "$default",
-                    "description": "Vhost rule set name to use for connections with a vhost that is otherwise not defined. Default vhost processing may be disabled either by erasing the definition of defaultVhost or by not defining a vhost object named '$default'.",
+                    "description": "The name of the default vhost policy. This policy rule set is applied to a connection for which a vhost policy has not otherwise been configured. Processing for the default vhost is enabled by default and set to select vhost '$default'. To disable default vhost processing set defaultVhost to blank or do not define a vhost named '$default'.",
                     "required": false,
                     "create": true
                 },
@@ -1467,16 +1722,17 @@
             "extends": "configurationEntity",
             "operations": ["CREATE", "UPDATE", "DELETE"],
             "attributes": {
-                "id": {
+                "hostname": {
                     "type": "string",
-                    "description": "The vhost name.",
+                    "description": "The hostname of the vhost. This vhost policy will be applied to any client connection that is directed to this hostname.",
+                    "deprecationName": "id",
                     "required": true,
                     "create": true
                 },
                 "maxConnections": {
                     "type": "integer",
                     "default": 65535,
-                    "description": "Maximum number of concurrent client connections allowed.",
+                    "description": "The global maximum number of concurrent client connections allowed for this vhost.",
                     "required": false,
                     "create": true,
                     "update": true
@@ -1484,7 +1740,7 @@
                 "maxConnectionsPerUser": {
                     "type": "integer",
                     "default": 65535,
-                    "description": "Maximum number of concurrent client connections allowed for any single user.",
+                    "description": "The maximum number of concurrent client connections allowed for any user.",
                     "required": false,
                     "create": true,
                     "update": true
@@ -1492,14 +1748,14 @@
                 "maxConnectionsPerHost": {
                     "type": "integer",
                     "default": 65535,
-                    "description": "Maximum number of concurrent client connections allowed for any remote host.",
+                    "description": "The maximum number of concurrent client connections allowed for any remote host (the host from which the client is connecting).",
                     "required": false,
                     "create": true,
                     "update": true
                 },
                 "allowUnknownUser": {
                     "type": "boolean",
-                    "description": "Unrestricted users, those who are not members of a defined user group, are allowed to connect to this application. Unrestricted users are assigned to the 'default' user group and receive 'default' settings.",
+                    "description": "Whether unknown users (users who are not members of a defined user group) are allowed to connect to the vhost. Unknown users are assigned to the '$default' user group and receive '$default' settings.",
                     "default": false,
                     "required": false,
                     "create": true,
@@ -1507,19 +1763,120 @@
                 },
                 "groups": {
                     "type": "map",
-                    "description": "A map where each key is a user group name and the value is a map of the corresponding settings for that group.",
+                    "description": "A map where each key is a vhost name and each value is a map of the settings for users of that vhost.",
                     "required": false,
                     "create": true,
                     "update": true
                 }
             }
         },
-        
+
+        "vhostUserGroupSettings": {
+            "description": "Policy settings for users connecting to a vhost. Configuration files including this section must use .json format.",
+            "extends": "configurationEntity",
+            "attributes": {
+                "users": {
+                    "type": "string",
+                    "description": "A list of authenticated users for this user group. Use commas to separate multiple users. A user may belong to only one vhost user group.",
+                    "required": true
+                },
+                "remoteHosts": {
+                    "type": "string",
+                    "description": "A list of remote hosts from which the users may connect. A host can be a hostname, IP address, or IP address range. Use commas to separate multiple hosts. To allow access from all remote hosts, specify a wildcard '*'. To deny access from all remote hosts, leave this attribute blank.",
+                    "required": true
+                },
+                "maxFrameSize": {
+                    "type": "integer",
+                    "description": "The largest frame, in bytes, that may be sent on this connection. Non-zero policy values overwrite values specified for a listener object (AMQP Open, max-frame-size).",
+                    "default": 16384,
+                    "required": false,
+                    "create": true
+                },
+                "maxSessionWindow": {
+                    "type": "integer",
+                    "description": "The incoming capacity for new AMQP sessions, measured in octets. Non-zero policy values overwrite values specified for a listener object (AMQP Begin, incoming-window).",
+                    "default": 1638400,
+                    "required": false,
+                    "create": true
+                },
+                "maxSessions": {
+                    "type": "integer",
+                    "description": "The maximum number of sessions that may be created on this connection. Non-zero policy values overwrite values specified for a listener object (AMQP Open, channel-max).",
+                    "default": 32768,
+                    "required": false,
+                    "create": true
+                },
+                "maxSenders": {
+                    "type": "integer",
+                    "description": "The maximum number of sending links that may be created on this connection. A value of '0' disables all sender links.",
+                    "default": 2147483647,
+                    "required": false,
+                    "create": true
+                },
+                "maxReceivers": {
+                    "type": "integer",
+                    "description": "The maximum number of receiving links that may be created on this connection. A value of '0' disables all receiver links.",
+                    "default": 2147483647,
+                    "required": false,
+                    "create": true
+                },
+                "allowDynamicSource": {
+                    "type": "boolean",
+                    "description": "Whether this connection is allowed to create dynamic receiving links (links to resources that do not exist on the peer). A value of 'true' means that users are able to automatically create resources on the peer system.",
+                    "default": false,
+                    "required": false,
+                    "create": true
+                },
+                "allowAnonymousSender": {
+                    "type": "boolean",
+                    "description": "Whether this connection is allowed to create sending links if the sender does not provide a target address. By prohibiting anonymous senders, the router only needs to verify once, when the link is created, that the sender is permitted to send messages to the target address. The router does not need to verify each message that is sent on the link. A value of 'true' means that users may send messages to any address. Allowing anonymous senders can also decrease performance: if the sender does not specify a target address, then the router must parse each message to determine how to route it.",
+                    "default": false,
+                    "required": false,
+                    "create": true
+                },
+                "allowUserIdProxy": {
+                    "type": "boolean",
+                    "description": "Whether this connection is allowed to send messages with a user ID that is different than the connection's authenticated user name.",
+                    "default": false,
+                    "required": false,
+                    "create": true
+                },
+                "sources": {
+                    "type": "string",
+                    "description": "A list of source addresses from which users in this group may receive messages. To specify multiple addresses, separate the addresses with either a comma or a space. If you do not specify any addresses, users in this group are not allowed to receive messages from any addresses. You can use the substitution token '${user}' to specify an address that contains a user's authenticated user name. You can use an asterisk ('*') wildcard to match one or more characters in an address. However, this wildcard is only recognized if it is the last character in the address name. You may specify attributes 'sources' or 'sourcePattern' but not both at the same time.",
+                    "required": false,
+                    "create": true
+                },
+                "targets": {
+                    "type": "string",
+                    "description": "A list of target addresses to which users in this group may send messages. To specify multiple addresses, separate the addresses with either a comma or a space. If you do not specify any addresses, users in this group are not allowed to send messages to any addresses. You can use the substitution token '${user}' to specify an address that contains a user's authenticated user name. You can use an asterisk ('*') wildcard to match one or more characters in an address. However, this wildcard is only recognized if it is the last character in the address name. You may specify attributes 'targets' or 'targetPattern' but not both at the same time.",
+                    "required": false,
+                    "create": true
+                },
+                "sourcePattern": {
+                    "type": "string",
+                    "description": "A wildcarded pattern for matching source addresses from which users in this group may receive messages. The pattern consists of one or more tokens separated by a forward slash '/'. A token can be one of the following: a * character, a # character, or a sequence of characters that do not include /, *, or #.  The * token matches any single token.  The # token matches zero or more tokens. * has higher precedence than #, and exact match has the highest precedence. To specify multiple addresses, separate the addresses with either a comma or a space. You can use the text string '${user}' in a token to specify an address that contains a user's authenticated user name. If you do not specify any addresses, users in this group are not allowed to receive messages from any addresses. You may specify attributes 'sources' or 'sourcePattern' but not both at the same time.",
+                    "create": true,
+                    "required": false
+                },
+                "targetPattern": {
+                    "type": "string",
+                    "description": "A wildcarded pattern for matching target addresses to which users in this group may send messages. The pattern consists of one or more tokens separated by a forward slash '/'. A token can be one of the following: a * character, a # character, or a sequence of characters that do not include /, *, or #.  The * token matches any single token.  The # token matches zero or more tokens. * has higher precedence than #, and exact match has the highest precedence. To specify multiple addresses, separate the addresses with either a comma or a space. You can use the text string '${user}' in a token to specify an address that contains a user's authenticated user name. If you do not specify any addresses, users in this group are not allowed to send messages to any addresses. You may specify attributes 'targets' or 'targetPattern' but not both at the same time.",
+                    "create": true,
+                    "required": false
+                }
+            }
+        },
+
         "vhostStats": {
             "description": "Virtual host connection and access statistics.",
             "extends": "operationalEntity",
             "attributes": {
                 "id": {
+                    "type": "string",
+                    "description": "The vhost name. DEPRECATED - use 'hostname' instead."
+                },
+                "hostname": {
                     "type": "string",
                     "description": "The vhost name."
                 },

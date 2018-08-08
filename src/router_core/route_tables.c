@@ -221,9 +221,9 @@ void qdr_route_table_setup_CT(qdr_core_t *core)
     core->addr_hash    = qd_hash(12, 32, 0);
     core->conn_id_hash = qd_hash(6, 4, 0);
     core->cost_epoch   = 1;
-    core->addr_parse_tree = qd_parse_tree_new();
-    core->link_route_tree[QD_INCOMING] = qd_parse_tree_new();
-    core->link_route_tree[QD_OUTGOING] = qd_parse_tree_new();
+    core->addr_parse_tree = qd_parse_tree_new(QD_PARSE_TREE_ADDRESS);
+    core->link_route_tree[QD_INCOMING] = qd_parse_tree_new(QD_PARSE_TREE_ADDRESS);
+    core->link_route_tree[QD_OUTGOING] = qd_parse_tree_new(QD_PARSE_TREE_ADDRESS);
 
     if (core->router_mode == QD_ROUTER_MODE_INTERIOR) {
         core->hello_addr      = qdr_add_local_address_CT(core, 'L', "qdhello",     QD_TREATMENT_MULTICAST_FLOOD);
@@ -231,6 +231,12 @@ void qdr_route_table_setup_CT(qdr_core_t *core)
         core->routerma_addr_L = qdr_add_local_address_CT(core, 'L', "qdrouter.ma", QD_TREATMENT_MULTICAST_ONCE);
         core->router_addr_T   = qdr_add_local_address_CT(core, 'T', "qdrouter",    QD_TREATMENT_MULTICAST_FLOOD);
         core->routerma_addr_T = qdr_add_local_address_CT(core, 'T', "qdrouter.ma", QD_TREATMENT_MULTICAST_ONCE);
+
+        core->hello_addr->router_control_only      = true;
+        core->router_addr_L->router_control_only   = true;
+        core->routerma_addr_L->router_control_only = true;
+        core->router_addr_T->router_control_only   = true;
+        core->routerma_addr_T->router_control_only = true;
 
         core->neighbor_free_mask = qd_bitmask(1);
 
@@ -576,6 +582,7 @@ static void qdr_map_destination_CT(qdr_core_t *core, qdr_action_t *action, bool 
         qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
         if (!addr) {
             addr = qdr_address_CT(core, qdr_treatment_for_address_hash_CT(core, iter));
+            if (!addr) break;
             qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
             DEQ_ITEM_INIT(addr);
             DEQ_INSERT_TAIL(core->addrs, addr);
@@ -668,16 +675,18 @@ static void qdr_subscribe_CT(qdr_core_t *core, qdr_action_t *action, bool discar
         qd_hash_retrieve(core->addr_hash, address->iterator, (void**) &addr);
         if (!addr) {
             addr = qdr_address_CT(core, action->args.io.treatment);
-            qd_hash_insert(core->addr_hash, address->iterator, addr, &addr->hash_handle);
-            DEQ_ITEM_INIT(addr);
-            DEQ_INSERT_TAIL(core->addrs, addr);
+            if (addr) {
+                qd_hash_insert(core->addr_hash, address->iterator, addr, &addr->hash_handle);
+                DEQ_ITEM_INIT(addr);
+                DEQ_INSERT_TAIL(core->addrs, addr);
+            }
         }
-
-        sub->addr = addr;
-        DEQ_ITEM_INIT(sub);
-        DEQ_INSERT_TAIL(addr->subscriptions, sub);
-        qdr_addr_start_inlinks_CT(core, addr);
-
+        if (addr) {
+            sub->addr = addr;
+            DEQ_ITEM_INIT(sub);
+            DEQ_INSERT_TAIL(addr->subscriptions, sub);
+            qdr_addr_start_inlinks_CT(core, addr);
+        }
     } else
         free(sub);
 

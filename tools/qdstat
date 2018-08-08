@@ -19,6 +19,11 @@
 # under the License.
 #
 
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
 import os
 from optparse import OptionGroup
 import sys
@@ -32,6 +37,7 @@ from qpid_dispatch_internal.management.qdrouter import QdSchema
 from qpid_dispatch_internal.tools import Display, Header, Sorter, YN, Commas, TimeLong
 from qpid_dispatch_internal.tools.command import connection_options, main, OptionParser, opts_ssl_domain, opts_sasl, \
         opts_url
+from qpid_dispatch_internal.compat import UNICODE
 
 def parse_args(argv):
     """ Set global variables for options, return arguments """
@@ -88,7 +94,7 @@ class BusManager(Node):
         if attribute_names:
             unames = []
             for a in attribute_names:
-                unames.append(unicode(a))
+                unames.append(UNICODE(a))
             attribute_names = unames
         return super(BusManager, self).query(entity_type, attribute_names, count=limit).get_entities()
 
@@ -234,14 +240,32 @@ class BusManager(Node):
         router = objects[0]
         rows.append(('Version',       router.version))
         rows.append(('Mode',          router.mode))
-        rows.append(('Area',          router.area))
         rows.append(('Router Id',     router.id))
+        rows.append(('Area',          router.area))
         rows.append(('Link Routes',   router.linkRouteCount))
         rows.append(('Auto Links',    router.autoLinkCount))
         rows.append(('Links',         router.linkCount))
         rows.append(('Nodes',         router.nodeCount))
         rows.append(('Addresses',     router.addrCount))
         rows.append(('Connections',   router.connectionCount))
+
+        # Overall delivery related counts.
+        # These overall statistics were introduced in 1.1 version.
+        # Wrap these in a try except so that newer versions of qdstat works with older version of router
+        try:
+            rows.append(('Presettled Count', router.presettledDeliveries))
+            rows.append(('Dropped Presettled Count', router.droppedPresettledDeliveries))
+            rows.append(('Accepted Count', router.acceptedDeliveries))
+            rows.append(('Rejected Count', router.rejectedDeliveries))
+            rows.append(('Released Count', router.releasedDeliveries))
+            rows.append(('Modified Count', router.modifiedDeliveries))
+            rows.append(('Ingress Count', router.deliveriesIngress))
+            rows.append(('Egress Count', router.deliveriesEgress))
+            rows.append(('Transit Count', router.deliveriesTransit))
+            rows.append(('Deliveries from Route Container', router.deliveriesIngressRouteContainer))
+            rows.append(('Deliveries to Route Container', router.deliveriesEgressRouteContainer))
+        except:
+            pass
 
         title = "Router Statistics"
         dispRows = rows
@@ -263,6 +287,26 @@ class BusManager(Node):
         heads.append(Header("unsett"))
         heads.append(Header("del"))
         heads.append(Header("presett"))
+
+        rows = []
+        cols = ('linkType', 'linkDir', 'connectionId', 'identity', 'peer', 'owningAddr',
+                'capacity', 'undeliveredCount', 'unsettledCount', 'deliveryCount',
+                'presettledCount', 'droppedPresettledCount', 'acceptedCount', 'rejectedCount', 'releasedCount',
+                'modifiedCount', 'adminStatus', 'operStatus', 'linkName')
+
+        objects = self.query('org.apache.qpid.dispatch.router.link', cols, limit=self.opts.limit)
+
+        has_dropped_presettled_count = False
+
+        if objects:
+            first_row = objects[0]
+            if first_row:
+                if hasattr(first_row, 'droppedPresettledCount'):
+                    has_dropped_presettled_count = True
+
+        if has_dropped_presettled_count:
+            heads.append(Header("psdrop"))
+
         heads.append(Header("acc"))
         heads.append(Header("rej"))
         heads.append(Header("rel"))
@@ -271,13 +315,6 @@ class BusManager(Node):
         heads.append(Header("oper"))
         if self.opts.verbose:
             heads.append(Header("name"))
-        rows = []
-        cols = ('linkType', 'linkDir', 'connectionId', 'identity', 'peer', 'owningAddr',
-                'capacity', 'undeliveredCount', 'unsettledCount', 'deliveryCount',
-                'presettledCount', 'acceptedCount', 'rejectedCount', 'releasedCount',
-                'modifiedCount', 'adminStatus', 'operStatus', 'linkName')
-
-        objects = self.query('org.apache.qpid.dispatch.router.link', cols, limit=self.opts.limit)
 
         for link in objects:
             row = []
@@ -294,6 +331,8 @@ class BusManager(Node):
             row.append(link.unsettledCount)
             row.append(link.deliveryCount)
             row.append(link.presettledCount)
+            if has_dropped_presettled_count:
+                row.append(link.droppedPresettledCount)
             row.append(link.acceptedCount)
             row.append(link.rejectedCount)
             row.append(link.releasedCount)
@@ -353,7 +392,7 @@ class BusManager(Node):
             dispRows = sort.getSorted()
             disp.formattedTable(title, heads, dispRows)
         else:
-            print "Router is Standalone - No Router List"
+            print("Router is Standalone - No Router List")
 
     def displayAddresses(self):
         disp = Display(prefix="  ")
@@ -410,14 +449,14 @@ class BusManager(Node):
         heads.append(Header("status"))
         heads.append(Header("lastErr"))
         rows = []
-        cols = ('addr', 'dir', 'phase', 'externalAddr', 'linkRef', 'operStatus', 'lastError')
+        cols = ('addr', 'direction', 'phase', 'externalAddr', 'linkRef', 'operStatus', 'lastError')
 
         objects = self.query('org.apache.qpid.dispatch.router.config.autoLink', cols, limit=self.opts.limit)
 
         for al in objects:
             row = []
             row.append(al.addr)
-            row.append(al.dir)
+            row.append(al.direction)
             row.append(al.phase)
             row.append(al.externalAddr)
             row.append(al.linkRef)
@@ -437,18 +476,29 @@ class BusManager(Node):
         heads.append(Header("distrib"))
         heads.append(Header("status"))
         rows = []
-        cols = ('prefix', 'dir', 'distribution', 'operStatus', 'pattern')
+        cols = ('prefix', 'direction', 'distribution', 'operStatus', 'pattern', 'addExternalPrefix', 'delExternalPrefix')
 
         link_routes = self.query('org.apache.qpid.dispatch.router.config.linkRoute', cols, limit=self.opts.limit)
 
+        have_add_del_prefix = False
         for link_route in link_routes:
             row = []
             row.append(link_route.prefix if link_route.prefix else link_route.pattern)
-            row.append(link_route.dir)
+            row.append(link_route.direction)
             row.append(link_route.distribution)
             row.append(link_route.operStatus)
+            try:
+                if link_route.addExternalPrefix or link_route.delExternalPrefix:
+                    row.append(link_route.addExternalPrefix)
+                    row.append(link_route.delExternalPrefix)
+                    have_add_del_prefix = True
+            except KeyError:
+                pass # added post 1.1.0
             rows.append(row)
         title = "Link Routes"
+        if have_add_del_prefix:
+            heads.append(Header("add-ext-prefix"))
+            heads.append(Header("del-ext-prefix"))
         sorter = Sorter(heads, rows, 'address', 0, True)
         dispRows = sorter.getSorted()
         disp.formattedTable(title, heads, dispRows)
@@ -484,7 +534,7 @@ class BusManager(Node):
             rows.append(row)
         if not rows:
             # router built w/o memory pools:
-            print "No memory statistics available"
+            print("No memory statistics available")
             return
         title = "Types"
         sorter = Sorter(heads, rows, 'type', 0, True)
@@ -494,7 +544,7 @@ class BusManager(Node):
     def displayLog(self):
         log = self.get_log(limit=self.opts.limit)
         for line in log:
-            print "%s %s (%s) %s" % (ctime(line[5]), line[0], line[1], line[2])
+            print("%s %s (%s) %s" % (ctime(line[5]), line[0], line[1], line[2]))
 
     def displayMain(self, identitys, main):
         if   main == 'l': self.displayRouterLinks()

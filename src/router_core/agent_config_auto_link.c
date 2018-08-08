@@ -27,20 +27,22 @@
 #define QDR_CONFIG_AUTO_LINK_IDENTITY      1
 #define QDR_CONFIG_AUTO_LINK_TYPE          2
 #define QDR_CONFIG_AUTO_LINK_ADDR          3
-#define QDR_CONFIG_AUTO_LINK_DIR           4
-#define QDR_CONFIG_AUTO_LINK_PHASE         5
-#define QDR_CONFIG_AUTO_LINK_CONNECTION    6
-#define QDR_CONFIG_AUTO_LINK_CONTAINER_ID  7
-#define QDR_CONFIG_AUTO_LINK_EXT_ADDR      8
-#define QDR_CONFIG_AUTO_LINK_LINK_REF      9
-#define QDR_CONFIG_AUTO_LINK_OPER_STATUS   10
-#define QDR_CONFIG_AUTO_LINK_LAST_ERROR    11
+#define QDR_CONFIG_AUTO_LINK_DIRECTION     4
+#define QDR_CONFIG_AUTO_LINK_DIR           5
+#define QDR_CONFIG_AUTO_LINK_PHASE         6
+#define QDR_CONFIG_AUTO_LINK_CONNECTION    7
+#define QDR_CONFIG_AUTO_LINK_CONTAINER_ID  8
+#define QDR_CONFIG_AUTO_LINK_EXT_ADDR      9
+#define QDR_CONFIG_AUTO_LINK_LINK_REF      10
+#define QDR_CONFIG_AUTO_LINK_OPER_STATUS   11
+#define QDR_CONFIG_AUTO_LINK_LAST_ERROR    12
 
 const char *qdr_config_auto_link_columns[] =
     {"name",
      "identity",
      "type",
      "addr",
+     "direction",
      "dir",
      "phase",
      "connection",
@@ -88,6 +90,7 @@ static void qdr_config_auto_link_insert_column_CT(qdr_auto_link_t *al, int col, 
         break;
 
     case QDR_CONFIG_AUTO_LINK_DIR:
+    case QDR_CONFIG_AUTO_LINK_DIRECTION:
         text = al->dir == QD_INCOMING ? "in" : "out";
         qd_compose_insert_string(body, text);
         break;
@@ -261,9 +264,9 @@ static const char *qdra_auto_link_direction_CT(qd_parsed_field_t *field, qd_dire
             *dir = QD_OUTGOING;
             return 0;
         }
-        return "Invalid value for 'dir'";
+        return "Invalid value for 'direction'";
     }
-    return "Missing value for 'dir'";
+    return "Missing value for 'direction'";
 }
 
 
@@ -368,7 +371,12 @@ void qdra_config_auto_link_create_CT(qdr_core_t        *core,
         // Extract the fields from the request
         //
         qd_parsed_field_t *addr_field       = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_ADDR]);
-        qd_parsed_field_t *dir_field        = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_DIR]);
+        qd_parsed_field_t *dir_field        = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_DIRECTION]);
+        if (! dir_field) {
+            dir_field        = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_DIR]);
+            if (dir_field)
+                qd_log(core->agent_log, QD_LOG_WARNING, "The 'dir' attribute of autoLink has been deprecated. Use 'direction' instead");
+        }
         qd_parsed_field_t *phase_field      = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_PHASE]);
         qd_parsed_field_t *connection_field = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_CONNECTION]);
         qd_parsed_field_t *container_field  = qd_parse_value_by_key(in_body, qdr_config_auto_link_columns[QDR_CONFIG_AUTO_LINK_CONTAINER_ID]);
@@ -383,11 +391,11 @@ void qdra_config_auto_link_create_CT(qdr_core_t        *core,
 
 
         //
-        // Addr and dir fields are mandatory.  Fail if they're not both here.
+        // Addr and direction fields are mandatory.  Fail if they're not both here.
         //
         if (!addr_field || !dir_field) {
             query->status = QD_AMQP_BAD_REQUEST;
-            query->status.description = "addr and dir fields are mandatory";
+            query->status.description = "addr and direction fields are mandatory";
             qd_log(core->agent_log, QD_LOG_ERROR, "Error performing CREATE of %s: %s", CONFIG_AUTOLINK_TYPE, query->status.description);
             break;
         }
@@ -405,7 +413,7 @@ void qdra_config_auto_link_create_CT(qdr_core_t        *core,
         // Use the specified phase if present.  Otherwise default based on the direction:
         // Phase 0 for outgoing links and phase 1 for incoming links.
         //
-        int phase = phase_field ? qd_parse_as_int(phase_field) : (dir == QD_OUTGOING ? 0 : 1);
+        long phase = phase_field ? qd_parse_as_long(phase_field) : (dir == QD_OUTGOING ? 0 : 1);
 
         //
         // Validate the phase

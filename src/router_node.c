@@ -27,12 +27,12 @@
 #include "entity_cache.h"
 #include "router_private.h"
 #include <qpid/dispatch/router_core.h>
+#include <qpid/dispatch/proton_utils.h>
 #include <proton/sasl.h>
 
 const char *QD_ROUTER_NODE_TYPE = "router.node";
 const char *QD_ROUTER_ADDRESS_TYPE = "router.address";
 const char *QD_ROUTER_LINK_TYPE = "router.link";
-const char *CORE_AGENT_ADDRESS = "$management";
 
 static char *router_role    = "inter-router";
 static char *container_role = "route-container";
@@ -172,10 +172,10 @@ static int AMQP_writable_conn_handler(void *type_context, qd_connection_t *conn,
 static qd_iterator_t *router_annotate_message(qd_router_t   *router,
                                               qd_message_t  *msg,
                                               qd_bitmask_t **link_exclusions,
-                                              uint32_t      *distance)
+                                              uint32_t      *distance,
+                                              int           *ingress_index)
 {
     qd_iterator_t *ingress_iter = 0;
-
 
     qd_parsed_field_t *trace   = qd_message_get_trace(msg);
     qd_parsed_field_t *ingress = qd_message_get_ingress(msg);
@@ -205,7 +205,7 @@ static qd_iterator_t *router_annotate_message(qd_router_t   *router,
             // contain a one-bit for each link that leads to a neighbor router that
             // the message has already passed through.
             //
-            *link_exclusions = qd_tracemask_create(router->tracemask, trace);
+            *link_exclusions = qd_tracemask_create(router->tracemask, trace, ingress_index);
 
             //
             // Append this router's ID to the trace.
@@ -288,11 +288,6 @@ static void AMQP_rx_handler(void* context, qd_link_t *link)
     bool receive_complete = qd_message_receive_complete(msg);
 
     if (receive_complete) {
-        //
-        // The entire message has been received and we are ready to consume the delivery by calling pn_link_advance().
-        //
-        pn_link_advance(pn_link);
-
         if (!qd_message_aborted(msg)) {
             // Since the entire message has been received, we can print out its contents to the log if necessary.
             if (cf->log_message) {
@@ -312,11 +307,30 @@ static void AMQP_rx_handler(void* context, qd_link_t *link)
                        pn_link_name(pn_link));
         }
 
+        //
+        // The entire message has been received and we are ready to consume the delivery by calling pn_link_advance().
+        //
+        pn_link_advance(pn_link);
+
+        //
+        // The entire message has been received but this message needs to be discarded
+        //
+        if (qd_message_is_discard(msg)) {
+            if (qdr_delivery_disposition(delivery) != 0)
+                pn_delivery_update(pnd, qdr_delivery_disposition(delivery));
+            pn_delivery_settle(pnd);
+            qdr_delivery_decref(router->router_core, delivery, "release protection of return from delivery discard");
+        }
+
         // Link stalling may have ignored some delivery events.
         // If there's another delivery pending then reschedule this.
         pn_delivery_t *npnd = pn_link_current(pn_link);
         if (npnd) {
             qd_connection_invoke_deferred(conn, deferred_AMQP_rx_handler, link);
+        }
+
+        if (qd_message_is_discard(msg)) {
+            return;
         }
     }
 
@@ -339,14 +353,21 @@ static void AMQP_rx_handler(void* context, qd_link_t *link)
         // A delivery object was already available via pn_delivery_get_context. This means a qdr_delivery was already created. Use it to continue delivery.
         //
         if (delivery) {
-            qdr_deliver_continue(delivery);
 
             //
-            // Settle the proton delivery only if all the data has been received.
+            // Call continue only if the discard flag on the message is not set
+            // We should not continue processing the message after it has been discarded
             //
-            if (pn_delivery_settled(pnd) && receive_complete) {
-                qdr_node_disconnect_deliveries(router->router_core, link, delivery, pnd);
-                pn_delivery_settle(pnd);
+            if (!qd_message_is_discard(msg)) {
+                qdr_deliver_continue(delivery);
+
+                //
+                // Settle the proton delivery only if all the data has been received.
+                //
+                if (pn_delivery_settled(pnd) && receive_complete) {
+                    qdr_node_disconnect_deliveries(router->router_core, link, delivery, pnd);
+                    pn_delivery_settle(pnd);
+                }
             }
         }
         else {
@@ -418,11 +439,17 @@ static void AMQP_rx_handler(void* context, qd_link_t *link)
     }
 
     if (delivery) {
-        qdr_deliver_continue(delivery);
-        if (receive_complete) {
-            if (pn_delivery_settled(pnd)) {
-                qdr_node_disconnect_deliveries(router->router_core, link, delivery, pnd);
-                pn_delivery_settle(pnd);
+        //
+        // Call continue only if the discard flag on the message is not set
+        // We should not continue processing the message after it has been discarded
+        //
+        if (!qd_message_is_discard(msg)) {
+            qdr_deliver_continue(delivery);
+            if (receive_complete) {
+                if (pn_delivery_settled(pnd)) {
+                    qdr_node_disconnect_deliveries(router->router_core, link, delivery, pnd);
+                    pn_delivery_settle(pnd);
+                }
             }
         }
 
@@ -454,8 +481,9 @@ static void AMQP_rx_handler(void* context, qd_link_t *link)
     qd_message_message_annotations(msg);
     qd_bitmask_t *link_exclusions;
     uint32_t      distance;
+    int           ingress_index = 0; // Default to _this_ router
 
-    qd_iterator_t *ingress_iter = router_annotate_message(router, msg, &link_exclusions, &distance);
+    qd_iterator_t *ingress_iter = router_annotate_message(router, msg, &link_exclusions, &distance, &ingress_index);
 
     //
     // If this delivery has traveled further than the known radius of the network topology (plus 1),
@@ -509,7 +537,7 @@ static void AMQP_rx_handler(void* context, qd_link_t *link)
             if (phase > 0)
                 qd_iterator_annotate_phase(addr_iter, '0' + (char) phase);
             delivery = qdr_link_deliver_to(rlink, msg, ingress_iter, addr_iter, pn_delivery_settled(pnd),
-                                           link_exclusions);
+                                           link_exclusions, ingress_index);
         }
     } else {
         //
@@ -533,7 +561,7 @@ static void AMQP_rx_handler(void* context, qd_link_t *link)
             if (phase != 0)
                 qd_message_set_phase_annotation(msg, phase);
         }
-        delivery = qdr_link_deliver(rlink, msg, ingress_iter, pn_delivery_settled(pnd), link_exclusions);
+        delivery = qdr_link_deliver(rlink, msg, ingress_iter, pn_delivery_settled(pnd), link_exclusions, ingress_index);
     }
 
     if (delivery) {
@@ -828,32 +856,52 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
 
     bool found_failover = false;
 
+
     if (conn->connector && DEQ_SIZE(conn->connector->conn_info_list) > 1) {
-        // Here we are simply removing all other failover information except the one we used to make a successful connection.
+        // Here we are simply removing all other failover information except the original connection information and the one we used to make a successful connection.
         int i = 1;
         qd_failover_item_t *item = DEQ_HEAD(conn->connector->conn_info_list);
         qd_failover_item_t *next_item = 0;
-        while(item) {
-            if (i != conn->connector->conn_index) {
-                next_item = DEQ_NEXT(item);
-                free(item->scheme);
-                free(item->host);
-                free(item->port);
-                free(item->hostname);
-                free(item->host_port);
-                DEQ_REMOVE(conn->connector->conn_info_list, item);
 
-                free(item);
-                item = next_item;
+        bool match_found = false;
+        int dec_conn_index=0;
+
+        while(item) {
+
+            //The first item on this list is always the original connector, so we want to keep that item in place
+            // We have to delete items in the list that were left over from the previous failover list from the previous connection
+            // because the new connection might have its own failover list.
+            if (i != conn->connector->conn_index) {
+                if (item != DEQ_HEAD(conn->connector->conn_info_list)) {
+                    next_item = DEQ_NEXT(item);
+                    free(item->scheme);
+                    free(item->host);
+                    free(item->port);
+                    free(item->hostname);
+                    free(item->host_port);
+
+                    DEQ_REMOVE(conn->connector->conn_info_list, item);
+
+                    free(item);
+                    item = next_item;
+
+                    // We are removing an item from the list before the conn_index match was found. We need to
+                    // decrement the conn_index
+                    if (!match_found)
+                        dec_conn_index += 1;
+                }
+                else {
+                    item = DEQ_NEXT(item);
+                }
             }
             else {
+                match_found = true;
                 item = DEQ_NEXT(item);
             }
             i += 1;
         }
-        conn->connector->conn_index = 0;
 
-        // By the end of this loop we should be left with only one element in the conn_info_list.
+        conn->connector->conn_index -= dec_conn_index;
     }
 
     if (props) {
@@ -911,9 +959,7 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
                                         else if (sym.size == strlen(QD_CONNECTION_PROPERTY_FAILOVER_PORT_KEY) &&
                                                                             strcmp(sym.start, QD_CONNECTION_PROPERTY_FAILOVER_PORT_KEY) == 0) {
                                             pn_data_next(props);
-                                            if (pn_data_type(props) == PN_STRING) {
-                                                item->port = strdup(pn_data_get_string(props).start);
-                                            }
+                                            item->port = qdpn_data_as_string(props);
 
                                         }
                                         else if (sym.size == strlen(QD_CONNECTION_PROPERTY_FAILOVER_SCHEME_KEY) &&
@@ -1199,6 +1245,20 @@ static void CORE_link_detach(void *context, qdr_link_t *link, qdr_error_t *error
     if (error) {
         pn_condition_t *cond = pn_link_condition(pn_link);
         qdr_error_copy(error, cond);
+    }
+
+    //
+    // If the link is only half open, then this DETACH constitutes the rejection of
+    // an incoming ATTACH.  We must nullify the source and target in order to be
+    // compliant with the AMQP specification.  This is because Proton will generate
+    // the missing ATTACH before the DETACH and will include spurious terminus data
+    // if we don't nullify it here.
+    //
+    if (pn_link_state(pn_link) & PN_LOCAL_UNINIT) {
+        if (pn_link_is_receiver(pn_link))
+            pn_terminus_set_type(pn_link_target(pn_link), PN_UNSPECIFIED);
+        else
+            pn_terminus_set_type(pn_link_source(pn_link), PN_UNSPECIFIED);
     }
 
     if (close)

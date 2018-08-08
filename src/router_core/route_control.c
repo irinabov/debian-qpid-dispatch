@@ -257,7 +257,7 @@ static void qdr_auto_link_deactivate_CT(qdr_core_t *core, qdr_auto_link_t *al, q
     qdr_route_log_CT(core, "Auto Link Deactivated", al->name, al->identity, conn);
 
     if (al->link) {
-        qdr_link_outbound_detach_CT(core, al->link, 0, QDR_CONDITION_ROUTED_LINK_LOST, true);
+        qdr_link_outbound_detach_CT(core, al->link, 0, QDR_CONDITION_NONE, true);
         al->link->auto_link = 0;
         al->link            = 0;
     }
@@ -270,6 +270,8 @@ qdr_link_route_t *qdr_route_add_link_route_CT(qdr_core_t             *core,
                                               qd_iterator_t          *name,
                                               qd_parsed_field_t      *prefix_field,
                                               qd_parsed_field_t      *pattern_field,
+                                              qd_parsed_field_t      *add_prefix_field,
+                                              qd_parsed_field_t      *del_prefix_field,
                                               qd_parsed_field_t      *container_field,
                                               qd_parsed_field_t      *connection_field,
                                               qd_address_treatment_t  treatment,
@@ -284,12 +286,13 @@ qdr_link_route_t *qdr_route_add_link_route_CT(qdr_core_t             *core,
 
     // forward compatibility hack: convert the old style prefix addresses into
     // a proper pattern addresses by appending ".#"
+    // note: see parse_tree.c for acceptable separator and wildcard characters
     if (is_prefix) {
         char suffix = pattern[strlen(pattern) - 1];
         if (suffix == '#') {
             // already converted - do nothing
         } else {
-            if (!strchr(QD_PARSE_TREE_TOKEN_SEP, suffix))
+            if (!strchr("./", suffix))
                 strcat(pattern, ".");  // use . for legacy
             strcat(pattern, "#");
         }
@@ -307,6 +310,18 @@ qdr_link_route_t *qdr_route_add_link_route_CT(qdr_core_t             *core,
     lr->is_prefix = is_prefix;
     lr->pattern   = pattern;
 
+    if (!!add_prefix_field) {
+        qd_iterator_t *ap_iter = qd_parse_raw(add_prefix_field);
+        int ap_len = qd_iterator_length(ap_iter);
+        lr->add_prefix = malloc(ap_len + 1);
+        qd_iterator_strncpy(ap_iter, lr->add_prefix, ap_len + 1);
+    }
+    if (!!del_prefix_field) {
+        qd_iterator_t *ap_iter = qd_parse_raw(del_prefix_field);
+        int ap_len = qd_iterator_length(ap_iter);
+        lr->del_prefix = malloc(ap_len + 1);
+        qd_iterator_strncpy(ap_iter, lr->del_prefix, ap_len + 1);
+    }
     //
     // Add the address to the routing hash table and map it as a pattern in the
     // wildcard pattern parse tree
@@ -317,6 +332,15 @@ qdr_link_route_t *qdr_route_add_link_route_CT(qdr_core_t             *core,
         qd_hash_retrieve(core->addr_hash, a_iter, (void*) &lr->addr);
         if (!lr->addr) {
             lr->addr = qdr_address_CT(core, treatment);
+            if (lr->add_prefix) {
+                lr->addr->add_prefix = (char*) malloc(strlen(lr->add_prefix) + 1);
+                strcpy(lr->addr->add_prefix, lr->add_prefix);
+            }
+            if (lr->del_prefix) {
+                lr->addr->del_prefix = (char*) malloc(strlen(lr->del_prefix) + 1);
+                strcpy(lr->addr->del_prefix, lr->del_prefix);
+            }
+            //treatment will not be undefined for link route so above will not return null
             DEQ_INSERT_TAIL(core->addrs, lr->addr);
             qd_hash_insert(core->addr_hash, a_iter, lr->addr, &lr->addr->hash_handle);
             qdr_link_route_map_pattern_CT(core, a_iter, lr->addr);
@@ -416,7 +440,12 @@ qdr_auto_link_t *qdr_route_add_auto_link_CT(qdr_core_t          *core,
 
     qd_hash_retrieve(core->addr_hash, iter, (void*) &al->addr);
     if (!al->addr) {
-        al->addr = qdr_address_CT(core, qdr_treatment_for_address_CT(core, 0, iter, 0, 0));
+        qd_address_treatment_t treatment = qdr_treatment_for_address_CT(core, 0, iter, 0, 0);
+        if (treatment == QD_TREATMENT_UNAVAILABLE) {
+            //if associated address is not defined, assume balanced
+            treatment = QD_TREATMENT_ANYCAST_BALANCED;
+        }
+        al->addr = qdr_address_CT(core, treatment);
         DEQ_INSERT_TAIL(core->addrs, al->addr);
         qd_hash_insert(core->addr_hash, iter, al->addr, &al->addr->hash_handle);
     }

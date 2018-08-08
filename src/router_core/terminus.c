@@ -19,6 +19,7 @@
 
 #include "router_core_private.h"
 #include <strings.h>
+#include <stdio.h>
 
 struct qdr_terminus_t {
     qdr_field_t            *address;
@@ -158,6 +159,10 @@ bool qdr_terminus_is_dynamic(qdr_terminus_t *term)
     return term->dynamic;
 }
 
+bool qdr_terminus_survives_disconnect(qdr_terminus_t *term)
+{
+    return term->timeout > 0 || term->expiry_policy == PN_EXPIRE_NEVER;
+}
 
 void qdr_terminus_set_address(qdr_terminus_t *term, const char *addr)
 {
@@ -180,6 +185,34 @@ qd_iterator_t *qdr_terminus_get_address(qdr_terminus_t *term)
         return 0;
 
     return term->address->iterator;
+}
+
+void qdr_terminus_insert_address_prefix(qdr_terminus_t *term, const char *prefix)
+{
+    qd_iterator_t *orig = qdr_terminus_get_address(term);
+    char *rewrite_addr = 0;
+
+    size_t prefix_len = strlen(prefix);
+    size_t orig_len = qd_iterator_length(orig);
+    rewrite_addr = malloc(prefix_len + orig_len + 1);
+    strcpy(rewrite_addr, prefix);
+    qd_iterator_strncpy(orig, rewrite_addr+prefix_len, orig_len + 1);
+
+    qdr_terminus_set_address(term, rewrite_addr);
+    free(rewrite_addr);
+}
+
+void qdr_terminus_strip_address_prefix(qdr_terminus_t *term, const char *prefix)
+{
+    qd_iterator_t *orig = qdr_terminus_get_address(term);
+    size_t prefix_len = strlen(prefix);
+    size_t orig_len = qd_iterator_length(orig);
+    if (orig_len > prefix_len && qd_iterator_prefix(orig, prefix)) {
+        char *rewrite_addr = malloc(orig_len + 1);
+        qd_iterator_strncpy(orig, rewrite_addr, orig_len + 1);
+        qdr_terminus_set_address(term, rewrite_addr + prefix_len);
+        free(rewrite_addr);
+    }
 }
 
 

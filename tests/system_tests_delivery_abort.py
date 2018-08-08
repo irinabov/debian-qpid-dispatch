@@ -17,12 +17,17 @@
 # under the License.
 #
 
-import unittest, os, json
-from subprocess import PIPE, STDOUT
-from proton import Message, PENDING, ACCEPTED, REJECTED, RELEASED, SSLDomain, SSLUnavailable, Timeout
-from system_test import TestCase, Qdrouterd, main_module, DIR, TIMEOUT, Process
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+import unittest2 as unittest
+from proton import Message, Timeout
+from system_test import TestCase, Qdrouterd, main_module
 from proton.handlers import MessagingHandler
-from proton.reactor import Container, DynamicNodeProperties
+from proton.reactor import Container
+from qpid_dispatch_internal.compat import BINARY
 
 # PROTON-828:
 try:
@@ -46,8 +51,8 @@ class RouterTest(TestCase):
                 ('router', {'mode': 'interior', 'id': name, 'allowUnsettledMulticast': 'yes'}),
                 ('listener', {'port': cls.tester.get_port(), 'stripAnnotations': 'no'}),
                 ('listener', {'port': cls.tester.get_port(), 'stripAnnotations': 'no', 'role': 'route-container'}),
-                ('linkRoute', {'prefix': 'link', 'dir': 'in', 'containerId': 'LRC'}),
-                ('linkRoute', {'prefix': 'link', 'dir': 'out', 'containerId': 'LRC'}),
+                ('linkRoute', {'prefix': 'link', 'direction': 'in', 'containerId': 'LRC'}),
+                ('linkRoute', {'prefix': 'link', 'direction': 'out', 'containerId': 'LRC'}),
                 ('address', {'prefix': 'closest', 'distribution': 'closest'}),
                 ('address', {'prefix': 'spread', 'distribution': 'balanced'}),
                 ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
@@ -63,7 +68,7 @@ class RouterTest(TestCase):
         inter_router_port = cls.tester.get_port()
 
         router('A', ('listener', {'role': 'inter-router', 'port': inter_router_port}))
-        router('B', ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port, 'verifyHostName': 'no'}))
+        router('B', ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port, 'verifyHostname': 'no'}))
 
         cls.routers[0].wait_router_connected('B')
         cls.routers[1].wait_router_connected('A')
@@ -212,9 +217,9 @@ class MessageRouteTruncateTest(MessagingHandler):
         self.receiver      = event.container.create_receiver(self.receiver_conn, self.address)
 
     def stream(self):
-        self.sender1.stream(self.long_data)
+        self.sender1.stream(BINARY(self.long_data))
         self.sent_stream += len(self.long_data)
-        if self.sent_stream >= 100000:
+        if self.sent_stream >= 1000000:
             self.streaming = False
             self.sender1.close()
             self.send()
@@ -317,9 +322,9 @@ class LinkRouteTruncateTest(MessagingHandler):
         self.sender1 = event.container.create_sender(self.sender_conn, self.address, name="S1")
 
     def stream(self):
-        self.sender1.stream(self.long_data)
+        self.sender1.stream(BINARY(self.long_data))
         self.sent_stream += len(self.long_data)
-        if self.sent_stream >= 100000:
+        if self.sent_stream >= 1000000:
             self.streaming = False
             self.sender1.close()
 
@@ -435,7 +440,7 @@ class MessageRouteAbortTest(MessagingHandler):
         if op == 'F':
             body = "FINISH"
         else:
-            for i in range(size / 10):
+            for i in range(size // 10):
                 body += "0123456789"
         msg = Message(body=body)
         
@@ -523,9 +528,9 @@ class MulticastTruncateTest(MessagingHandler):
         self.receiver2      = event.container.create_receiver(self.receiver2_conn, self.address)
 
     def stream(self):
-        self.sender1.stream(self.long_data)
+        self.sender1.stream(BINARY(self.long_data))
         self.sent_stream += len(self.long_data)
-        if self.sent_stream >= 100000:
+        if self.sent_stream >= 1000000:
             self.streaming = False
             self.sender1.close()
             self.send()

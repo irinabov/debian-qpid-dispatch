@@ -17,12 +17,16 @@
 # under the License.
 #
 
-import unittest, os, json
-from subprocess import PIPE, STDOUT
-from proton import Message, PENDING, ACCEPTED, REJECTED, RELEASED, SSLDomain, SSLUnavailable, Timeout
-from system_test import TestCase, Qdrouterd, main_module, DIR, TIMEOUT, Process
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+import unittest2 as unittest
+from proton import Timeout
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT
 from proton.handlers import MessagingHandler
-from proton.reactor import Container, DynamicNodeProperties
+from proton.reactor import Container
 
 # PROTON-828:
 try:
@@ -32,8 +36,6 @@ except ImportError:
 
 
 class RouterTest(TestCase):
-
-    inter_router_port = None
 
     @classmethod
     def setUpClass(cls):
@@ -45,8 +47,9 @@ class RouterTest(TestCase):
             config = [
                 ('router', {'mode': 'standalone', 'id': name}),
                 ('listener', {'port': cls.tester.get_port()}),
+                # failoverList has been deprecated. We are using it here to test backward compatibility.
                 ('listener', {'port': cls.tester.get_port(), 'failoverList': 'other-host:25000'}),
-                ('listener', {'port': cls.tester.get_port(), 'failoverList': 'second-host:25000, amqps://third-host:5671'})
+                ('listener', {'port': cls.tester.get_port(), 'failoverUrls': 'second-host:25000, amqps://third-host:5671'})
             ]
 
             config = Qdrouterd.Config(config)
@@ -55,11 +58,8 @@ class RouterTest(TestCase):
 
         cls.routers = []
 
-        inter_router_port = cls.tester.get_port()
-
         router('A')
         cls.routers[0].wait_ready()
-
 
     def test_01_no_failover_list(self):
         test = FailoverTest(self.routers[0].addresses[0], 0)
@@ -129,7 +129,6 @@ class FailoverTest(MessagingHandler):
 
         self.timer.cancel()
         self.conn.close()
-
 
     def run(self):
         Container(self).run()

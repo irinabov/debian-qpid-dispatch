@@ -19,6 +19,7 @@
 
 #include "router_core_private.h"
 #include "route_control.h"
+#include "exchange_bindings.h"
 #include <stdio.h>
 #include <strings.h>
 
@@ -46,17 +47,13 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     core->router_mode = mode;
     core->router_area = area;
     core->router_id   = id;
+    DEQ_INIT(core->exchanges);
 
     //
     // Set up the logging sources for the router core
     //
     core->log       = qd_log_source("ROUTER_CORE");
     core->agent_log = qd_log_source("AGENT");
-
-    //
-    // Report on the configuration for unsettled multicasts
-    //
-    qd_log(core->log, QD_LOG_INFO, "Allow Unsettled Multicast: %s", qd->allow_unsettled_multicast ? "yes" : "no");
 
     //
     // Set up the threading support
@@ -134,6 +131,8 @@ void qdr_core_free(qdr_core_t *core)
     while ( (link_route = DEQ_HEAD(core->link_routes))) {
         qdr_core_delete_link_route(core, link_route);
     }
+
+    qdr_exchange_free_all(core);
 
     qdr_address_t *addr = 0;
     while ( (addr = DEQ_HEAD(core->addrs)) ) {
@@ -296,6 +295,8 @@ qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment
     addr->treatment = treatment;
     addr->forwarder = qdr_forwarder_CT(core, treatment);
     addr->rnodes    = qd_bitmask(0);
+    addr->add_prefix = 0;
+    addr->del_prefix = 0;
     return addr;
 }
 
@@ -335,6 +336,8 @@ bool qdr_is_addr_treatment_multicast(qdr_address_t *addr)
 void qdr_core_delete_link_route(qdr_core_t *core, qdr_link_route_t *lr)
 {
     DEQ_REMOVE(core->link_routes, lr);
+    free(lr->add_prefix);
+    free(lr->del_prefix);
     free(lr->name);
     free(lr->pattern);
     free_qdr_link_route_t(lr);

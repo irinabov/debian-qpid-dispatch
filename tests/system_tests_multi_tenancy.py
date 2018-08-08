@@ -17,12 +17,17 @@
 # under the License.
 #
 
-import unittest, os, json
-from subprocess import PIPE, STDOUT
-from proton import Message, PENDING, ACCEPTED, REJECTED, RELEASED, SSLDomain, SSLUnavailable, Timeout
-from system_test import TestCase, Qdrouterd, main_module, DIR, TIMEOUT, Process
+from __future__ import unicode_literals
+from __future__ import division
+from __future__ import absolute_import
+from __future__ import print_function
+
+import unittest2 as unittest
+from proton import Message, Timeout
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, DynamicNodeProperties
+from qpid_dispatch_internal.compat import UNICODE
 
 # PROTON-828:
 try:
@@ -47,10 +52,10 @@ class RouterTest(TestCase):
                 ('listener', {'port': cls.tester.get_port(), 'stripAnnotations': 'no'}),
                 ('listener', {'port': cls.tester.get_port(), 'stripAnnotations': 'no', 'multiTenant': 'yes'}),
                 ('listener', {'port': cls.tester.get_port(), 'stripAnnotations': 'no', 'role': 'route-container'}),
-                ('linkRoute', {'prefix': '0.0.0.0/link', 'dir': 'in', 'containerId': 'LRC'}),
-                ('linkRoute', {'prefix': '0.0.0.0/link', 'dir': 'out', 'containerId': 'LRC'}),
-                ('autoLink', {'addr': '0.0.0.0/queue.waypoint', 'containerId': 'ALC', 'dir': 'in'}),
-                ('autoLink', {'addr': '0.0.0.0/queue.waypoint', 'containerId': 'ALC', 'dir': 'out'}),
+                ('linkRoute', {'prefix': '0.0.0.0/link', 'direction': 'in', 'containerId': 'LRC'}),
+                ('linkRoute', {'prefix': '0.0.0.0/link', 'direction': 'out', 'containerId': 'LRC'}),
+                ('autoLink', {'addr': '0.0.0.0/queue.waypoint', 'containerId': 'ALC', 'direction': 'in'}),
+                ('autoLink', {'addr': '0.0.0.0/queue.waypoint', 'containerId': 'ALC', 'direction': 'out'}),
                 ('address', {'prefix': 'closest', 'distribution': 'closest'}),
                 ('address', {'prefix': 'spread', 'distribution': 'balanced'}),
                 ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
@@ -67,7 +72,7 @@ class RouterTest(TestCase):
         inter_router_port = cls.tester.get_port()
 
         router('A', ('listener', {'role': 'inter-router', 'port': inter_router_port}))
-        router('B', ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port, 'verifyHostName': 'no'}))
+        router('B', ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port, 'verifyHostname': 'no'}))
 
         cls.routers[0].wait_router_connected('B')
         cls.routers[1].wait_router_connected('A')
@@ -708,7 +713,8 @@ class LinkRouteTest(MessagingHandler):
         if self.dynamic:
             self.first_receiver = event.container.create_receiver(self.first_conn,
                                                                   dynamic=True,
-                                                                  options=DynamicNodeProperties({"x-opt-qd.address": unicode(self.first_address)}))
+                                                                  options=DynamicNodeProperties({"x-opt-qd.address":
+                                                                                                 UNICODE(self.first_address)}))
         else:
             self.first_receiver = event.container.create_receiver(self.first_conn, self.first_address)
 
