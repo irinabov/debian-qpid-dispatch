@@ -1,0 +1,159 @@
+From 30ff7ff1d54b8f280b36f76dc8c340cb4c88567b Mon Sep 17 00:00:00 2001
+From: Ganesh Murthy <gmurthy@redhat.com>
+Date: Wed, 25 Jul 2018 11:38:40 -0400
+Subject: [PATCH] DISPATCH-1087 - Modified shebang line in some files to put in
+ the correct version of Python
+
+---
+ CMakeLists.txt                              | 13 ++++++++++-
+ python/setup.py.in                          |  2 +-
+ run.py.in                                   | 36 ++++++++++++++---------------
+ tests/{authservice.py => authservice.py.in} |  2 +-
+ tools/{qdmanage => qdmanage.in}             |  2 +-
+ tools/{qdstat => qdstat.in}                 |  2 +-
+ 6 files changed, 34 insertions(+), 23 deletions(-)
+ rename tests/{authservice.py => authservice.py.in} (99%)
+ rename tools/{qdmanage => qdmanage.in} (99%)
+ rename tools/{qdstat => qdstat.in} (99%)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index af2e004..28b3609 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -45,6 +45,13 @@ include(CheckIncludeFiles)
+ include(FindPythonInterp)
+ include(FindPythonLibs)
+ 
++
++if (PYTHON_VERSION_MAJOR STREQUAL 2)
++    set(PY_STRING "python")
++elseif(PYTHON_VERSION_MAJOR STREQUAL 3)
++    set(PY_STRING "python3")
++endif()
++
+ # Find python-unittest2
+ execute_process(COMMAND "${PYTHON_EXECUTABLE}" "-c" "import unittest2"
+ 			RESULT_VARIABLE UNITTEST2_MISSING
+@@ -212,13 +219,16 @@ install(FILES include/qpid/dispatch.h DESTINATION ${INCLUDE_INSTALL_DIR}/qpid)
+ install(FILES etc/qdrouterd.conf DESTINATION ${SYSCONF_INSTALL_DIR}/qpid-dispatch)
+ install(FILES etc/sasl2/qdrouterd.conf DESTINATION ${SYSCONF_INSTALL_DIR}/sasl2)
+ 
++configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tools/qdstat.in ${CMAKE_CURRENT_SOURCE_DIR}/tools/qdstat)
++configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tools/qdmanage.in ${CMAKE_CURRENT_SOURCE_DIR}/tools/qdmanage)
++
++
+ # Tools
+ install(PROGRAMS
+     ${CMAKE_CURRENT_SOURCE_DIR}/tools/qdstat
+     ${CMAKE_CURRENT_SOURCE_DIR}/tools/qdmanage
+     DESTINATION bin)
+ 
+-
+ # Doc files
+ install(FILES
+   LICENSE
+@@ -230,6 +240,7 @@ add_subdirectory(src) # Build src first so other subdirs can use QPID_DISPATCH_L
+ # run.py environment runner script - needs QPID_DISPATCH_LIB
+ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run.py.in ${CMAKE_CURRENT_BINARY_DIR}/run.py)
+ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run.py.in ${CMAKE_CURRENT_BINARY_DIR}/tests/run.py)
++configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/authservice.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/authservice.py)
+ execute_process(COMMAND ${RUN} --sh OUTPUT_FILE config.sh)
+ 
+ if (NOT UNITTEST2_MISSING)
+diff --git a/python/setup.py.in b/python/setup.py.in
+index 10a1be6..25e4ede 100755
+--- a/python/setup.py.in
++++ b/python/setup.py.in
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#!/usr/bin/env ${PY_STRING}
+ #
+ # Licensed to the Apache Software Foundation (ASF) under one
+ # or more contributor license agreements.  See the NOTICE file
+diff --git a/run.py.in b/run.py.in
+index 3233e3d..140f8b8 100755
+--- a/run.py.in
++++ b/run.py.in
+@@ -1,22 +1,22 @@
+-#!/usr/bin/env python
+-##
+-## Licensed to the Apache Software Foundation (ASF) under one
+-## or more contributor license agreements.  See the NOTICE file
+-## distributed with this work for additional information
+-## regarding copyright ownership.  The ASF licenses this file
+-## to you under the Apache License, Version 2.0 (the
+-## "License"); you may not use this file except in compliance
+-## with the License.  You may obtain a copy of the License at
+-##
+-##   http://www.apache.org/licenses/LICENSE-2.0
+-##
+-## Unless required by applicable law or agreed to in writing,
+-## software distributed under the License is distributed on an
+-## "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-## KIND, either express or implied.  See the License for the
+-## specific language governing permissions and limitations
+-## under the License
++#!/usr/bin/env ${PY_STRING}
+ ##
++# Licensed to the Apache Software Foundation (ASF) under one
++# or more contributor license agreements.  See the NOTICE file
++# distributed with this work for additional information
++# regarding copyright ownership.  The ASF licenses this file
++# to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance
++# with the License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing,
++# software distributed under the License is distributed on an
++# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++# KIND, either express or implied.  See the License for the
++# specific language governing permissions and limitations
++# under the License
++#
+ 
+ from __future__ import unicode_literals
+ from __future__ import division
+diff --git a/tests/authservice.py b/tests/authservice.py.in
+similarity index 99%
+rename from tests/authservice.py
+rename to tests/authservice.py.in
+index 7693b42..83c2786 100755
+--- a/tests/authservice.py
++++ b/tests/authservice.py.in
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#!/usr/bin/env ${PY_STRING}
+ #
+ # Licensed to the Apache Software Foundation (ASF) under one
+ # or more contributor license agreements.  See the NOTICE file
+diff --git a/tools/qdmanage b/tools/qdmanage.in
+similarity index 99%
+rename from tools/qdmanage
+rename to tools/qdmanage.in
+index ffef1f1..9ed3adb 100755
+--- a/tools/qdmanage
++++ b/tools/qdmanage.in
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#!/usr/bin/env ${PY_STRING}
+ 
+ #
+ # Licensed to the Apache Software Foundation (ASF) undeugr one
+diff --git a/tools/qdstat b/tools/qdstat.in
+similarity index 99%
+rename from tools/qdstat
+rename to tools/qdstat.in
+index 21ef985..d0ed533 100755
+--- a/tools/qdstat
++++ b/tools/qdstat.in
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#!/usr/bin/env ${PY_STRING}
+ 
+ #
+ # Licensed to the Apache Software Foundation (ASF) under one
+-- 
+2.9.5
+
