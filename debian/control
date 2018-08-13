@@ -21,7 +21,7 @@ Package: qdrouterd
 Architecture: any
 Depends: libqpid-proton-core10,
          adduser,
-         proton3,
+         python3,
          ${shlibs:Depends}, ${misc:Depends}
 Pre-Depends: ${misc:Pre-Depends}
 Replaces:    libqpid-dispatch1, libqpid-dispatch1-dev
