@@ -5,14 +5,14 @@ Section: misc
 Priority: optional
 Build-Depends: debhelper (>= 9),
                cmake,
-               python-dev,
+               python3-dev,
                dh-python,
                asciidoc (>= 8.6.8),
                asciidoctor,
                dblatex,
                libqpid-proton-core10-dev (>= 0.24.0),
                libqpid-proton-proactor1-dev (>= 0.24.0),
-               python-qpid-proton (>= 0.24.0),
+               python3-qpid-proton (>= 0.24.0),
                libssl-dev,
                libwebsockets-dev
 Standards-Version: 3.9.7
@@ -48,8 +48,8 @@ Description: Qpid Dispatch Router executable
 
 Package: qdstat
 Architecture: all
-Depends: python-qpid-proton (>= 0.24.0),
-         python,
+Depends: python3-qpid-proton (>= 0.24.0),
+         python3,
          ${misc:Depends}
 Description: Qpid Dispatch stat tool
  The Dispatch router is an AMQP router that provides advanced interconnect
@@ -72,8 +72,8 @@ Description: Qpid Dispatch stat tool
 
 Package: qdmanage
 Architecture: all
-Depends: python-qpid-proton (>= 0.24.0),
-         python,
+Depends: python3-qpid-proton (>= 0.24.0),
+         python3,
          ${misc:Depends}
 Description: Qpid Dispatch manage tool
  The Dispatch router is an AMQP router that provides advanced interconnect

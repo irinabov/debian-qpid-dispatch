@@ -10,9 +10,9 @@ usr/lib/qpid-dispatch/python/qpid_dispatch_internal/management/*.py
 usr/lib/qpid-dispatch/python/qpid_dispatch_internal/tools/*.py
 usr/lib/qpid-dispatch/python/qpid_dispatch_internal/display_name/*.py
 usr/lib/qpid-dispatch/python/qpid_dispatch_internal/policy/*.py
-usr/lib/qpid-dispatch/python/qpid_dispatch_internal/router/*.py
-usr/lib/python2.7/dist-packages/qpid_dispatch/*.py
-usr/lib/python2.7/dist-packages/qpid_dispatch/management/*.py
-usr/lib/python2.7/dist-packages/qpid_dispatch/management/qdrouter.json
-usr/lib/python2.7/dist-packages/qpid_dispatch_site.py
-usr/lib/python2.7/dist-packages/qpid_dispatch*egg-info
+usr/lib/qpid-dispatch/python/qpid_dispatch_internal/router/*.py 
+usr/lib/python3.6m/dist-packages/qpid_dispatch/*.py
+usr/lib/python3.6m/dist-packages/qpid_dispatch/management/*.py
+usr/lib/python3.6m/dist-packages/qpid_dispatch/management/qdrouter.json
+usr/lib/python3.6m/dist-packages/qpid_dispatch_site.py
+usr/lib/python3.6m/dist-packages/qpid_dispatch*egg-info

@@ -6,20 +6,22 @@ include /usr/share/dpkg/buildflags.mk
 CFLAGS += -Wno-error=switch
 
 %:
-	dh $@ --with python2
+	dh $@ --with python3
 
 override_dh_auto_configure:
 	dh_auto_configure -- -DCMAKE_BUILD_TYPE=RelWithDebInfo \
                              -DUSE_LIBWEBSOCKETS=OFF \
-                             -DLIB_INSTALL_DIR:PATH=/usr/lib/${DEB_HOST_MULTIARCH}
+                             -DLIB_INSTALL_DIR:PATH=/usr/lib/${DEB_HOST_MULTIARCH} \
+			     -DPYTHON_EXECUTABLE=/usr/bin/python3 \
+                             -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m \
+                             -DPYTHON_LIBRARY=/usr/lib/${DEB_HOST_MULTIARCH}/libpython3.6m.so
 
 #override_dh_auto_build:
 #	dh_auto_build -- doc
 
 override_dh_auto_install:
 	dh_auto_install
-	cp -a debian/tmp/usr/lib/python2.7/site-packages debian/tmp/usr/lib/python2.7/dist-packages
+	cp -a debian/tmp/usr/${DEB_HOST_MULTIARCH}/libpython3.6m.so/site-packages debian/tmp/usr/${DEB_HOST_MULTIARCH}/libpython3.6m.so/dist-packages
 
 override_dh_auto_test:
 	# TODO enable them
-
