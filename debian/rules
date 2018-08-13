@@ -21,7 +21,7 @@ override_dh_auto_configure:
 
 override_dh_auto_install:
 	dh_auto_install
-	cp -a debian/tmp/usr/${DEB_HOST_MULTIARCH}/libpython3.6m.so/site-packages debian/tmp/usr/${DEB_HOST_MULTIARCH}/libpython3.6m.so/dist-packages
+	cp -a debian/tmp/usr/lib/python3.6/site-packages debian/tmp/usr/lib/python3.6/dist-packages
 
 override_dh_auto_test:
 	# TODO enable them
