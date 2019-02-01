@@ -108,11 +108,12 @@ void qdr_core_set_valid_origins(qdr_core_t *core, int router_maskbit, qd_bitmask
 }
 
 
-void qdr_core_map_destination(qdr_core_t *core, int router_maskbit, const char *address_hash)
+void qdr_core_map_destination(qdr_core_t *core, int router_maskbit, const char *address_hash, int treatment_hint)
 {
     qdr_action_t *action = qdr_action(qdr_map_destination_CT, "map_destination");
     action->args.route_table.router_maskbit = router_maskbit;
     action->args.route_table.address        = qdr_field(address_hash);
+    action->args.route_table.treatment_hint = treatment_hint;
     qdr_action_enqueue(core, action);
 }
 
@@ -242,11 +243,14 @@ void qdr_route_table_setup_CT(qdr_core_t *core)
 
         core->routers_by_mask_bit       = NEW_PTR_ARRAY(qdr_node_t, qd_bitmask_width());
         core->control_links_by_mask_bit = NEW_PTR_ARRAY(qdr_link_t, qd_bitmask_width());
-        core->data_links_by_mask_bit    = NEW_PTR_ARRAY(qdr_link_t, qd_bitmask_width());
+        core->data_links_by_mask_bit    = NEW_ARRAY(qdr_priority_sheaf_t, qd_bitmask_width());
         for (int idx = 0; idx < qd_bitmask_width(); idx++) {
             core->routers_by_mask_bit[idx]   = 0;
             core->control_links_by_mask_bit[idx] = 0;
-            core->data_links_by_mask_bit[idx] = 0;
+            core->data_links_by_mask_bit[idx].count = 0;
+            for (int priority = 0; priority < QDR_N_PRIORITIES; ++ priority)
+              core->data_links_by_mask_bit[idx].links[priority] = 0;
+
         }
     }
 }
@@ -288,7 +292,7 @@ static void qdr_add_router_CT(qdr_core_t *core, qdr_action_t *action, bool disca
             // This record will be found whenever a "foreign" topological address to this
             // remote router is looked up.
             //
-            addr = qdr_address_CT(core, QD_TREATMENT_ANYCAST_CLOSEST);
+            addr = qdr_address_CT(core, QD_TREATMENT_ANYCAST_CLOSEST, 0);
             qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
             DEQ_INSERT_TAIL(core->addrs, addr);
         }
@@ -397,7 +401,7 @@ static void qdr_del_router_CT(qdr_core_t *core, qdr_action_t *action, bool disca
     // Check the address and free it if there are no other interested parties tracking it
     //
     oaddr->block_deletion = false;
-    qdr_check_addr_CT(core, oaddr, false);
+    qdr_check_addr_CT(core, oaddr);
 }
 
 
@@ -554,11 +558,30 @@ static void qdr_set_valid_origins_CT(qdr_core_t *core, qdr_action_t *action, boo
         qd_bitmask_free(valid_origins);
 }
 
+static qd_address_treatment_t default_treatment(qdr_core_t *core, int hint) {
+    switch (hint) {
+    case QD_TREATMENT_MULTICAST_FLOOD:
+        return QD_TREATMENT_MULTICAST_FLOOD;
+    case QD_TREATMENT_MULTICAST_ONCE:
+        return QD_TREATMENT_MULTICAST_ONCE;
+    case QD_TREATMENT_ANYCAST_CLOSEST:
+        return QD_TREATMENT_ANYCAST_CLOSEST;
+    case QD_TREATMENT_ANYCAST_BALANCED:
+        return QD_TREATMENT_ANYCAST_BALANCED;
+    case QD_TREATMENT_LINK_BALANCED:
+        return QD_TREATMENT_LINK_BALANCED;
+    case QD_TREATMENT_UNAVAILABLE:
+        return QD_TREATMENT_UNAVAILABLE;
+    default:
+        return core->qd->default_treatment == QD_TREATMENT_UNAVAILABLE ? QD_TREATMENT_ANYCAST_BALANCED : core->qd->default_treatment;
+    }
+}
 
 static void qdr_map_destination_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
 {
     int          router_maskbit = action->args.route_table.router_maskbit;
     qdr_field_t *address        = action->args.route_table.address;
+    int          treatment_hint = action->args.route_table.treatment_hint;
 
     if (discard) {
         qdr_field_free(address);
@@ -581,8 +604,16 @@ static void qdr_map_destination_CT(qdr_core_t *core, qdr_action_t *action, bool 
 
         qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
         if (!addr) {
-            addr = qdr_address_CT(core, qdr_treatment_for_address_hash_CT(core, iter));
-            if (!addr) break;
+            qdr_address_config_t   *addr_config;
+            qd_address_treatment_t  treatment = qdr_treatment_for_address_hash_with_default_CT(core,
+                                                                                               iter,
+                                                                                               default_treatment(core, treatment_hint),
+                                                                                               &addr_config);
+            addr = qdr_address_CT(core, treatment, addr_config);
+            if (!addr) {
+                qd_log(core->log, QD_LOG_CRITICAL, "map_destination: ignored");
+                break;
+            }
             qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
             DEQ_ITEM_INIT(addr);
             DEQ_INSERT_TAIL(core->addrs, addr);
@@ -601,6 +632,14 @@ static void qdr_map_destination_CT(qdr_core_t *core, qdr_action_t *action, bool 
         rnode->ref_count++;
         addr->cost_epoch--;
         qdr_addr_start_inlinks_CT(core, addr);
+
+        //
+        // Raise an address event if this is the first destination for the address
+        //
+        if (qd_bitmask_cardinality(addr->rnodes) + DEQ_SIZE(addr->rlinks) == 1)
+            qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_BECAME_DEST, addr);
+        else if (qd_bitmask_cardinality(addr->rnodes) == 1 && DEQ_SIZE(addr->rlinks) == 1)
+            qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_TWO_DEST, addr);
     } while (false);
 
     qdr_field_free(address);
@@ -643,10 +682,14 @@ static void qdr_unmap_destination_CT(qdr_core_t *core, qdr_action_t *action, boo
         addr->cost_epoch--;
 
         //
-        // TODO - If this affects a waypoint, create the proper side effects
+        // Raise an address event if this was the last destination for the address
         //
+        if (qd_bitmask_cardinality(addr->rnodes) + DEQ_SIZE(addr->rlinks) == 0)
+            qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_NO_LONGER_DEST, addr);
+        else if (qd_bitmask_cardinality(addr->rnodes) == 0 && DEQ_SIZE(addr->rlinks) == 1)
+            qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_ONE_LOCAL_DEST, addr);
 
-        qdr_check_addr_CT(core, addr, false);
+        qdr_check_addr_CT(core, addr);
     } while (false);
 
     qdr_field_free(address);
@@ -674,7 +717,7 @@ static void qdr_subscribe_CT(qdr_core_t *core, qdr_action_t *action, bool discar
 
         qd_hash_retrieve(core->addr_hash, address->iterator, (void**) &addr);
         if (!addr) {
-            addr = qdr_address_CT(core, action->args.io.treatment);
+            addr = qdr_address_CT(core, action->args.io.treatment, 0);
             if (addr) {
                 qd_hash_insert(core->addr_hash, address->iterator, addr, &addr->hash_handle);
                 DEQ_ITEM_INIT(addr);
@@ -701,7 +744,7 @@ static void qdr_unsubscribe_CT(qdr_core_t *core, qdr_action_t *action, bool disc
     if (!discard) {
         DEQ_REMOVE(sub->addr->subscriptions, sub);
         sub->addr = 0;
-        qdr_check_addr_CT(sub->core, sub->addr, false);
+        qdr_check_addr_CT(sub->core, sub->addr);
     }
 
     free(sub);
@@ -715,7 +758,7 @@ static void qdr_do_mobile_added(qdr_core_t *core, qdr_general_work_t *work)
 {
     char *address_hash = qdr_field_copy(work->field);
     if (address_hash) {
-        core->rt_mobile_added(core->rt_context, address_hash);
+        core->rt_mobile_added(core->rt_context, address_hash, work->treatment);
         free(address_hash);
     }
 
@@ -741,10 +784,11 @@ static void qdr_do_link_lost(qdr_core_t *core, qdr_general_work_t *work)
 }
 
 
-void qdr_post_mobile_added_CT(qdr_core_t *core, const char *address_hash)
+void qdr_post_mobile_added_CT(qdr_core_t *core, const char *address_hash, qd_address_treatment_t treatment)
 {
     qdr_general_work_t *work = qdr_general_work(qdr_do_mobile_added);
     work->field = qdr_field(address_hash);
+    work->treatment = treatment;
     qdr_post_general_work_CT(core, work);
 }
 

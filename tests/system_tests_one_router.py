@@ -23,7 +23,7 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 import unittest2 as unittest
-from proton import Condition, Message, Delivery, PENDING, ACCEPTED, REJECTED, Url, symbol, Timeout
+from proton import Condition, Message, Delivery, Url, symbol, Timeout
 from system_test import TestCase, Qdrouterd, main_module, TIMEOUT
 from proton.handlers import MessagingHandler, TransactionHandler
 from proton.reactor import Container, AtMostOnce, AtLeastOnce, DynamicNodeProperties, LinkOption, ApplicationEvent, EventInjector
@@ -414,6 +414,26 @@ class OneRouterTest(TestCase):
 
     def test_40_anonymous_sender_no_receiver(self):
         test = AnonymousSenderNoRecvLargeMessagedTest(self.address)
+        test.run()
+        self.assertEqual(None, test.error)
+
+    def test_41_large_streaming_close_conn_test(self):
+        test = LargeMessageStreamCloseConnTest(self.address)
+        test.run()
+        self.assertEqual(None, test.error)
+
+    def test_42_unsettled_large_message_test(self):
+        test = UnsettledLargeMessageTest(self.address, 250)
+        test.run()
+        self.assertEqual(None, test.error)
+
+    def test_43_dropped_presettled_receiver_stops(self):
+        local_node = Node.connect(self.address, timeout=TIMEOUT)
+        res = local_node.query('org.apache.qpid.dispatch.router')
+        deliveries_ingress = res.attribute_names.index(
+            'deliveriesIngress')
+        ingress_delivery_count = res.results[0][deliveries_ingress]
+        test = DroppedPresettledTest(self.address, 200, ingress_delivery_count)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -996,6 +1016,104 @@ class PreSettled ( MessagingHandler ) :
             self.bail ( None )
 
 
+class PresettledCustomTimeout(object):
+    def __init__(self, parent):
+        self.parent = parent
+
+    def on_timer_task(self, event):
+        local_node = Node.connect(self.parent.addr, timeout=TIMEOUT)
+        res = local_node.query('org.apache.qpid.dispatch.router')
+        deliveries_ingress = res.attribute_names.index(
+            'deliveriesIngress')
+        ingress_delivery_count = res.results[0][deliveries_ingress]
+        self.parent.cancel_custom()
+
+        # Without the fix for DISPATCH--1213  the ingress count will be less than
+        # 200 because the sender link has stalled. The q2_holdoff happened
+        # and so all the remaining messages are still in the
+        # proton buffers.
+
+        if ingress_delivery_count - self.parent.begin_ingress_count > self.parent.n_messages:
+            self.parent.bail(None)
+        else:
+            self.parent.bail("Messages sent to the router is %d, "
+                             "Messages processed by the router is %d",
+                             (self.parent.n_messages,
+                              ingress_delivery_count - self.parent.begin_ingress_count))
+
+
+class DroppedPresettledTest(MessagingHandler):
+    def __init__(self, addr, n_messages, begin_ingress_count):
+        super (DroppedPresettledTest, self).__init__()
+        self.addr = addr
+        self.n_messages = n_messages
+        self.sender = None
+        self.receiver = None
+        self.sender_conn = None
+        self.recv_conn = None
+        self.n_sent = 0
+        self.n_received = 0
+        self.error = None
+        self.test_timer = None
+        self.max_receive = 10
+        self.custom_timer = None
+        self.timer = None
+        self.begin_ingress_count = begin_ingress_count
+        self.str1 = "0123456789abcdef"
+        self.msg_str = ""
+        for i in range(8192):
+            self.msg_str += self.str1
+
+    def run (self):
+        Container(self).run()
+
+    def bail(self, travail):
+        self.error = travail
+        self.sender_conn.close()
+        if self.recv_conn:
+            self.recv_conn.close()
+        self.timer.cancel()
+
+    def timeout(self,):
+        self.bail("Timeout Expired: %d messages received, %d expected." %
+                  (self.n_received, self.n_messages))
+
+    def on_start (self, event):
+        self.sender_conn = event.container.connect(self.addr)
+        self.recv_conn = event.container.connect(self.addr)
+        self.receiver = event.container.create_receiver(self.recv_conn,
+                                                        "test_43")
+        self.sender = event.container.create_sender(self.sender_conn,
+                                                    "test_43")
+        self.timer = event.reactor.schedule(10, Timeout(self))
+
+    def cancel_custom(self):
+        self.custom_timer.cancel()
+
+    def on_sendable(self, event):
+        while self.n_sent < self.n_messages:
+            msg = Message(id=(self.n_sent + 1),
+                          body={'sequence': (self.n_sent + 1),
+                                'msg_str': self.msg_str})
+            # Presettle the delivery.
+            dlv = self.sender.send (msg)
+            dlv.settle()
+            self.n_sent += 1
+
+    def on_message(self, event):
+        self.n_received += 1
+        if self.n_received == self.max_receive:
+            # Receiver bails after receiving max_receive messages.
+            self.receiver.close()
+            self.recv_conn.close()
+
+            # The sender is only sending 200 large messages which is less
+            # that the initial credit of 250 that the router gives.
+            # Lets do a qdstat to find out if all 200 messages is handled
+            # by the router.
+            self.custom_timer = event.reactor.schedule(1,
+                                                       PresettledCustomTimeout(
+                                                           self))
 
 class MulticastUnsettled ( MessagingHandler ) :
     def __init__ ( self,
@@ -2232,6 +2350,63 @@ class MulticastUnsettledTest(MessagingHandler):
         Container(self).run()
 
 
+class LargeMessageStreamCloseConnTest(MessagingHandler):
+    def __init__(self, address):
+        super(LargeMessageStreamCloseConnTest, self).__init__()
+        self.address = address
+        self.dest = "LargeMessageStreamCloseConnTest"
+        self.error = None
+        self.timer = None
+        self.sender_conn = None
+        self.receiver_conn = None
+        self.sender = None
+        self.receiver = None
+        self.body = ""
+        self.aborted = False
+        for i in range(20000):
+            self.body += "0123456789101112131415"
+
+    def timeout(self):
+        if self.aborted:
+            self.error = "Message has been aborted. Test failed"
+        else:
+            self.error = "Message not received. test failed"
+        self.receiver_conn.close()
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.sender_conn = event.container.connect(self.address)
+        self.receiver_conn = event.container.connect(self.address)
+        self.sender = event.container.create_sender(self.sender_conn, self.dest)
+        self.receiver = event.container.create_receiver(self.receiver_conn,
+                                                        self.dest, name="A")
+
+    def on_sendable(self, event):
+        msg = Message(body=self.body)
+        # send(msg) calls the stream function which streams data
+        # from sender to the router
+        event.sender.send(msg)
+
+        # Close the connection immediately after sending the message
+        # Without the fix for DISPATCH-1085, this test will fail
+        # one in five times with an abort
+        # With the fix in place, this test will never fail (the
+        # on_aborted will never be called).
+        self.sender_conn.close()
+
+    def on_message(self, event):
+        self.timer.cancel()
+        self.receiver_conn.close()
+
+    def on_aborted(self, event):
+        self.aborted = True
+        self.timer.cancel()
+        self.timeout()
+
+    def run(self):
+        Container(self).run()
+
+
 class LargeMessageStreamTest(MessagingHandler):
     def __init__(self, address):
         super(LargeMessageStreamTest, self).__init__()
@@ -2735,8 +2910,8 @@ class PresettledOverflowTest(MessagingHandler):
 
                 for result in out.results:
                     if result[5] == 'out' and 'balanced.PresettledOverflow' in result[6]:
-                        if result[16] != 250:
-                            self.error = "Expected 250 dropped presettled deliveries but got " + str(result[16])
+                        if result[16] != 249:
+                            self.error = "Expected 249 dropped presettled deliveries but got " + str(result[16])
             self.conn.close()
             self.timer.cancel()
 
@@ -2792,6 +2967,93 @@ class RejectDispositionTest(MessagingHandler):
 
     def run(self):
         Container(self).run()
+
+
+class UnsettledLargeMessageTest(MessagingHandler):
+    def __init__(self, addr, n_messages):
+        super (UnsettledLargeMessageTest, self).__init__()
+        self.addr = addr
+        self.n_messages = n_messages
+        self.sender = None
+        self.receiver = None
+        self.sender_conn = None
+        self.recv_conn = None
+        self.n_sent = 0
+        self.n_received = 0
+        self.error = None
+        self.test_timer = None
+        self.max_receive = 1
+        self.custom_timer = None
+        self.timer = None
+        self.n_accepted = 0
+        self.n_modified = 0
+        self.n_released = 0
+        self.str1 = "0123456789abcdef"
+        self.msg_str = ""
+        for i in range(16384):
+            self.msg_str += self.str1
+
+    def run (self):
+        Container(self).run()
+
+    def check_if_done(self):
+        # self.n_accepted + self.n_modified + self.n_released will never
+        # equal self.n_messages without the fix for DISPATCH-1197 because
+        # the router will never pull the data from the proton buffers once
+        # the router hits q2_holdoff
+        if self.n_accepted + self.n_modified + \
+                self.n_released == self.n_messages:
+            self.timer.cancel()
+            self.sender_conn.close()
+
+    def timeout(self):
+        self.error = "Timeout Expired: sent=%d accepted=%d " \
+                     "released=%d modified=%d" % (self.n_messages,
+                                                  self.n_accepted,
+                                                  self.n_released,
+                                                  self.n_modified)
+
+    def on_start (self, event):
+        self.sender_conn = event.container.connect(self.addr)
+        self.recv_conn = event.container.connect(self.addr)
+        self.receiver = event.container.create_receiver(self.recv_conn,
+                                                        "test_42")
+        self.sender = event.container.create_sender(self.sender_conn,
+                                                    "test_42")
+        self.timer = event.reactor.schedule(15, Timeout(self))
+
+    def on_accepted(self, event):
+        self.n_accepted += 1
+
+    def on_released(self, event):
+        if event.delivery.remote_state == Delivery.MODIFIED:
+            self.n_modified += 1
+        else:
+            self.n_released += 1
+
+        self.check_if_done()
+
+    def on_sendable(self, event):
+        while self.n_sent < self.n_messages:
+            msg = Message(id=(self.n_sent + 1),
+                          body={'sequence': (self.n_sent + 1),
+                                'msg_str': self.msg_str})
+            # Presettle the delivery.
+            self.sender.send (msg)
+            self.n_sent += 1
+
+    def on_message(self, event):
+        self.n_received += 1
+        if self.n_received == self.max_receive:
+            # Close the receiver connection after receiving just one message
+            # This will cause the release of multi-frame deliveries.
+            # Meanwhile the sender will keep sending but will run into
+            # the q2_holodd situation and never recover.
+            # The sender link will be stalled
+            # This test will NEVER pass without the fix to DISPATCH-1197
+            # Receiver bails after receiving max_receive messages.
+            self.receiver.close()
+            self.recv_conn.close()
 
 
 if __name__ == '__main__':

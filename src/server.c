@@ -447,6 +447,11 @@ static void decorate_connection(qd_server_t *qd_server, pn_connection_t *conn, c
     pn_data_put_string(pn_connection_properties(conn),
                        pn_bytes(strlen(QPID_DISPATCH_VERSION), QPID_DISPATCH_VERSION));
 
+    pn_data_put_symbol(pn_connection_properties(conn),
+                       pn_bytes(strlen(QD_CONNECTION_PROPERTY_CONN_ID), QD_CONNECTION_PROPERTY_CONN_ID));
+    qd_connection_t *qd_conn = pn_connection_get_context(conn);
+    pn_data_put_int(pn_connection_properties(conn), qd_conn->connection_id);
+
     if (config && config->inter_router_cost > 1) {
         pn_data_put_symbol(pn_connection_properties(conn),
                            pn_bytes(strlen(QD_CONNECTION_PROPERTY_COST_KEY), QD_CONNECTION_PROPERTY_COST_KEY));
@@ -522,6 +527,7 @@ qd_connection_t *qd_server_connection(qd_server_t *server, qd_server_config_t *c
     pn_connection_set_context(ctx->pn_conn, ctx);
     DEQ_ITEM_INIT(ctx);
     DEQ_INIT(ctx->deferred_calls);
+    DEQ_INIT(ctx->free_link_session_list);
     sys_mutex_lock(server->lock);
     ctx->connection_id = server->next_connection_id++;
     DEQ_INSERT_TAIL(server->conn_list, ctx);
@@ -544,8 +550,8 @@ static void on_accept(pn_event_t *e)
     }
     ctx->listener = listener;
     qd_log(listener->server->log_source, QD_LOG_TRACE,
-           "[%"PRIu64"] Accepting incoming connection from %s to %s",
-           ctx->connection_id, qd_connection_name(ctx), ctx->listener->config.host_port);
+           "[%"PRIu64"]: Accepting incoming connection to '%s'",
+           ctx->connection_id, ctx->listener->config.host_port);
     /* Asynchronous accept, configure the transport on PN_CONNECTION_BOUND */
     pn_listener_accept(pn_listener, ctx->pn_conn);
  }
@@ -579,8 +585,8 @@ void connect_fail(qd_connection_t *ctx, const char *name, const char *descriptio
 /* Get the host IP address for the remote end */
 static void set_rhost_port(qd_connection_t *ctx) {
     pn_transport_t *tport  = pn_connection_transport(ctx->pn_conn);
-    const struct sockaddr* sa = pn_netaddr_sockaddr(pn_netaddr_remote(tport));
-    size_t salen = pn_netaddr_socklen(pn_netaddr_remote(tport));
+    const struct sockaddr* sa = pn_netaddr_sockaddr(pn_transport_remote_addr(tport));
+    size_t salen = pn_netaddr_socklen(pn_transport_remote_addr(tport));
     if (sa && salen) {
         char rport[NI_MAXSERV] = "";
         int err = getnameinfo(sa, salen,
@@ -643,17 +649,49 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
         pn_sasl_config_name(sasl, ctx->server->sasl_config_name);
         if (config->sasl_mechanisms)
             pn_sasl_allowed_mechs(sasl, config->sasl_mechanisms);
-        if (config->auth_service) {
-            qd_log(server->log_source, QD_LOG_INFO, "enabling remote authentication service %s", config->auth_service);
-            qdr_use_remote_authentication_service(tport, config->auth_service, config->sasl_init_hostname, config->auth_ssl_conf, server->proactor);
+        if (config->sasl_plugin_config.auth_service) {
+            qd_log(server->log_source, QD_LOG_INFO, "enabling remote authentication service %s", config->sasl_plugin_config.auth_service);
+            pn_ssl_domain_t* plugin_ssl_domain = NULL;
+            if (config->sasl_plugin_config.use_ssl) {
+                plugin_ssl_domain = pn_ssl_domain(PN_SSL_MODE_CLIENT);
+
+                if (config->sasl_plugin_config.ssl_certificate_file) {
+                    if (pn_ssl_domain_set_credentials(plugin_ssl_domain,
+                                                      config->sasl_plugin_config.ssl_certificate_file,
+                                                      config->sasl_plugin_config.ssl_private_key_file,
+                                                      config->sasl_plugin_config.ssl_password)) {
+                        qd_log(server->log_source, QD_LOG_ERROR, "Cannot set SSL credentials for authentication service");
+                    }
+                }
+                if (config->sasl_plugin_config.ssl_trusted_certificate_db) {
+                    if (pn_ssl_domain_set_trusted_ca_db(plugin_ssl_domain, config->sasl_plugin_config.ssl_trusted_certificate_db)) {
+                        qd_log(server->log_source, QD_LOG_ERROR, "Cannot set trusted SSL certificate db for authentication service" );
+                    } else {
+                        if (pn_ssl_domain_set_peer_authentication(plugin_ssl_domain, PN_SSL_VERIFY_PEER, config->sasl_plugin_config.ssl_trusted_certificate_db)) {
+                            qd_log(server->log_source, QD_LOG_ERROR, "Cannot set SSL peer verification for authentication service");
+                        }
+                    }
+                }
+                if (config->sasl_plugin_config.ssl_ciphers) {
+                    if (pn_ssl_domain_set_ciphers(plugin_ssl_domain, config->sasl_plugin_config.ssl_ciphers)) {
+                        qd_log(server->log_source, QD_LOG_ERROR, "Cannot set ciphers for authentication service");
+                    }
+                }
+                if (config->sasl_plugin_config.ssl_protocols) {
+                    if (pn_ssl_domain_set_protocols(plugin_ssl_domain, config->sasl_plugin_config.ssl_protocols)) {
+                        qd_log(server->log_source, QD_LOG_ERROR, "Cannot set protocols for authentication service");
+                    }
+                }
+            }
+            qdr_use_remote_authentication_service(tport, config->sasl_plugin_config.auth_service, config->sasl_plugin_config.sasl_init_hostname, plugin_ssl_domain, server->proactor);
         }
         pn_transport_require_auth(tport, config->requireAuthentication);
         pn_transport_require_encryption(tport, config->requireEncryption);
         pn_sasl_set_allow_insecure_mechs(sasl, config->allowInsecureAuthentication);
         sys_mutex_unlock(ctx->server->lock);
 
-        qd_log(ctx->server->log_source, QD_LOG_INFO, "Accepted connection to %s from %s",
-               name, ctx->rhost_port);
+        qd_log(ctx->server->log_source, QD_LOG_INFO, "[%"PRIu64"]: Accepted connection to %s from %s",
+               ctx->connection_id, name, ctx->rhost_port);
     } else if (ctx->connector) { /* Establishing an outgoing connection */
         config = &ctx->connector->config;
         setup_ssl_sasl_and_open(ctx);
@@ -692,7 +730,8 @@ static void invoke_deferred_calls(qd_connection_t *conn, bool discard)
     sys_mutex_unlock(conn->deferred_call_lock);
 }
 
-void qd_container_handle_event(qd_container_t *container, pn_event_t *event);
+void qd_container_handle_event(qd_container_t *container, pn_event_t *event, pn_connection_t *pn_conn, qd_connection_t *qd_conn);
+void qd_conn_event_batch_complete(qd_container_t *container, qd_connection_t *qd_conn, bool conn_closed);
 
 static void handle_listener(pn_event_t *e, qd_server_t *qd_server) {
     qd_log_source_t *log = qd_server->log_source;
@@ -708,7 +747,7 @@ static void handle_listener(pn_event_t *e, qd_server_t *qd_server) {
         if (strcmp(port, "0") == 0) {
             // If a 0 (zero) is specified for a port, get the actual listening port from the listener.
             pn_listener_t *l = pn_event_listener(e);
-            const pn_netaddr_t *na = pn_netaddr_listening(l);
+            const pn_netaddr_t *na = pn_listener_addr(l);
             char str[PN_MAX_ADDR] = "";
             pn_netaddr_str(na, str, sizeof(str));
             // "str" contains the host and port on which this listener is listening.
@@ -856,13 +895,12 @@ static void qd_increment_conn_index(qd_connection_t *ctx)
 /* Events involving a connection or listener are serialized by the proactor so
  * only one event per connection / listener will be processed at a time.
  */
-static bool handle(qd_server_t *qd_server, pn_event_t *e) {
-    pn_connection_t *pn_conn = pn_event_connection(e);
+static bool handle(qd_server_t *qd_server, pn_event_t *e, pn_connection_t *pn_conn, qd_connection_t *ctx)
+{
     if (pn_conn && qdr_is_authentication_service_connection(pn_conn)) {
         qdr_handle_authentication_service_connection_event(e);
         return true;
     }
-    qd_connection_t *ctx = pn_conn ? (qd_connection_t*) pn_connection_get_context(pn_conn) : NULL;
 
     switch (pn_event_type(e)) {
 
@@ -924,15 +962,15 @@ static bool handle(qd_server_t *qd_server, pn_event_t *e) {
                 qd_increment_conn_index(ctx);
                 const qd_server_config_t *config = &ctx->connector->config;
                 if (condition  && pn_condition_is_set(condition)) {
-                    qd_log(qd_server->log_source, QD_LOG_INFO, "Connection to %s failed: %s %s", config->host_port,
+                    qd_log(qd_server->log_source, QD_LOG_INFO, "[%"PRIu64"]: Connection to %s failed: %s %s", ctx->connection_id, config->host_port,
                            pn_condition_get_name(condition), pn_condition_get_description(condition));
                 } else {
-                    qd_log(qd_server->log_source, QD_LOG_INFO, "Connection to %s failed", config->host_port);
+                    qd_log(qd_server->log_source, QD_LOG_INFO, "[%"PRIu64"]: Connection to %s failed", ctx->connection_id, config->host_port);
                 }
             } else if (ctx && ctx->listener) { /* Incoming connection */
                 if (condition && pn_condition_is_set(condition)) {
-                    qd_log(ctx->server->log_source, QD_LOG_INFO, "Connection from %s (to %s) failed: %s %s",
-                           ctx->rhost_port, ctx->listener->config.host_port, pn_condition_get_name(condition),
+                    qd_log(ctx->server->log_source, QD_LOG_INFO, "[%"PRIu64"]: Connection from %s (to %s) failed: %s %s",
+                           ctx->connection_id, ctx->rhost_port, ctx->listener->config.host_port, pn_condition_get_name(condition),
                            pn_condition_get_description(condition));
                 }
             }
@@ -943,14 +981,9 @@ static bool handle(qd_server_t *qd_server, pn_event_t *e) {
         break;
     } // Switch event type
 
-    /* TODO aconway 2017-04-18: fold the container handler into the server */
-    qd_container_handle_event(qd_server->container, e);
+    if (ctx)
+        qd_container_handle_event(qd_server->container, e, pn_conn, ctx);
 
-    /* Free the connection after all other processing is complete */
-    if (ctx && pn_event_type(e) == PN_TRANSPORT_CLOSED) {
-        pn_connection_set_context(pn_conn, NULL);
-        qd_connection_free(ctx);
-    }
     return true;
 }
 
@@ -961,9 +994,36 @@ static void *thread_run(void *arg)
     while (running) {
         pn_event_batch_t *events = pn_proactor_wait(qd_server->proactor);
         pn_event_t * e;
+        qd_connection_t *qd_conn = 0;
+        pn_connection_t *pn_conn = 0;
+
         while (running && (e = pn_event_batch_next(events))) {
-            running = handle(qd_server, e);
+            pn_connection_t *conn = pn_event_connection(e);
+
+            if (!pn_conn)
+                pn_conn = conn;
+            assert(pn_conn == conn);
+
+            if (!qd_conn)
+                qd_conn = !!pn_conn ? (qd_connection_t*) pn_connection_get_context(pn_conn) : 0;
+
+            running = handle(qd_server, e, conn, qd_conn);
+
+            /* Free the connection after all other processing is complete */
+            if (qd_conn && pn_event_type(e) == PN_TRANSPORT_CLOSED) {
+                pn_connection_set_context(pn_conn, NULL);
+                qd_connection_free(qd_conn);
+                qd_conn = 0;
+            }
         }
+
+        //
+        // Notify the container that the batch is complete so it can do after-batch
+        // processing.
+        //
+        if (qd_conn)
+            qd_conn_event_batch_complete(qd_server->container, qd_conn, false);
+
         pn_proactor_done(qd_server->proactor, events);
     }
     return NULL;
@@ -986,7 +1046,7 @@ static qd_failover_item_t *qd_connector_get_conn_info(qd_connector_t *ct) {
 /* Timer callback to try/retry connection open */
 static void try_open_lh(qd_connector_t *ct)
 {
-    if (ct->state != CXTR_STATE_CONNECTING) {
+    if (ct->state != CXTR_STATE_CONNECTING && ct->state != CXTR_STATE_INIT) {
         /* No longer referenced by pn_connection or timer */
         qd_connector_decref(ct);
         return;
@@ -1200,7 +1260,7 @@ void qd_server_free(qd_server_t *qd_server)
 
 void qd_server_set_container(qd_dispatch_t *qd, qd_container_t *container)
 {
-    qd->server->container              = container;
+    qd->server->container = container;
 }
 
 
@@ -1298,7 +1358,9 @@ const qd_server_config_t *qd_connection_config(const qd_connection_t *conn)
 {
     if (conn->listener)
         return &conn->listener->config;
-    return &conn->connector->config;
+    if (conn->connector)
+        return &conn->connector->config;
+    return NULL;
 }
 
 
@@ -1386,6 +1448,7 @@ qd_connector_t *qd_server_connector(qd_server_t *server)
     DEQ_INIT(conn_info_list);
     ct->conn_info_list = conn_info_list;
     ct->conn_index = 1;
+    ct->state   = CXTR_STATE_INIT;
     ct->lock = sys_mutex();
     ct->timer = qd_timer(ct->server->qd, try_open_cb, ct);
     if (!ct->lock || !ct->timer) {
@@ -1399,7 +1462,6 @@ qd_connector_t *qd_server_connector(qd_server_t *server)
 bool qd_connector_connect(qd_connector_t *ct)
 {
     sys_mutex_lock(ct->lock);
-    ct->state   = CXTR_STATE_CONNECTING;
     ct->ctx     = 0;
     ct->delay   = 0;
     /* Referenced by timer */
@@ -1471,7 +1533,9 @@ const char* qd_connection_remote_ip(const qd_connection_t *c) {
 
 /* Expose event handling for HTTP connections */
 void qd_connection_handle(qd_connection_t *c, pn_event_t *e) {
-    handle(c->server, e);
+    pn_connection_t *pn_conn = pn_event_connection(e);
+    qd_connection_t *qd_conn = !!pn_conn ? (qd_connection_t*) pn_connection_get_context(pn_conn) : 0;
+    handle(c->server, e, pn_conn, qd_conn);
 }
 
 bool qd_connection_strip_annotations_in(const qd_connection_t *c) {

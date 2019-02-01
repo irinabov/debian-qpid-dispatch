@@ -21,9 +21,11 @@
 Provides tests related with allowed TLS protocol version restrictions.
 """
 import os
+import ssl
+import sys
 from subprocess import Popen, PIPE
 from qpid_dispatch.management.client import Node
-from system_test import TestCase, main_module, Qdrouterd, DIR
+from system_test import TestCase, main_module, Qdrouterd, DIR, SkipIfNeeded
 from proton import SASL, Url, SSLDomain
 from proton.utils import BlockingConnection
 import proton
@@ -35,6 +37,9 @@ class RouterTestSslBase(TestCase):
     """
     Base class to help with SSL related testing.
     """
+    # If unable to determine which protocol versions are allowed system wide
+    DISABLE_SSL_TESTING = False
+
     @staticmethod
     def ssl_file(name):
         """
@@ -89,6 +94,30 @@ class RouterTestSslClient(RouterTestSslBase):
     PORT_SSL3 = 0
     TIMEOUT = 3
 
+    # If using OpenSSL 1.1 or greater, TLSv1.2 is always being allowed
+    OPENSSL_VER_1_1_GT = ssl.OPENSSL_VERSION_INFO[:2] >= (1, 1)
+
+    # Following variables define TLS versions allowed by openssl
+    OPENSSL_MIN_VER = 0
+    OPENSSL_MAX_VER = 9999
+    OPENSSL_ALLOW_TLSV1 = True
+    OPENSSL_ALLOW_TLSV1_1 = True
+    OPENSSL_ALLOW_TLSV1_2 = True
+
+    # When using OpenSSL >= 1.1 and python >= 3.7, we can retrieve OpenSSL min and max protocols
+    if OPENSSL_VER_1_1_GT:
+        if sys.version_info >= (3, 7):
+            OPENSSL_CTX = ssl.create_default_context()
+            OPENSSL_MIN_VER = OPENSSL_CTX.minimum_version
+            OPENSSL_MAX_VER = OPENSSL_CTX.maximum_version if OPENSSL_CTX.maximum_version > 0 else 9999
+            OPENSSL_ALLOW_TLSV1 = OPENSSL_MIN_VER <= ssl.TLSVersion.TLSv1 <= OPENSSL_MAX_VER
+            OPENSSL_ALLOW_TLSV1_1 = OPENSSL_MIN_VER <= ssl.TLSVersion.TLSv1_1 <= OPENSSL_MAX_VER
+            OPENSSL_ALLOW_TLSV1_2 = OPENSSL_MIN_VER <= ssl.TLSVersion.TLSv1_2 <= OPENSSL_MAX_VER
+        else:
+            # At this point we are not able to precisely determine what are the minimum and maximum
+            # TLS versions allowed in the system, so tests will be disabled
+            RouterTestSslBase.DISABLE_SSL_TESTING = True
+
     @classmethod
     def setUpClass(cls):
         """
@@ -99,11 +128,17 @@ class RouterTestSslClient(RouterTestSslBase):
 
         cls.routers = []
 
-        if not SASL.extended():
-            return
+        if SASL.extended():
+            router = ('router', {'id': 'QDR.A',
+                                 'mode': 'interior',
+                                 'saslConfigName': 'tests-mech-PLAIN',
+                                 'saslConfigDir': os.getcwd()})
 
-        # Generate authentication DB
-        super(RouterTestSslClient, cls).create_sasl_files()
+            # Generate authentication DB
+            super(RouterTestSslClient, cls).create_sasl_files()
+        else:
+            router = ('router', {'id': 'QDR.A',
+                                 'mode': 'interior'})
 
         # Saving listener ports for each TLS definition
         cls.PORT_TLS1 = cls.tester.get_port()
@@ -116,11 +151,8 @@ class RouterTestSslClient(RouterTestSslBase):
         cls.PORT_TLS_SASL = cls.tester.get_port()
         cls.PORT_SSL3 = cls.tester.get_port()
 
-        config = Qdrouterd.Config([
-            ('router', {'id': 'QDR.A',
-                        'mode': 'interior',
-                        'saslConfigName': 'tests-mech-PLAIN',
-                        'saslConfigDir': os.getcwd()}),
+        conf = [
+            router,
             # TLSv1 only
             ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.PORT_TLS1,
                           'authenticatePeer': 'no',
@@ -152,12 +184,21 @@ class RouterTestSslClient(RouterTestSslBase):
             # Invalid protocol version
             ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.PORT_SSL3,
                           'authenticatePeer': 'no',
-                          'sslProfile': 'ssl-profile-ssl3'}),
-            # TLS 1 and 1.2 with SASL PLAIN authentication for proton client validation
-            ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.PORT_TLS_SASL,
-                          'authenticatePeer': 'yes', 'saslMechanisms': 'PLAIN',
-                          'requireSsl': 'yes', 'requireEncryption': 'yes',
-                          'sslProfile': 'ssl-profile-tls1-tls12'}),
+                          'sslProfile': 'ssl-profile-ssl3'})
+        ]
+
+        # Adding SASL listener only when SASL is available
+        if SASL.extended():
+            conf += [
+                # TLS 1 and 1.2 with SASL PLAIN authentication for proton client validation
+                ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.PORT_TLS_SASL,
+                              'authenticatePeer': 'yes', 'saslMechanisms': 'PLAIN',
+                              'requireSsl': 'yes', 'requireEncryption': 'yes',
+                              'sslProfile': 'ssl-profile-tls1-tls12'})
+            ]
+
+        # Adding SSL profiles
+        conf += [
             # SSL Profile for TLSv1
             ('sslProfile', {'name': 'ssl-profile-tls1',
                             'caCertFile': cls.ssl_file('ca-certificate.pem'),
@@ -229,7 +270,9 @@ class RouterTestSslClient(RouterTestSslBase):
                                        'DH+AES:RSA+AESGCM:RSA+AES:!aNULL:!MD5:!DSS',
                             'protocols': 'SSLv23',
                             'password': 'server-password'})
-        ])
+        ]
+
+        config = Qdrouterd.Config(conf)
 
         cls.routers.append(cls.tester.qdrouterd("A", config, wait=False))
         cls.routers[0].wait_ports()
@@ -310,76 +353,110 @@ class RouterTestSslClient(RouterTestSslBase):
         connection.close()
         return True
 
+    def get_expected_tls_result(self, expected_results):
+        """
+        Expects a list with three boolean elements, representing
+        TLSv1, TLSv1.1 and TLSv1.2 (in the respective order).
+        When using OpenSSL >= 1.1.x, allowance of a given TLS version is
+        based on MinProtocol / MaxProtocol definitions.
+        It is also important
+        to mention that TLSv1.2 is being allowed even when not specified in a
+        listener when using OpenSSL >= 1.1.x.
+
+        :param expected_results:
+        :return:
+        """
+        (tlsv1, tlsv1_1, tlsv1_2) = expected_results
+        return [self.OPENSSL_ALLOW_TLSV1 and tlsv1,
+                self.OPENSSL_ALLOW_TLSV1_1 and tlsv1_1,
+                self.OPENSSL_VER_1_1_GT or (self.OPENSSL_ALLOW_TLSV1_2 and tlsv1_2)]
+
+    @SkipIfNeeded(RouterTestSslBase.DISABLE_SSL_TESTING, "Unable to determine MinProtocol")
     def test_tls1_only(self):
         """
         Expects TLSv1 only is allowed
         """
-        self.assertEquals([True, False, False],
+        self.assertEquals(self.get_expected_tls_result([True, False, False]),
                           self.get_allowed_protocols(self.PORT_TLS1))
 
+    @SkipIfNeeded(RouterTestSslBase.DISABLE_SSL_TESTING, "Unable to determine MinProtocol")
     def test_tls11_only(self):
         """
         Expects TLSv1.1 only is allowed
         """
-        self.assertEquals([False, True, False],
+        self.assertEquals(self.get_expected_tls_result([False, True, False]),
                           self.get_allowed_protocols(self.PORT_TLS11))
 
+    @SkipIfNeeded(RouterTestSslBase.DISABLE_SSL_TESTING, "Unable to determine MinProtocol")
     def test_tls12_only(self):
         """
         Expects TLSv1.2 only is allowed
         """
-        self.assertEquals([False, False, True],
+        self.assertEquals(self.get_expected_tls_result([False, False, True]),
                           self.get_allowed_protocols(self.PORT_TLS12))
 
+    @SkipIfNeeded(RouterTestSslBase.DISABLE_SSL_TESTING, "Unable to determine MinProtocol")
     def test_tls1_tls11_only(self):
         """
         Expects TLSv1 and TLSv1.1 only are allowed
         """
-        self.assertEquals([True, True, False],
+        self.assertEquals(self.get_expected_tls_result([True, True, False]),
                           self.get_allowed_protocols(self.PORT_TLS1_TLS11))
 
+    @SkipIfNeeded(RouterTestSslBase.DISABLE_SSL_TESTING, "Unable to determine MinProtocol")
     def test_tls1_tls12_only(self):
         """
         Expects TLSv1 and TLSv1.2 only are allowed
         """
-        self.assertEquals([True, False, True],
+        self.assertEquals(self.get_expected_tls_result([True, False, True]),
                           self.get_allowed_protocols(self.PORT_TLS1_TLS12))
 
+    @SkipIfNeeded(RouterTestSslBase.DISABLE_SSL_TESTING, "Unable to determine MinProtocol")
     def test_tls11_tls12_only(self):
         """
         Expects TLSv1.1 and TLSv1.2 only are allowed
         """
-        self.assertEquals([False, True, True],
+        self.assertEquals(self.get_expected_tls_result([False, True, True]),
                           self.get_allowed_protocols(self.PORT_TLS11_TLS12))
 
+    @SkipIfNeeded(RouterTestSslBase.DISABLE_SSL_TESTING, "Unable to determine MinProtocol")
     def test_tls_all(self):
         """
         Expects all supported versions: TLSv1, TLSv1.1 and TLSv1.2 to be allowed
         """
-        self.assertEquals([True, True, True],
+        self.assertEquals(self.get_expected_tls_result([True, True, True]),
                           self.get_allowed_protocols(self.PORT_TLS_ALL))
 
+    @SkipIfNeeded(RouterTestSslBase.DISABLE_SSL_TESTING, "Unable to determine MinProtocol")
     def test_ssl_invalid(self):
         """
         Expects connection is rejected as SSL is no longer supported
         """
         self.assertEqual(False, self.is_proto_allowed(self.PORT_SSL3, 'SSLv3'))
 
+    @SkipIfNeeded(not SASL.extended(), "Cyrus library not available. skipping test")
     def test_ssl_sasl_client_valid(self):
         """
         Attempts to connect a Proton client using a valid SASL authentication info
         and forcing the TLS protocol version, which should be accepted by the listener.
         :return:
         """
+        if not SASL.extended():
+            self.skipTest("Cyrus library not available. skipping test")
+
         self.assertTrue(self.is_ssl_sasl_client_accepted(self.PORT_TLS_SASL, "TLSv1"))
         self.assertTrue(self.is_ssl_sasl_client_accepted(self.PORT_TLS_SASL, "TLSv1.2"))
 
+    @SkipIfNeeded(not SASL.extended(), "Cyrus library not available. skipping test")
     def test_ssl_sasl_client_invalid(self):
         """
         Attempts to connect a Proton client using a valid SASL authentication info
         and forcing the TLS protocol version, which should be rejected by the listener.
         :return:
         """
+        if not SASL.extended():
+            self.skipTest("Cyrus library not available. skipping test")
+
         self.assertFalse(self.is_ssl_sasl_client_accepted(self.PORT_TLS_SASL, "TLSv1.1"))
 
 
@@ -568,6 +645,9 @@ class RouterTestSslInterRouter(RouterTestSslBase):
         Retrieves connected router nodes.
         :return:
         """
+        if not SASL.extended():
+            self.skipTest("Cyrus library not available. skipping test")
+
         url = Url("amqp://0.0.0.0:%d/$management" % self.PORT_NO_SSL)
         node = Node.connect(url)
         response = node.query(type="org.apache.qpid.dispatch.router.node", attribute_names=["id"])
@@ -577,10 +657,14 @@ class RouterTestSslInterRouter(RouterTestSslBase):
         node.close()
         return router_nodes
 
+    @SkipIfNeeded(not SASL.extended(), "Cyrus library not available. skipping test")
     def test_connected_tls_sasl_routers(self):
         """
         Validates if all expected routers are connected in the network
         """
+        if not SASL.extended():
+            self.skipTest("Cyrus library not available. skipping test")
+
         router_nodes = self.get_router_nodes()
         self.assertTrue(router_nodes)
         for node in router_nodes:

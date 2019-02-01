@@ -23,23 +23,19 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 from time import sleep
+import json
 import unittest2 as unittest
 import logging
-from proton import Message, PENDING, ACCEPTED, REJECTED, Timeout, Delivery
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT
+from threading import Timer
+from subprocess import PIPE, STDOUT
+from proton import Message, Timeout, Delivery
+from system_test import TestCase, Process, Qdrouterd, main_module, TIMEOUT
 from system_test import AsyncTestReceiver
 
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, AtLeastOnce
 from proton.utils import BlockingConnection
 from qpid_dispatch.management.client import Node
-
-
-# PROTON-828:
-try:
-    from proton import MODIFIED
-except ImportError:
-    from proton import PN_STATUS_MODIFIED as MODIFIED
 
 
 class TwoRouterTest(TestCase):
@@ -1272,6 +1268,204 @@ class ThreeAck(MessagingHandler):
         Container(self).run()
         self.test.assertEqual(3, self.phase)
 
+
+class TwoRouterConnection(TestCase):
+    def __init__(self, test_method):
+        TestCase.__init__(self, test_method)
+        self.success = False
+        self.timer_delay = 4
+        self.max_attempts = 2
+        self.attempts = 0
+        self.local_node = None
+
+    @classmethod
+    def router(cls, name, config):
+        config = Qdrouterd.Config(config)
+
+        cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
+
+    @classmethod
+    def setUpClass(cls):
+        super(TwoRouterConnection, cls).setUpClass()
+
+        cls.routers = []
+
+        cls.B_normal_port_1 = cls.tester.get_port()
+        cls.B_normal_port_2 = cls.tester.get_port()
+
+        TwoRouterConnection.router('A', [
+                        ('router', {'mode': 'interior', 'id': 'A'}),
+                        ('listener', {'host': '0.0.0.0', 'role': 'normal',
+                                      'port': cls.tester.get_port()}),
+                        ]
+              )
+
+        TwoRouterConnection.router('B',
+                    [
+                        ('router', {'mode': 'interior', 'id': 'B'}),
+                        ('listener', {'host': '0.0.0.0', 'role': 'normal',
+                                      'port': cls.B_normal_port_1}),
+                        ('listener', {'host': '0.0.0.0', 'role': 'normal',
+                                      'port': cls.B_normal_port_2}),
+
+                    ]
+               )
+
+    def address(self):
+        return self.routers[0].addresses[0]
+
+    def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
+        p = self.popen(
+            ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address(), '--indent=-1', '--timeout', str(TIMEOUT)],
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
+            universal_newlines=True)
+        out = p.communicate(input)[0]
+        try:
+            p.teardown()
+        except Exception as e:
+            raise Exception(out if out else str(e))
+        return out
+
+    def can_terminate(self):
+        if self.attempts == self.max_attempts:
+            return True
+
+        if self.success:
+            return True
+
+        return False
+
+    def check_connections(self):
+        res = self.local_node.query(type='org.apache.qpid.dispatch.connection')
+        results = res.results
+
+        # If DISPATCH-1093 was not fixed, there would be an additional
+        # connection created and hence the len(results) would be 4
+
+        # Since DISPATCH-1093 is fixed, len(results would be 3 which is what
+        # we would expect.
+
+        if len(results) != 3:
+            self.schedule_num_connections_test()
+        else:
+            self.success = True
+
+    def schedule_num_connections_test(self):
+        if self.attempts < self.max_attempts:
+            if not self.success:
+                Timer(self.timer_delay, self.check_connections).start()
+                self.attempts += 1
+
+    def test_create_connectors(self):
+        self.local_node = Node.connect(self.routers[0].addresses[0],
+                                       timeout=TIMEOUT)
+
+        res = self.local_node.query(type='org.apache.qpid.dispatch.connection')
+        results = res.results
+
+        self.assertEqual(1, len(results))
+
+        long_type = 'org.apache.qpid.dispatch.connector' ''
+
+        create_command = 'CREATE --type=' + long_type + ' --name=foo' + ' host=0.0.0.0 port=' + str(TwoRouterConnection.B_normal_port_1)
+
+        self.run_qdmanage(create_command)
+
+        create_command = 'CREATE --type=' + long_type + ' --name=bar' + ' host=0.0.0.0 port=' + str(TwoRouterConnection.B_normal_port_2)
+
+        self.run_qdmanage(create_command)
+
+        self.schedule_num_connections_test()
+
+        while not self.can_terminate():
+            pass
+
+        self.assertTrue(self.success)
+
+class PropagationTest(TestCase):
+
+    inter_router_port = None
+
+    @classmethod
+    def setUpClass(cls):
+        """Start a router and a messenger"""
+        super(PropagationTest, cls).setUpClass()
+
+        def router(name, extra_config):
+
+            config = [
+                ('router', {'mode': 'interior', 'id': 'QDR.%s'%name}),
+
+                ('listener', {'port': cls.tester.get_port()}),
+
+            ] + extra_config
+
+            config = Qdrouterd.Config(config)
+
+            cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
+
+        cls.routers = []
+
+        inter_router_port = cls.tester.get_port()
+        router('A', [('listener', {'role': 'inter-router', 'port': inter_router_port}), ('address', {'prefix': 'multicast', 'distribution': 'multicast'})])
+        router('B', [('connector', {'role': 'inter-router', 'port': inter_router_port})])
+
+        cls.routers[0].wait_router_connected('QDR.B')
+        cls.routers[1].wait_router_connected('QDR.A')
+
+    def test_propagation_of_locally_undefined_address(self):
+        test = MulticastTestClient(self.routers[0].addresses[0], self.routers[1].addresses[0])
+        test.run()
+        self.assertEqual(None, test.error)
+        self.assertEqual(test.received, 2)
+
+class CreateReceiver(MessagingHandler):
+    def __init__(self, connection, address):
+        super(CreateReceiver, self).__init__()
+        self.connection = connection
+        self.address = address
+
+    def on_timer_task(self, event):
+        event.container.create_receiver(self.connection, self.address)
+
+class DelayedSend(MessagingHandler):
+    def __init__(self, connection, address, message):
+        super(DelayedSend, self).__init__()
+        self.connection = connection
+        self.address = address
+        self.message = message
+
+    def on_timer_task(self, event):
+        event.container.create_sender(self.connection, self.address).send(self.message)
+
+class MulticastTestClient(MessagingHandler):
+    def __init__(self, router1, router2):
+        super(MulticastTestClient, self).__init__()
+        self.routers = [router1, router2]
+        self.received = 0
+        self.error = None
+
+    def on_start(self, event):
+        self.connections = [event.container.connect(r) for r in self.routers]
+        event.container.create_receiver(self.connections[0], "multicast")
+        # wait for knowledge of receiver1 to propagate to second router
+        event.container.schedule(5, CreateReceiver(self.connections[1], "multicast"))
+        event.container.schedule(7, DelayedSend(self.connections[1], "multicast", Message(body="testing1,2,3")))
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+
+    def on_message(self, event):
+        self.received += 1
+        event.connection.close()
+        if self.received == 2:
+            self.timer.cancel()
+
+    def timeout(self):
+        self.error = "Timeout Expired:received=%d" % self.received
+        for c in self.connections:
+            c.close()
+
+    def run(self):
+        Container(self).run()
 
 if __name__ == '__main__':
     unittest.main(main_module())

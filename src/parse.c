@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <limits.h>
 #include <assert.h>
+#include <inttypes.h>
 
 DEQ_DECLARE(qd_parsed_field_t, qd_parsed_field_list_t);
 
@@ -362,8 +363,13 @@ uint32_t qd_parse_as_uint(qd_parsed_field_t *field)
 {
     uint32_t result = 0;
     uint64_t tmp = qd_parse_as_ulong(field);
-    if (tmp <= UINT_MAX)
-        result = tmp;
+    if (qd_parse_ok(field)) {
+        if (tmp <= UINT32_MAX) {
+            result = tmp;
+        } else {
+            field->parse_error = "Integer value too large to parse as uint";
+        }
+    }
 
     return result;
 }
@@ -415,15 +421,37 @@ uint64_t qd_parse_as_ulong(qd_parsed_field_t *field)
     case QD_AMQP_SYM8:
     case QD_AMQP_SYM32:
         {
-            char buf[72];
-            unsigned long tmp;
+            // conversion from string to 64 bit unsigned integer:
+            // the maximum unsigned 64 bit value would need 20 characters.
+            char buf[64];
             qd_iterator_strncpy(field->raw_iter, buf, sizeof(buf));
-            if (sscanf(buf, "%lu", &tmp) == 1)
-                result = tmp;
+            if (sscanf(buf, "%"SCNu64, &result) != 1)
+                field->parse_error = "Cannot convert string to unsigned long";
         }
         break;
 
+    case QD_AMQP_BYTE:
+    case QD_AMQP_SHORT:
+    case QD_AMQP_INT:
+    case QD_AMQP_SMALLINT:
+    case QD_AMQP_LONG:
+    case QD_AMQP_SMALLLONG:
+    {
+        // if a signed integer is positive, accept it
+        int64_t ltmp = qd_parse_as_long(field);
+        if (qd_parse_ok(field)) {
+            if (ltmp >= 0) {
+                result = (uint64_t)ltmp;
+            } else {
+                field->parse_error = "Unable to parse negative integer as unsigned";
+            }
+        }
+    }
+    break;
+
+
     default:
+        field->parse_error = "Unable to parse as an unsigned integer";
         // catch any missing types during development
         assert(false);
     }
@@ -436,8 +464,13 @@ int32_t qd_parse_as_int(qd_parsed_field_t *field)
 {
     int32_t result = 0;
     int64_t tmp = qd_parse_as_long(field);
-    if (INT_MIN <= tmp && tmp <= INT_MAX)
-        result = tmp;
+    if (qd_parse_ok(field)) {
+        if (INT32_MIN <= tmp && tmp <= INT32_MAX) {
+            result = tmp;
+        } else {
+            field->parse_error = "Integer value too large to parse as int";
+        }
+    }
 
     return result;
 }
@@ -500,15 +533,48 @@ int64_t qd_parse_as_long(qd_parsed_field_t *field)
     case QD_AMQP_SYM8:
     case QD_AMQP_SYM32:
         {
+            // conversion from string to 64 bit integer:
+            // the maximum 64 bit value would need 20 characters.
             char buf[64];
-            long int tmp;
             qd_iterator_strncpy(field->raw_iter, buf, sizeof(buf));
-            if (sscanf(buf, "%li", &tmp) == 1)
-                result = tmp;
+            if (sscanf(buf, "%"SCNi64, &result) != 1)
+                field->parse_error = "Cannot convert string to long";
         }
         break;
 
+    case QD_AMQP_UBYTE:
+    case QD_AMQP_SMALLUINT:
+    case QD_AMQP_SMALLULONG:
+    case QD_AMQP_USHORT:
+    case QD_AMQP_UINT:
+    case QD_AMQP_ULONG:
+    {
+        // if an unsigned integer "fits" accept it
+        uint64_t utmp = qd_parse_as_ulong(field);
+        if (qd_parse_ok(field)) {
+            uint64_t max = INT8_MAX;
+            switch (field->tag) {
+            case QD_AMQP_USHORT:
+                max = INT16_MAX;
+                break;
+            case QD_AMQP_UINT:
+                max = INT32_MAX;
+                break;
+            case QD_AMQP_ULONG:
+                max = INT64_MAX;
+                break;
+            }
+            if (utmp <= max) {
+                result = (int64_t)utmp;
+            } else {
+                field->parse_error = "Unable to parse unsigned integer as a signed integer";
+            }
+        }
+    }
+    break;
+
     default:
+        field->parse_error = "Unable to parse as a signed integer";
         // catch any missing types during development
         assert(false);
     }

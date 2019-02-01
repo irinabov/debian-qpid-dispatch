@@ -21,21 +21,6 @@
 #include <strings.h>
 #include <stdio.h>
 
-struct qdr_terminus_t {
-    qdr_field_t            *address;
-    pn_durability_t         durability;
-    pn_expiry_policy_t      expiry_policy;
-    pn_seconds_t            timeout;
-    bool                    dynamic;
-    bool                    coordinator;
-    pn_distribution_mode_t  distribution_mode;
-    pn_data_t              *properties;
-    pn_data_t              *filter;
-    pn_data_t              *outcomes;
-    pn_data_t              *capabilities;
-};
-
-ALLOC_DECLARE(qdr_terminus_t);
 ALLOC_DEFINE(qdr_terminus_t);
 
 const char* QDR_COORDINATOR_ADDRESS = "$coordinator";
@@ -143,6 +128,26 @@ bool qdr_terminus_has_capability(qdr_terminus_t *term, const char *capability)
 }
 
 
+int qdr_terminus_waypoint_capability(qdr_terminus_t *term)
+{
+    pn_data_t *cap = term->capabilities;
+    pn_data_rewind(cap);
+    pn_data_next(cap);
+    if (cap && pn_data_type(cap) == PN_SYMBOL) {
+        pn_bytes_t sym = pn_data_get_symbol(cap);
+        size_t     len = strlen(QD_CAPABILITY_WAYPOINT_DEFAULT);
+        if (sym.size >= len && strncmp(sym.start, QD_CAPABILITY_WAYPOINT_DEFAULT, len) == 0) {
+            if (sym.size == len)
+                return 1;    // This is the default ordinal
+            if (sym.size == len + 2 && sym.start[len + 1] > '0' && sym.start[len + 1] <= '9')
+                return (int) (sym.start[len + 1] - '0');
+        }
+    }
+
+    return 0;
+}
+
+
 bool qdr_terminus_is_anonymous(qdr_terminus_t *term)
 {
     return term == 0 || (term->address == 0 && !term->dynamic);
@@ -181,7 +186,7 @@ void qdr_terminus_set_address_iterator(qdr_terminus_t *term, qd_iterator_t *addr
 
 qd_iterator_t *qdr_terminus_get_address(qdr_terminus_t *term)
 {
-    if (qdr_terminus_is_anonymous(term))
+    if (term->address == 0)
         return 0;
 
     return term->address->iterator;

@@ -25,10 +25,11 @@ from __future__ import print_function
 import unittest2 as unittest
 import os, json
 from subprocess import PIPE, Popen, STDOUT
-from system_test import TestCase, Qdrouterd, main_module, DIR, TIMEOUT, Process
+from system_test import TestCase, Qdrouterd, main_module, DIR, TIMEOUT, Process, SkipIfNeeded
 from proton import Array, Data, Message, SASL, symbol, UNDESCRIBED
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
+
 
 class AuthServicePluginAuthzTest(TestCase):
     @classmethod
@@ -72,9 +73,12 @@ mech_list: SCRAM-SHA-1 PLAIN
         cls.auth_service_port = cls.tester.get_port()
         cls.tester.popen(['/usr/bin/env', 'python', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'authservice.py'), '-a', 'amqps://127.0.0.1:%d' % cls.auth_service_port, '-c', os.getcwd()], expect=Process.RUNNING)
 
+        policy_config_path = os.path.join(DIR, 'policy-authz')
+
         cls.router_port = cls.tester.get_port()
         cls.tester.qdrouterd('router', Qdrouterd.Config([
                      ('sslProfile', {'name':'myssl'}),
+                     ('policy', {'maxConnections': 2, 'policyDir': policy_config_path, 'enableVhostPolicy': 'true'}),
                      # authService attribute has been deprecated. We are using it here to make sure that we are
                      # still backward compatible.
                      ('authServicePlugin', {'name':'myauth', 'sslProfile':'myssl', 'port': cls.auth_service_port, 'host': '127.0.0.1'}),
@@ -84,10 +88,8 @@ mech_list: SCRAM-SHA-1 PLAIN
                                  'saslConfigPath': os.getcwd()})
         ])).wait_ready()
 
+    @SkipIfNeeded(not SASL.extended(), "Cyrus library not available. skipping test")
     def test_authorized(self):
-        if not SASL.extended():
-            self.skipTest("Cyrus library not available. skipping test")
-
         container = Container()
         client = ConnectionHandler('foo', 1)
         container.connect("guest:guest@127.0.0.1:%d" % self.router_port, handler=client)
@@ -96,10 +98,8 @@ mech_list: SCRAM-SHA-1 PLAIN
         self.assertEqual(1, client.received)
         self.assertEqual(0, len(client.errors))
 
+    @SkipIfNeeded(not SASL.extended(), "Cyrus library not available. skipping test")
     def test_unauthorized(self):
-        if not SASL.extended():
-            self.skipTest("Cyrus library not available. skipping test")
-
         container = Container()
         client = ConnectionHandler('bar', 1)
         container.connect("guest:guest@127.0.0.1:%d" % self.router_port, handler=client)
@@ -110,10 +110,8 @@ mech_list: SCRAM-SHA-1 PLAIN
         self.assertEqual('amqp:unauthorized-access', client.errors[0])
         self.assertEqual('amqp:unauthorized-access', client.errors[1])
 
+    @SkipIfNeeded(not SASL.extended(), "Cyrus library not available. skipping test")
     def test_wildcard(self):
-        if not SASL.extended():
-            self.skipTest("Cyrus library not available. skipping test")
-
         container = Container()
         client = ConnectionHandler('whatever', 1)
         container.connect("admin:admin@127.0.0.1:%d" % self.router_port, handler=client)
@@ -122,10 +120,8 @@ mech_list: SCRAM-SHA-1 PLAIN
         self.assertEqual(1, client.received)
         self.assertEqual(0, len(client.errors))
 
+    @SkipIfNeeded(not SASL.extended(), "Cyrus library not available. skipping test")
     def test_dynamic_source_anonymous_sender(self):
-        if not SASL.extended():
-            self.skipTest("Cyrus library not available. skipping test")
-
         container = Container()
         client = DynamicSourceAnonymousSender()
         container.connect("admin:admin@127.0.0.1:%d" % self.router_port, handler=client)

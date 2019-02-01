@@ -75,7 +75,7 @@ export class ListController {
         id: 'delete',
         op: 'DELETE',
         title: 'Delete',
-        isValid: function () { return $scope.operations.indexOf(this.op) > -1; }
+        isValid: function () { return canDelete(); }
       },
       {
         content: '<a><i class="icon-eye-open"></i> Fetch</a>',
@@ -85,6 +85,16 @@ export class ListController {
         isValid: function () { return ($scope.selectedEntity === 'log'); }
       }
     ];
+    let canDelete = function () {
+      if ($scope.selectedEntity === 'listener' && $scope.detailFields) {
+        if ($scope.detailFields.some( function (field) {
+          return field.attributeName === 'Http' && field.attributeValue === true;
+        })) {
+          return false;
+        }
+      }
+      return $scope.operations.indexOf('DELETE') > -1;
+    };
     $scope.operations = [];
     $scope.currentMode = $scope.modes[0];
     $scope.isModeSelected = function (mode) {
@@ -185,8 +195,6 @@ export class ListController {
           list.push(tnode.key);
         }
       });
-      console.log('saving expanded list');
-      console.log(list);
       localStorage[ListExpandedKey] = JSON.stringify(list);
     };
 
@@ -686,21 +694,23 @@ export class ListController {
           {
             field: 'attributeName',
             displayName: 'Attribute',
-            cellTemplate: '<div title="{{row.entity.title}}" class="listAttrName ui-grid-cell-contents">{{COL_FIELD CUSTOM_FILTERS | pretty}}<button ng-if="row.entity.graph" title="Click to view/add a graph" ng-click="grid.appScope.addToGraph(row.entity)" ng-class="{\'btn-success\': row.entity.chartExists}" class="btn"><i ng-class="{\'icon-bar-chart\': row.entity.graph == true }"></i></button></div>'
+            cellTemplate: '<div title="{{row.entity.title}}" class="listAttrName ui-grid-cell-contents"><button ng-if="row.entity.graph" title="Click to view/add a graph" ng-click="grid.appScope.addToGraph(row.entity)" ng-class="{\'btn-success\': row.entity.chartExists}" class="btn"><i ng-class="{\'icon-bar-chart\': row.entity.graph == true }"></i></button>{{COL_FIELD CUSTOM_FILTERS | pretty}}</div>',
+            width: aggregateEntities.indexOf($scope.selectedEntity) > -1 ? '40%' : '50%'
           },
           {
             field: 'attributeValue',
             displayName: 'Value',
-            cellTemplate: '<div class="ui-grid-cell-contents" ng-class="{\'changed\': row.entity.changed == 1}">{{COL_FIELD CUSTOM_FILTERS | pretty}}</div>'
+            cellTemplate: '<div class="ui-grid-cell-contents" ng-class="{\'changed\': row.entity.changed == 1}">{{COL_FIELD CUSTOM_FILTERS | pretty}}</div>',
+            width: aggregateEntities.indexOf($scope.selectedEntity) > -1 ? '25%' : '50%'
           }
         ];
         if (aggregateEntities.indexOf($scope.selectedEntity) > -1) {
           $scope.detailCols.push(
             {
-              width: '10%',
+              width: '35%',
               field: 'aggregateValue',
               displayName: 'Aggregate',
-              cellTemplate: '<div popover-enable="{{grid.appScope.aggregateTipEnabled(row)}}" uib-popover-html="grid.appScope.aggregateTip" popover-append-to-body="true" ng-mouseover="grid.appScope.genAggregateTip(row)" popover-trigger="\'mouseenter\'" class="listAggrValue ui-grid-cell-contents" ng-class="{\'changed\': row.entity.changed == 1}">{{COL_FIELD CUSTOM_FILTERS}} <button title="Click to view/add a graph" ng-if="row.entity.graph" ng-click="grid.appScope.addAllToGraph(row.entity)" ng-class="{\'btn-success\': row.entity.aggchartExists}" class="btn"><i ng-class="{\'icon-bar-chart\': row.entity.graph == true }"></i></button></div>',
+              cellTemplate: '<div popover-enable="{{grid.appScope.aggregateTipEnabled(row)}}" uib-popover-html="grid.appScope.aggregateTip" popover-append-to-body="true" ng-mouseover="grid.appScope.genAggregateTip(row)" popover-trigger="\'mouseenter\'" class="listAggrValue ui-grid-cell-contents" ng-class="{\'changed\': row.entity.changed == 1}"><button title="Click to view/add a graph" ng-if="row.entity.graph" ng-click="grid.appScope.addAllToGraph(row.entity)" ng-class="{\'btn-success\': row.entity.aggchartExists}" class="btn"><i ng-class="{\'icon-bar-chart\': row.entity.graph == true }"></i></button>{{COL_FIELD CUSTOM_FILTERS}}</div>',
               cellClass: 'aggregate'
             }
           );
@@ -724,12 +734,14 @@ export class ListController {
         {
           field: 'attributeName',
           displayName: 'Attribute',
-          cellTemplate: '<div title="{{row.entity.title}}" class="listAttrName ui-grid-cell-contents">{{COL_FIELD CUSTOM_FILTERS | pretty}}<button ng-if="row.entity.graph" title="Click to view/add a graph" ng-click="grid.appScope.addToGraph(row.entity)" ng-class="{\'btn-success\': row.entity.chartExists}" class="btn"><i ng-class="{\'icon-bar-chart\': row.entity.graph == true }"></i></button></div>'
+          cellTemplate: '<div title="{{row.entity.title}}" class="listAttrName ui-grid-cell-contents">{{COL_FIELD CUSTOM_FILTERS | pretty}}<button ng-if="row.entity.graph" title="Click to view/add a graph" ng-click="grid.appScope.addToGraph(row.entity)" ng-class="{\'btn-success\': row.entity.chartExists}" class="btn"><i ng-class="{\'icon-bar-chart\': row.entity.graph == true }"></i></button></div>',
+          width: '50%'
         },
         {
           field: 'attributeValue',
           displayName: 'Value',
-          cellTemplate: '<div class="ui-grid-cell-contents" ng-class="{\'changed\': row.entity.changed == 1}">{{COL_FIELD CUSTOM_FILTERS | pretty}}</div>'
+          cellTemplate: '<div class="ui-grid-cell-contents" ng-class="{\'changed\': row.entity.changed == 1}">{{COL_FIELD CUSTOM_FILTERS | pretty}}</div>',
+          width: '50%'
         }
       ],
       enableColumnResize: true,
@@ -840,7 +852,9 @@ export class ListController {
       QDRService.management.topology.stopUpdating();
       QDRService.management.topology.delUpdatedAction('initList');
 
-      $scope.nodes = QDRService.management.topology.nodeList().sort(function (a, b) { return a.name.toLowerCase() > b.name.toLowerCase();});
+      $scope.nodes = QDRService.management.topology.nodeList().sort(function (a, b) { 
+        return a.name.toLowerCase() > b.name.toLowerCase() ? 1 : a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 0;
+      });
       // unable to get node list? Bail.
       if ($scope.nodes.length == 0) {
         $location.path('/connect');

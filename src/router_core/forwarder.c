@@ -23,6 +23,39 @@
 #include <strings.h>
 #include "forwarder.h"
 
+typedef struct qdr_forward_deliver_info_t {
+    DEQ_LINKS(struct qdr_forward_deliver_info_t);
+    qdr_link_t     *out_link;
+    qdr_delivery_t *out_dlv;
+} qdr_forward_deliver_info_t;
+
+ALLOC_DECLARE(qdr_forward_deliver_info_t);
+DEQ_DECLARE(qdr_forward_deliver_info_t, qdr_forward_deliver_info_list_t);
+
+ALLOC_DEFINE(qdr_forward_deliver_info_t);
+
+
+static qdr_link_t * peer_data_link(qdr_core_t *core,
+                                   qdr_node_t *node,
+                                   int         priority)
+{
+    int nlmb = node->link_mask_bit;
+
+    if (nlmb < 0 || priority < 0)
+        return 0;
+
+    // Try to return the requested priority link, but if it does
+    // not exist, return the closest one that is lower.
+    qdr_link_t * link = 0;
+    while (1) {
+        if ((link = core->data_links_by_mask_bit[nlmb].links[priority]))
+            return link;
+        if (-- priority < 0)
+            return 0;
+    }
+    return link;
+}
+
 
 //==================================================================================
 // Built-in Forwarders
@@ -117,6 +150,16 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
 static void qdr_forward_drop_presettled_CT_LH(qdr_core_t *core, qdr_link_t *link)
 {
     qdr_delivery_t *dlv = DEQ_HEAD(link->undelivered);
+
+    if (!dlv)
+        return;
+    //
+    // Remove leading delivery from consideration.
+    // Parts of this message may have been transmitted already and dropping
+    // it may corrupt outbound data.
+    //
+    dlv = DEQ_NEXT(dlv);
+
     qdr_delivery_t *next;
 
     while (dlv) {
@@ -186,7 +229,7 @@ void qdr_forward_deliver_CT(qdr_core_t *core, qdr_link_t *out_link, qdr_delivery
         work->value     = 1;
         DEQ_INSERT_TAIL(out_link->work_list, work);
     }
-    qdr_add_link_ref(&out_link->conn->links_with_work, out_link, QDR_LINK_LIST_CLASS_WORK);
+    qdr_add_link_ref(out_link->conn->links_with_work + out_link->priority, out_link, QDR_LINK_LIST_CLASS_WORK);
 
     out_dlv->link_work = work;
     sys_mutex_unlock(out_link->conn->work_lock);
@@ -214,7 +257,7 @@ void qdr_forward_deliver_CT(qdr_core_t *core, qdr_link_t *out_link, qdr_delivery
 
 void qdr_forward_on_message(qdr_core_t *core, qdr_general_work_t *work)
 {
-    work->on_message(work->on_message_context, work->msg, work->maskbit, work->inter_router_cost);
+    work->on_message(work->on_message_context, work->msg, work->maskbit, work->inter_router_cost, work->in_conn_id);
     qd_message_free(work->msg);
 }
 
@@ -227,7 +270,33 @@ void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_li
     work->msg                = qd_message_copy(msg);
     work->maskbit            = link ? link->conn->mask_bit : 0;
     work->inter_router_cost  = link ? link->conn->inter_router_cost : 1;
+    work->in_conn_id         = link ? link->conn->identity : 0;
     qdr_post_general_work_CT(core, work);
+}
+
+
+/**
+ * Get the effective priority for a message.
+ *
+ * This function returns a priority value for a message (and address).  If the message
+ * has no priority header, the default priority is chosen.
+ *
+ * If the address has a defined priority, that value takes precedence.
+ * Otherwise the message priority is used, which has a default value
+ * if none was explicitly set.
+ */
+static uint8_t qdr_forward_effective_priority(qd_message_t *msg, qdr_address_t *addr)
+{
+    return addr->priority >= 0 ? addr->priority : qd_message_get_priority(msg);
+}
+
+
+/**
+ * Determine if forwarding a delivery onto a link will result in edge-echo.
+ */
+static inline bool qdr_forward_edge_echo_CT(qdr_delivery_t *in_dlv, qdr_link_t *out_link)
+{
+    return (in_dlv && in_dlv->via_edge && in_dlv->link->conn == out_link->conn);
 }
 
 
@@ -243,6 +312,10 @@ int qdr_forward_multicast_CT(qdr_core_t      *core,
     qd_bitmask_t *link_exclusion       = !!in_delivery ? in_delivery->link_exclusion : 0;
     bool          presettled           = !!in_delivery ? in_delivery->settled : true;
     bool          receive_complete     = qd_message_receive_complete(qdr_delivery_message(in_delivery));
+    uint8_t       priority             = qdr_forward_effective_priority(msg, addr);
+
+    qdr_forward_deliver_info_list_t deliver_info_list;
+    DEQ_INIT(deliver_info_list);
 
     //
     // If the delivery is not presettled, set the settled flag for forwarding so all
@@ -260,14 +333,28 @@ int qdr_forward_multicast_CT(qdr_core_t      *core,
     if (!addr->local || exclude_inprocess) {
         qdr_link_ref_t *link_ref = DEQ_HEAD(addr->rlinks);
         while (link_ref) {
-            qdr_link_t     *out_link     = link_ref->link;
-            qdr_delivery_t *out_delivery = qdr_forward_new_delivery_CT(core, in_delivery, out_link, msg);
-            qdr_forward_deliver_CT(core, out_link, out_delivery);
-            fanout++;
-            if (out_link->link_type != QD_LINK_CONTROL && out_link->link_type != QD_LINK_ROUTER) {
-                addr->deliveries_egress++;
-                core->deliveries_egress++;
+            qdr_link_t *out_link = link_ref->link;
+
+            //
+            // Only forward via links that don't result in edge-echo.
+            //
+            if (!qdr_forward_edge_echo_CT(in_delivery, out_link)) {
+                qdr_delivery_t *out_delivery = qdr_forward_new_delivery_CT(core, in_delivery, out_link, msg);
+
+                // Store the out_link and out_delivery so we can forward the delivery later on
+                qdr_forward_deliver_info_t *deliver_info = new_qdr_forward_deliver_info_t();
+                ZERO(deliver_info);
+                deliver_info->out_dlv = out_delivery;
+                deliver_info->out_link = out_link;
+                DEQ_INSERT_TAIL(deliver_info_list, deliver_info);
+
+                fanout++;
+                if (out_link->link_type != QD_LINK_CONTROL && out_link->link_type != QD_LINK_ROUTER) {
+                    addr->deliveries_egress++;
+                    core->deliveries_egress++;
+                }
             }
+
             link_ref = DEQ_NEXT(link_ref);
         }
     }
@@ -321,7 +408,7 @@ int qdr_forward_multicast_CT(qdr_core_t      *core,
             else
                 next_node = rnode;
 
-            dest_link = control ? PEER_CONTROL_LINK(core, next_node) : PEER_DATA_LINK(core, next_node);
+            dest_link = control ? PEER_CONTROL_LINK(core, next_node) : peer_data_link(core, next_node, priority);
             if (dest_link && qd_bitmask_value(rnode->valid_origins, origin))
                 qd_bitmask_set_bit(link_set, dest_link->conn->mask_bit);
         }
@@ -334,10 +421,17 @@ int qdr_forward_multicast_CT(qdr_core_t      *core,
             qd_bitmask_clear_bit(link_set, link_bit);
             dest_link = control ?
                 core->control_links_by_mask_bit[link_bit] :
-                core->data_links_by_mask_bit[link_bit];
+                core->data_links_by_mask_bit[link_bit].links[priority];
             if (dest_link && (!link_exclusion || qd_bitmask_value(link_exclusion, link_bit) == 0)) {
                 qdr_delivery_t *out_delivery = qdr_forward_new_delivery_CT(core, in_delivery, dest_link, msg);
-                qdr_forward_deliver_CT(core, dest_link, out_delivery);
+
+                // Store the out_link and out_delivery so we can forward the delivery later on
+                qdr_forward_deliver_info_t *deliver_info = new_qdr_forward_deliver_info_t();
+                ZERO(deliver_info);
+                deliver_info->out_dlv = out_delivery;
+                deliver_info->out_link = dest_link;
+                DEQ_INSERT_TAIL(deliver_info_list, deliver_info);
+
                 fanout++;
                 addr->deliveries_transit++;
                 if (dest_link->link_type == QD_LINK_ROUTER)
@@ -352,7 +446,6 @@ int qdr_forward_multicast_CT(qdr_core_t      *core,
         //
         // Forward to in-process subscribers
         //
-
         qdr_subscription_t *sub = DEQ_HEAD(addr->subscriptions);
         while (sub) {
             //
@@ -374,6 +467,14 @@ int qdr_forward_multicast_CT(qdr_core_t      *core,
             addr->deliveries_to_container++;
             sub = DEQ_NEXT(sub);
         }
+    }
+
+    qdr_forward_deliver_info_t *deliver_info = DEQ_HEAD(deliver_info_list);
+    while (deliver_info) {
+        qdr_forward_deliver_CT(core, deliver_info->out_link, deliver_info->out_dlv);
+        DEQ_REMOVE_HEAD(deliver_info_list);
+        free_qdr_forward_deliver_info_t(deliver_info);
+        deliver_info = DEQ_HEAD(deliver_info_list);
     }
 
     if (in_delivery && !presettled) {
@@ -459,6 +560,13 @@ int qdr_forward_closest_CT(qdr_core_t      *core,
     // Forward to a local subscriber.
     //
     qdr_link_ref_t *link_ref = DEQ_HEAD(addr->rlinks);
+
+    //
+    // If this link results in edge-echo, skip to the next link in the list.
+    //
+    while (link_ref && qdr_forward_edge_echo_CT(in_delivery, link_ref->link))
+        link_ref = DEQ_NEXT(link_ref);
+
     if (link_ref) {
         out_link     = link_ref->link;
         out_delivery = qdr_forward_new_delivery_CT(core, in_delivery, out_link, msg);
@@ -469,6 +577,7 @@ int qdr_forward_closest_CT(qdr_core_t      *core,
         // so deliveries will be distributed among the subscribers in a round-robin pattern.
         //
         if (DEQ_SIZE(addr->rlinks) > 1) {
+            link_ref = DEQ_HEAD(addr->rlinks);
             DEQ_REMOVE_HEAD(addr->rlinks);
             DEQ_INSERT_TAIL(addr->rlinks, link_ref);
         }
@@ -509,7 +618,8 @@ int qdr_forward_closest_CT(qdr_core_t      *core,
             else
                 next_node = rnode;
 
-            out_link = control ? PEER_CONTROL_LINK(core, next_node) : PEER_DATA_LINK(core, next_node);
+            uint8_t priority = qdr_forward_effective_priority(msg, addr);
+            out_link = control ? PEER_CONTROL_LINK(core, next_node) : peer_data_link(core, next_node, priority);
             if (out_link) {
                 out_delivery = qdr_forward_new_delivery_CT(core, in_delivery, out_link, msg);
                 qdr_forward_deliver_CT(core, out_link, out_delivery);
@@ -573,15 +683,20 @@ int qdr_forward_balanced_CT(qdr_core_t      *core,
         bool        eligible = link->capacity > value;
 
         //
-        // If this is the best eligible link so far, record the fact.
-        // Otherwise, if this is the best ineligible link, make note of that.
+        // Only consider links that do not result in edge-echo.
         //
-        if (eligible && eligible_link_value > value) {
-            best_eligible_link  = link;
-            eligible_link_value = value;
-        } else if (!eligible && ineligible_link_value > value) {
-            best_ineligible_link  = link;
-            ineligible_link_value = value;
+        if (!qdr_forward_edge_echo_CT(in_delivery, link)) {
+            //
+            // If this is the best eligible link so far, record the fact.
+            // Otherwise, if this is the best ineligible link, make note of that.
+            //
+            if (eligible && eligible_link_value > value) {
+                best_eligible_link  = link;
+                eligible_link_value = value;
+            } else if (!eligible && ineligible_link_value > value) {
+                best_ineligible_link  = link;
+                ineligible_link_value = value;
+            }
         }
 
         link_ref = DEQ_NEXT(link_ref);
@@ -613,7 +728,8 @@ int qdr_forward_balanced_CT(qdr_core_t      *core,
         for (QD_BITMASK_EACH(addr->rnodes, node_bit, c)) {
             qdr_node_t *rnode     = core->routers_by_mask_bit[node_bit];
             qdr_node_t *next_node = rnode->next_hop ? rnode->next_hop : rnode;
-            qdr_link_t *link      = PEER_DATA_LINK(core, next_node);
+            uint8_t     priority  = qdr_forward_effective_priority(msg, addr);
+            qdr_link_t *link      = peer_data_link(core, next_node, priority);
             if (!link) continue;
             int         link_bit  = link->conn->mask_bit;
             int         value     = addr->outstanding_deliveries[link_bit];
@@ -761,55 +877,72 @@ bool qdr_forward_link_balanced_CT(qdr_core_t     *core,
                 else
                     next_node = rnode;
 
-                if (next_node && PEER_DATA_LINK(core, next_node))
-                    conn = PEER_DATA_LINK(core, next_node)->conn;
+                qdr_link_t * pdl = peer_data_link(core, next_node, 0);
+                if (next_node && pdl)
+                    conn = pdl->conn;
             }
         }
     }
 
     if (conn) {
-        qdr_link_t *out_link = new_qdr_link_t();
-        ZERO(out_link);
-        out_link->core           = core;
-        out_link->identity       = qdr_identifier(core);
-        out_link->conn           = conn;
-        out_link->link_type      = QD_LINK_ENDPOINT;
-        out_link->link_direction = qdr_link_direction(in_link) == QD_OUTGOING ? QD_INCOMING : QD_OUTGOING;
-        out_link->admin_enabled  = true;
-        out_link->terminus_addr  = 0;
-
-        if (strip) {
-            out_link->strip_prefix = strip;
-        }
-        if (insert) {
-            out_link->insert_prefix = insert;
-        }
-
-        out_link->oper_status    = QDR_LINK_OPER_DOWN;
-
-        out_link->name = strdup(in_link->disambiguated_name ? in_link->disambiguated_name : in_link->name);
-
-        out_link->connected_link = in_link;
-        in_link->connected_link  = out_link;
-
-        DEQ_INSERT_TAIL(core->open_links, out_link);
-        qdr_add_link_ref(&conn->links, out_link, QDR_LINK_LIST_CLASS_CONNECTION);
-
-        qdr_connection_work_t *work = new_qdr_connection_work_t();
-        ZERO(work);
-        work->work_type = QDR_CONNECTION_WORK_FIRST_ATTACH;
-        work->link      = out_link;
-        work->source    = source;
-        work->target    = target;
-
-        qdr_connection_enqueue_work_CT(core, conn, work);
-
+        qdr_forward_link_direct_CT(core, conn, in_link, source, target, strip, insert);
         return true;
     }
 
     free(insert);
     free(strip);
     return false;
+}
+
+
+void qdr_forward_link_direct_CT(qdr_core_t       *core,
+                                qdr_connection_t *conn,
+                                qdr_link_t       *in_link,
+                                qdr_terminus_t   *source,
+                                qdr_terminus_t   *target,
+                                char             *strip,
+                                char             *insert)
+{
+    qdr_link_t *out_link = new_qdr_link_t();
+    ZERO(out_link);
+    out_link->core           = core;
+    out_link->identity       = qdr_identifier(core);
+    out_link->conn           = conn;
+    out_link->link_type      = QD_LINK_ENDPOINT;
+    out_link->link_direction = qdr_link_direction(in_link) == QD_OUTGOING ? QD_INCOMING : QD_OUTGOING;
+    out_link->admin_enabled  = true;
+    out_link->attach_count   = 1;
+
+    if (strip) {
+        out_link->strip_prefix = strip;
+    }
+    if (insert) {
+        out_link->insert_prefix = insert;
+    }
+
+    out_link->oper_status    = QDR_LINK_OPER_DOWN;
+
+    out_link->name = strdup(in_link->disambiguated_name ? in_link->disambiguated_name : in_link->name);
+
+    out_link->connected_link = in_link;
+    in_link->connected_link  = out_link;
+
+    DEQ_INSERT_TAIL(core->open_links, out_link);
+    qdr_add_link_ref(&conn->links, out_link, QDR_LINK_LIST_CLASS_CONNECTION);
+
+    qdr_connection_work_t *work = new_qdr_connection_work_t();
+    ZERO(work);
+    work->work_type = QDR_CONNECTION_WORK_FIRST_ATTACH;
+    work->link      = out_link;
+    work->source    = source;
+    work->target    = target;
+
+    qdr_connection_enqueue_work_CT(core, conn, work);
+
+    if (qdr_link_direction(in_link) == QD_OUTGOING && in_link->credit_to_core > 0) {
+        qdr_link_issue_credit_CT(core, out_link, in_link->credit_stored, in_link->drain_mode);
+        in_link->credit_stored = 0;
+    }
 }
 
 

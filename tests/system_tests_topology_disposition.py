@@ -24,7 +24,7 @@ from __future__ import print_function
 
 import unittest, os, json
 from subprocess      import PIPE, STDOUT
-from proton          import Message, PENDING, ACCEPTED, REJECTED, RELEASED, SSLDomain, SSLUnavailable, Timeout
+from proton          import Message, SSLDomain, SSLUnavailable, Timeout
 from system_test     import TestCase, Qdrouterd, main_module, DIR, TIMEOUT, Process
 from proton.handlers import MessagingHandler
 from proton.reactor  import Container, AtMostOnce, AtLeastOnce, DynamicNodeProperties, LinkOption, ApplicationEvent, EventInjector
@@ -36,16 +36,6 @@ import time
 import datetime
 import pdb
 import inspect
-
-
-
-# PROTON-828:
-try:
-    from proton import MODIFIED
-except ImportError:
-    from proton import PN_STATUS_MODIFIED as MODIFIED
-
-
 
 
 #================================================
@@ -180,28 +170,40 @@ class TopologyDispositionTests ( TestCase ):
         #  Tail of arrow indicates initiator of connection.
         #  (The diagonal connections do not look very much like arrows, I fear...)
         #
-        #                1
+        #                2
         #         D ----------> A
         #         | \         > ^
         #         | 20\   50/   |
         #         |     \ /     |
-        #      1  |     / \     | 100
+        #      3  |     / \     | 100
         #         |   /     \   |
         #         v /         > |
         #         C ----------> B
-        #                1
+        #                4
         #
 
         cls.cost = dict()
         cls.cost [ 'AB' ] = 100
         cls.cost [ 'AC' ] =  50
-        cls.cost [ 'AD' ] =   1
-        cls.cost [ 'BC' ] =   1
+        cls.cost [ 'AD' ] =   2
+        cls.cost [ 'BC' ] =   4
         cls.cost [ 'BD' ] =  20
-        cls.cost [ 'CD' ] =   1
+        cls.cost [ 'CD' ] =   3
 
         # Add an extra, high-cost connection between A and D.
-        # This will be deleted in the first test.
+        # This will be deleted in the first test. Note that
+        # "more than one inter-router connections between two
+        # routers" is _not_ a supported configuration.
+        # Any of the connections may be used and the others are
+        # ignored. The multiple connections do not act as a
+        # "hot standby" nor as a "trunking" setup where the
+        # traffic between the routers is shared across the 
+        # connections.
+        # If the active connection is lost then the multiple
+        # connections are all considered for election and one
+        # of them is chosen. The router does not seamlessly 
+        # transfer the load to the unaffected connection.
+
         cls.cost [ 'AD2' ] =  11
 
         client_link_capacity       = 1000
@@ -368,7 +370,8 @@ class TopologyDispositionTests ( TestCase ):
 
         # 1 means skip that test.
         cls.skip = { 'test_01' : 0,
-                     'test_02' : 0
+                     'test_02' : 0,
+                     'test_03' : 0
                    }
 
 
@@ -397,6 +400,40 @@ class TopologyDispositionTests ( TestCase ):
         self.assertEqual ( None, test.error )
 
 
+    def test_03_connection_id_propagation ( self ):
+        name = 'test_03'
+        error = None
+        if self.skip [ name ] :
+            self.skipTest ( "Test skipped during development." )
+        st_key = "SERVER (trace) ["
+        qc_key = "qd.conn-id\"="
+        for letter in ['A', 'B', 'C', 'D']:
+            log_name = ('../setUpClass/%s.log' % letter)
+            with  open(log_name, 'r') as router_log:
+                log_lines = router_log.read().split("\n")
+                outbound_opens = [s for s in log_lines if "-> @open" in s]
+                for oopen in outbound_opens:
+                    sti = oopen.find(st_key)
+                    if sti < 0:
+                        error = "Log %s, line '%s' has no SERVER key" % (log_name, oopen)
+                        break
+                    qci = oopen.find(qc_key)
+                    if qci < 0:
+                        error = "Log %s, line '%s' has no qd.conn-id key" % (log_name, oopen)
+                        break
+                    sti += len(st_key)
+                    qci += len(qc_key)
+                    while not oopen[sti] == "]":
+                        if not oopen[sti] == oopen[qci]:
+                            error = "log %s, line '%s' server conn_id != published conn-id" % (log_name, oopen)
+                            break
+                        sti += 1
+                        qci += 1
+                    if oopen[qci].isdigit():
+                        error = "log %s, line '%s' published conn-id is too big" % (log_name, oopen)
+                self.assertEqual(None, error)
+            self.assertEqual ( None, error )
+
 
 #################################################################
 #     Tests
@@ -405,6 +442,12 @@ class TopologyDispositionTests ( TestCase ):
 
 class DeleteSpuriousConnector ( MessagingHandler ):
     """
+    Connect receiver (to B) and sender (to A) to router network.
+    Start sending batches of messages to router A.
+    Messages are released by router D until the route mobile
+    address closest/0 is propagated to router D.
+    Once messages are accepted then the route is fully established
+    and messages must not be released after that.
     """
     def __init__ ( self, test_name, client_addrs, destination, D_client_addr ):
         super ( DeleteSpuriousConnector, self).__init__(prefetch=100)
@@ -438,6 +481,9 @@ class DeleteSpuriousConnector ( MessagingHandler ):
 
         self.confirmed_kill = False
 
+        self.first_released          = None
+        self.first_received          = None
+
 
     def debug_print ( self, text ) :
         if self.debug == True:
@@ -458,7 +504,7 @@ class DeleteSpuriousConnector ( MessagingHandler ):
 
     # Call this from all handlers of dispositions returning to the sender.
     def bail_out_if_done ( self ) :
-        if self.n_accepted + self.n_released >= self.n_messages  :
+        if self.n_accepted + self.n_released >= self.max_to_send()  :
             # We have received everything. But! Did we get a confirmed kill on the connector?
             if not self.confirmed_kill :
                 # This is a failure.
@@ -509,7 +555,7 @@ class DeleteSpuriousConnector ( MessagingHandler ):
             Stopwatch ( name = stopwatch_name, \
                         timer = event.reactor.schedule(init_time, Timeout(self, stopwatch_name)), \
                         initial_time = init_time, \
-                        repeat_time = 0.5 \
+                        repeat_time = 0.1 \
                       )
 
         self.sender_connection   = event.container.connect ( self.client_addrs['A'] )
@@ -538,11 +584,6 @@ class DeleteSpuriousConnector ( MessagingHandler ):
             self.D_management_helper = ManagementMessageHelper ( event.receiver.remote_source.address )
 
 
-    def on_released ( self, event ) :
-        # The test fails.
-        self.bail ( "a message was released" )
-
-
     def run(self):
         Container(self).run()
 
@@ -569,29 +610,44 @@ class DeleteSpuriousConnector ( MessagingHandler ):
     # Sender Side
     #=======================================================
 
+    def max_to_send ( self ) :
+        return self.n_messages + self.n_released
+
+
     def send ( self ) :
 
-        if self.n_sent >= self.n_messages :
+        if self.n_sent >= self.max_to_send() :
             return
 
         for _ in range ( self.burst_size ) :
-            if self.sender.credit > 0 and self.n_sent < self.n_messages :
-                msg = Message ( body=self.n_sent )
-                self.n_sent += 1
-                self.sender.send ( msg )
-                self.debug_print ( "sent: %d" % self.n_sent )
+            if self.sender.credit > 0 :
+                if self.n_sent < self.max_to_send() :
+                    msg = Message ( body=self.n_sent )
+                    self.n_sent += 1
+                    self.sender.send ( msg )
+                    self.debug_print ( "sent: %d" % self.n_sent )
+                else :
+                    pass
             else :
                 self.debug_print ( "sender has no credit." )
 
 
-    def on_accepted ( self, event ):
+    def on_accepted ( self, event ) :
+        if self.first_received is None :
+            self.first_received = time.time()
+            if not self.first_released is None :
+                self.debug_print ( "Accepted first message. %d messages released in %.6lf seconds" % \
+                    ( self.n_released, self.first_received - self.first_released ) )
         self.n_accepted += 1
         self.debug_print ( "on_accepted %d" % self.n_accepted )
         self.bail_out_if_done ( )
 
 
     def on_released ( self, event ) :
+        if self.first_released is None :
+            self.first_released = time.time()
         self.n_released += 1
+        self.receiver.flow ( 1 )
         self.debug_print ( "on_released %d" % self.n_released )
         self.bail_out_if_done ( )
 
@@ -609,9 +665,6 @@ class DeleteSpuriousConnector ( MessagingHandler ):
             self.debug_print ( "n_received == %d" % self.n_received )
             if self.n_received == 13 :
                 self.kill_the_connector ( )
-
-
-
 
 
 class TopologyDisposition ( MessagingHandler ):
@@ -720,7 +773,7 @@ class TopologyDisposition ( MessagingHandler ):
         self.client_addrs         = client_addrs
         self.timeout_count        = 0
         self.confirmed_kills      = 0
-        self.send_interval        = 0.5
+        self.send_interval        = 0.1
         self.to_be_sent           = 700
         self.deadline             = 100
         self.message_status       = dict()

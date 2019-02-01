@@ -27,6 +27,7 @@
 #include <proton/object.h>
 #include "message_private.h"
 #include "compose_private.h"
+#include "connection_manager_private.h"
 #include "aprintf.h"
 #include <string.h>
 #include <ctype.h>
@@ -129,10 +130,28 @@ static void format_time(pn_timestamp_t epoch_time, char *format, char *buffer, s
 }
 
 /**
- * Tries to print the string representation of the parsed field content based on the tag of the parsed field.
- * Some tag types have not been dealt with. Add code as and when required.
+ * Print the bytes of a parsed_field as characters, with pre/post quotes.
  */
-static void print_parsed_field(qd_parsed_field_t *parsed_field, char **begin, char *end, int max)
+static void print_parsed_field_string(qd_parsed_field_t *parsed_field,
+                                      const char *pre, const char *post,
+                                      char **begin, char *end) {
+    qd_iterator_t *i = qd_parse_raw(parsed_field);
+    if (i) {
+        aprintf(begin, end, "%s", pre);
+        while (end - *begin > 1 &&  !qd_iterator_end(i)) {
+            char c = qd_iterator_octet(i);
+            quote(&c, 1, begin, end);
+        }
+        aprintf(begin, end, "%s", post);
+    }
+}
+
+/**
+ * Tries to print the string representation of the parsed field content based on
+ * the tag of the parsed field.  Some tag types have not been dealt with. Add
+ * code as and when required.
+ */
+static void print_parsed_field(qd_parsed_field_t *parsed_field, char **begin, char *end)
 {
    uint8_t   tag    = qd_parse_tag(parsed_field);
    switch (tag) {
@@ -187,18 +206,13 @@ static void print_parsed_field(qd_parsed_field_t *parsed_field, char **begin, ch
 
            //qd_iterator_t* iter = qd_message_field_iterator(msg, field);
            qd_iterator_t *iter = qd_parse_raw(parsed_field);
-           for (int j = 0; !qd_iterator_end(iter) && j < max; ++j) {
-                char byte = qd_iterator_octet(iter);
-                if (timestamp_length > 0) {
-                    // Gather the timestamp bytes into the timestamp_bytes array, so we process them later into time.
-                    timestamp_bytes[--timestamp_length] = byte;
-                }
+           while (!qd_iterator_end(iter) && timestamp_length > 0) {
+               timestamp_bytes[--timestamp_length] = qd_iterator_octet(iter);
            }
-
            memcpy(&creation_timestamp, timestamp_bytes, 8);
            if (creation_timestamp > 0) {
                format_time(creation_timestamp, "%Y-%m-%d %H:%M:%S.%%03lu %z", creation_time, 100);
-               aprintf(begin, end, "%s", creation_time);
+               aprintf(begin, end, "\"%s\"", creation_time);
            }
            break;
        }
@@ -221,24 +235,19 @@ static void print_parsed_field(qd_parsed_field_t *parsed_field, char **begin, ch
 
        case QD_AMQP_VBIN8:
        case QD_AMQP_VBIN32:
+         print_parsed_field_string(parsed_field, "b\"", "\"", begin, end);
+         break;
+
        case QD_AMQP_STR8_UTF8:
        case QD_AMQP_STR32_UTF8:
-       case QD_AMQP_SYM8:
-       case QD_AMQP_SYM32: {
-           qd_iterator_t *raw_iter = qd_parse_raw(parsed_field);
-           if (raw_iter) {
-               int len = qd_iterator_length(raw_iter);
-               char str_val[len];
-               int i=0;
+         print_parsed_field_string(parsed_field, "\"", "\"", begin, end);
+         break;
 
-               while (!qd_iterator_end(raw_iter)) {
-                   str_val[i] = qd_iterator_octet(raw_iter);
-                   i++;
-               }
-               quote(str_val, len, begin, end);
-           }
-           break;
-       }
+       case QD_AMQP_SYM8:
+       case QD_AMQP_SYM32:
+         print_parsed_field_string(parsed_field, ":\"", "\"", begin, end);
+         break;
+
        case QD_AMQP_MAP8:
        case QD_AMQP_MAP32: {
            uint32_t count = qd_parse_sub_count(parsed_field);
@@ -247,14 +256,15 @@ static void print_parsed_field(qd_parsed_field_t *parsed_field, char **begin, ch
            }
            for (uint32_t idx = 0; idx < count; idx++) {
                qd_parsed_field_t *sub_key  = qd_parse_sub_key(parsed_field, idx);
-               // The keys of this map are restricted to be of type string (which excludes the possibility of a null key)
-               print_parsed_field(sub_key, begin, end, max);
+               // The keys of this map are restricted to be of type string
+               // (which excludes the possibility of a null key)
+               print_parsed_field(sub_key, begin, end);
 
                aprintf(begin, end, "%s", "=");
 
                qd_parsed_field_t *sub_value = qd_parse_sub_value(parsed_field, idx);
 
-               print_parsed_field(sub_value, begin, end, max);
+               print_parsed_field(sub_value, begin, end);
 
                if ((idx + 1) < count)
                    aprintf(begin, end, "%s", ", ");
@@ -273,7 +283,7 @@ static void print_parsed_field(qd_parsed_field_t *parsed_field, char **begin, ch
            }
            for (uint32_t idx = 0; idx < count; idx++) {
                qd_parsed_field_t *sub_value = qd_parse_sub_value(parsed_field, idx);
-               print_parsed_field(sub_value, begin, end, max);
+               print_parsed_field(sub_value, begin, end);
                if ((idx + 1) < count)
                   aprintf(begin, end, "%s", ", ");
            }
@@ -289,104 +299,73 @@ static void print_parsed_field(qd_parsed_field_t *parsed_field, char **begin, ch
    }
 }
 
-static void print_field(qd_message_t *msg,  int field, int max, char *pre, char *post,
-                       char **begin, char *end)
+/* Print field if enabled by log bits, leading comma if !*first */
+static void print_field(
+    qd_message_t *msg, int field, const char *name,
+    qd_log_bits flags, bool *first, char **begin, char *end)
 {
-    qd_iterator_t* iter = 0;
-
-
-    // TODO - Need to discuss this. I have a question.
-    if (field == QD_FIELD_APPLICATION_PROPERTIES) {
-        iter = qd_message_field_iterator(msg, field);
+    if (is_log_component_enabled(flags, name)) {
+        qd_iterator_t* iter = (field == QD_FIELD_APPLICATION_PROPERTIES) ?
+            qd_message_field_iterator(msg, field) :
+            qd_message_field_iterator_typed(msg, field);
+        if (iter) {
+            qd_parsed_field_t *parsed_field = qd_parse(iter);
+            if (qd_parse_ok(parsed_field)) {
+                if (*first) {
+                    *first = false;
+                    aprintf(begin, end, "%s=", name);
+                } else {
+                    aprintf(begin, end, ", %s=", name);
+                }
+                print_parsed_field(parsed_field, begin, end);
+            }
+            qd_parse_free(parsed_field);
+            qd_iterator_free(iter);
+        }
     }
-    else {
-        iter = qd_message_field_iterator_typed(msg, field);
-    }
-
-    aprintf(begin, end, "%s", pre);
-
-    if (!iter) {
-        aprintf(begin, end, "%s", post);
-        return;
-    }
-
-    qd_parsed_field_t *parsed_field = qd_parse(iter);
-
-    // If there is a problem with parsing a field, just return
-    if (!qd_parse_ok(parsed_field)) {
-        aprintf(begin, end, "%s", post);
-        qd_iterator_free(iter);
-        qd_parse_free(parsed_field);
-        return;
-    }
-
-    print_parsed_field(parsed_field, begin, end, max);
-
-    aprintf(begin, end, "%s", post);
-    qd_iterator_free(iter);
-    qd_parse_free(parsed_field);
 }
 
 static const char REPR_END[] = "}\0";
 
-char* qd_message_repr(qd_message_t *msg, char* buffer, size_t len, qd_log_bits log_message) {
-    if (log_message == 0)
-        return 0;
-
-    if (qd_message_check(msg, QD_DEPTH_APPLICATION_PROPERTIES)) {
-        char *begin = buffer;
-        char *end = buffer + len - sizeof(REPR_END); /* Save space for ending */
-
-        aprintf(&begin, end, "Message{", msg);
-
-        if (is_log_component_enabled(log_message, "message-id"))
-            print_field(msg, QD_FIELD_MESSAGE_ID, INT_MAX, "message-id='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "user-id"))
-            print_field(msg, QD_FIELD_USER_ID, INT_MAX, ", user-id='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "to"))
-            print_field(msg, QD_FIELD_TO, INT_MAX, ", to='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "subject"))
-            print_field(msg, QD_FIELD_SUBJECT, INT_MAX, ", subject='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "reply-to"))
-            print_field(msg, QD_FIELD_REPLY_TO, INT_MAX, ", reply-to='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "correlation-id"))
-            print_field(msg, QD_FIELD_CORRELATION_ID, INT_MAX, ", correlation-id='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "content-type"))
-            print_field(msg, QD_FIELD_CONTENT_TYPE, INT_MAX, ", content-type='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "content-encoding"))
-            print_field(msg, QD_FIELD_CONTENT_ENCODING, INT_MAX, ", content-encoding='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "absolute-expiry-time"))
-            print_field(msg, QD_FIELD_ABSOLUTE_EXPIRY_TIME, INT_MAX, ", absolute-expiry-time='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "creation-time"))
-            print_field(msg, QD_FIELD_CREATION_TIME, INT_MAX, ", creation-time='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "group-id"))
-            print_field(msg, QD_FIELD_GROUP_ID, INT_MAX, ", group-id='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "group-sequence"))
-            print_field(msg, QD_FIELD_GROUP_SEQUENCE, INT_MAX, ", group-sequence='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "reply-to-group-id"))
-            print_field(msg, QD_FIELD_REPLY_TO_GROUP_ID, INT_MAX, ", reply-to-group-id='", "'", &begin, end);
-
-        if (is_log_component_enabled(log_message, "app-properties"))
-            print_field(msg, QD_FIELD_APPLICATION_PROPERTIES, INT_MAX, ", application properties=", "", &begin, end);
-
-        aprintf(&begin, end, "%s", REPR_END);   /* We saved space at the beginning. */
+char* qd_message_repr(qd_message_t *msg, char* buffer, size_t len, qd_log_bits flags) {
+    if (flags == 0 || !qd_message_check(msg, QD_DEPTH_APPLICATION_PROPERTIES)) {
+        return NULL;
     }
+    char *begin = buffer;
+    char *end = buffer + len - sizeof(REPR_END); /* Save space for ending */
+    bool first = true;
+    aprintf(&begin, end, "Message{", msg);
+    print_field(msg, QD_FIELD_MESSAGE_ID, "message-id", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_USER_ID, "user-id", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_TO, "to", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_SUBJECT, "subject", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_REPLY_TO, "reply-to", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_CORRELATION_ID, "correlation-id", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_CONTENT_TYPE, "content-type", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_CONTENT_ENCODING, "content-encoding", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_ABSOLUTE_EXPIRY_TIME, "absolute-expiry-time", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_CREATION_TIME, "creation-time", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_GROUP_ID, "group-id", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_GROUP_SEQUENCE, "group-sequence", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_REPLY_TO_GROUP_ID, "reply-to-group-id", flags, &first, &begin, end);
+    print_field(msg, QD_FIELD_APPLICATION_PROPERTIES, "app-properties", flags, &first, &begin, end);
+
+    aprintf(&begin, end, "%s", REPR_END);   /* We saved space at the beginning. */
     return buffer;
 }
 
-static void advance(unsigned char **cursor, qd_buffer_t **buffer, int consume, buffer_process_t handler, void *context)
+/**
+ * Advance cursor through buffer chain by 'consume' bytes.
+ * Cursor and buffer args are advanced to point to new position in buffer chain.
+ *  - if the number of bytes in the buffer chain is less than or equal to 
+ *    the consume number then return a null buffer and cursor.
+ *  - the original buffer chain is not changed or freed.
+ *
+ * @param cursor Pointer into current buffer content
+ * @param buffer pointer to current buffer
+ * @param consume number of bytes to advance
+ */
+static void advance(unsigned char **cursor, qd_buffer_t **buffer, int consume)
 {
     unsigned char *local_cursor = *cursor;
     qd_buffer_t   *local_buffer = *buffer;
@@ -394,13 +373,9 @@ static void advance(unsigned char **cursor, qd_buffer_t **buffer, int consume, b
     int remaining = qd_buffer_size(local_buffer) - (local_cursor - qd_buffer_base(local_buffer));
     while (consume > 0) {
         if (consume < remaining) {
-            if (handler)
-                handler(context, local_cursor, consume);
             local_cursor += consume;
             consume = 0;
         } else {
-            if (handler)
-                handler(context, local_cursor, remaining);
             consume -= remaining;
             local_buffer = local_buffer->next;
             if (local_buffer == 0){
@@ -417,10 +392,56 @@ static void advance(unsigned char **cursor, qd_buffer_t **buffer, int consume, b
 }
 
 
+/**
+ * Advance cursor through buffer chain by 'consume' bytes.
+ * Cursor and buffer args are advanced to point to new position in buffer chain.
+ * Buffer content that is consumed is optionally passed to handler.
+ *  - if the number of bytes in the buffer chain is less than or equal to 
+ *    the consume number then return the last buffer in the chain
+ *    and a cursor pointing t the first unused byte in the buffer.
+ *  - the original buffer chain is not changed or freed.
+ *
+ * @param cursor pointer into current buffer content
+ * @param buffer pointer to current buffer
+ * @param consume number of bytes to advance
+ * @param handler pointer to processor function
+ * @param context opaque argument for handler
+ */
+static void advance_guarded(unsigned char **cursor, qd_buffer_t **buffer, int consume, buffer_process_t handler, void *context)
+{
+    unsigned char *local_cursor = *cursor;
+    qd_buffer_t   *local_buffer = *buffer;
+
+    int remaining = qd_buffer_size(local_buffer) - (local_cursor - qd_buffer_base(local_buffer));
+    while (consume > 0) {
+        if (consume < remaining) {
+            if (handler)
+                handler(context, local_cursor, consume);
+            local_cursor += consume;
+            consume = 0;
+        } else {
+            if (handler)
+                handler(context, local_cursor, remaining);
+            consume -= remaining;
+            if (!local_buffer->next) {
+                local_cursor = qd_buffer_base(local_buffer) + qd_buffer_size(local_buffer);
+                break;
+            }
+            local_buffer = local_buffer->next;
+            local_cursor = qd_buffer_base(local_buffer);
+            remaining = qd_buffer_size(local_buffer) - (local_cursor - qd_buffer_base(local_buffer));
+        }
+    }
+
+    *cursor = local_cursor;
+    *buffer = local_buffer;
+}
+
+
 static unsigned char next_octet(unsigned char **cursor, qd_buffer_t **buffer)
 {
     unsigned char result = **cursor;
-    advance(cursor, buffer, 1, 0, 0);
+    advance(cursor, buffer, 1);
     return result;
 }
 
@@ -486,7 +507,7 @@ static int traverse_field(unsigned char **cursor, qd_buffer_t **buffer, qd_field
         field->tag        = tag;
     }
 
-    advance(cursor, buffer, consume, 0, 0);
+    advance(cursor, buffer, consume);
     return 1;
 }
 
@@ -641,7 +662,7 @@ static int qd_check_and_advance(qd_buffer_t         **buffer,
 
     location->length = pre_consume + consume;
     if (consume)
-        advance(&test_cursor, &test_buffer, consume, 0, 0);
+        advance(&test_cursor, &test_buffer, consume);
 
     *cursor = test_cursor;
     *buffer = test_buffer;
@@ -730,14 +751,14 @@ static qd_field_location_t *qd_message_properties_field(qd_message_t *msg, qd_me
     // requested field not parsed out.  Need to parse out up to the requested field:
     qd_buffer_t   *buffer = content->section_message_properties.buffer;
     unsigned char *cursor = qd_buffer_base(buffer) + content->section_message_properties.offset;
-    advance(&cursor, &buffer, content->section_message_properties.hdr_length, 0, 0);
+    advance(&cursor, &buffer, content->section_message_properties.hdr_length);
     if (index >= start_list(&cursor, &buffer)) return 0;  // properties list too short
 
     int position = 0;
     while (position < index) {
         qd_field_location_t *f = (qd_field_location_t *)((char *)content + offsets[position]);
         if (f->parsed)
-            advance(&cursor, &buffer, f->hdr_length + f->length, 0, 0);
+            advance(&cursor, &buffer, f->hdr_length + f->length);
         else // parse it out
             if (!traverse_field(&cursor, &buffer, f)) return 0;
         position++;
@@ -752,25 +773,28 @@ static qd_field_location_t *qd_message_properties_field(qd_message_t *msg, qd_me
 }
 
 
-// get the field location of a field in the message header (if it exists,
-// else 0)
-static qd_field_location_t *qd_message_header_field(qd_message_t *msg, qd_message_field_t field)
+static void qd_message_parse_priority(qd_message_t *in_msg)
 {
-    qd_message_content_t *content = MSG_CONTENT(msg);
+    qd_message_content_t *content  = MSG_CONTENT(in_msg);
+    qd_iterator_t        *iter     = qd_message_field_iterator(in_msg, QD_FIELD_HEADER);
 
-    if (!content->section_message_header.parsed) {
-        if (!qd_message_check(msg, QD_DEPTH_HEADER) || !content->section_message_header.parsed)
-            return 0;
-    }
+    content->priority_parsed  = true;
+    content->priority_present = false;
 
-    switch (field) {
-    case QD_FIELD_HEADER:
-        return &content->section_message_properties;
-    default:
-        // TBD: add header fields as needed (see qd_message_properties_field()
-        // as an example)
-        assert(false);
-        return 0;
+    if (!!iter) {
+        qd_parsed_field_t *field = qd_parse(iter);
+        if (qd_parse_ok(field)) {
+            if (qd_parse_is_list(field) && qd_parse_sub_count(field) >= 2) {
+                qd_parsed_field_t *priority_field = qd_parse_sub_value(field, 1);
+                if (qd_parse_tag(priority_field) != QD_AMQP_NULL) {
+                    uint32_t value = qd_parse_as_uint(priority_field);
+                    content->priority = value > QDR_MAX_PRIORITY ? QDR_MAX_PRIORITY : (uint8_t) (value & 0x00ff);
+                    content->priority_present = true;
+                }
+            }
+        }
+        qd_parse_free(field);
+        qd_iterator_free(iter);
     }
 }
 
@@ -786,7 +810,10 @@ static qd_field_location_t *qd_message_field_location(qd_message_t *msg, qd_mess
 
     switch (section) {
     case QD_FIELD_HEADER:
-        return qd_message_header_field(msg, field);
+        if (content->section_message_header.parsed ||
+            (qd_message_check(msg, QD_DEPTH_HEADER) && content->section_message_header.parsed))
+            return &content->section_message_header;
+        break;
 
     case QD_FIELD_PROPERTIES:
         return qd_message_properties_field(msg, field);
@@ -1050,6 +1077,31 @@ void qd_message_add_fanout(qd_message_t *in_msg)
     sys_atomic_inc(&msg->content->fanout);
 }
 
+void qd_message_add_num_closed_receivers(qd_message_t *in_msg)
+{
+    assert(in_msg);
+    qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
+    msg->content->num_closed_receivers++;
+}
+
+
+/**
+* There are two sources of priority information --
+* message and address. Address takes precedence, falling
+* through when no address priority has been specified.
+* This also means that messages must always have a priority,
+* using default value if sender leaves it unspecified.
+*/
+uint8_t qd_message_get_priority(qd_message_t *msg)
+{
+    qd_message_content_t *content = MSG_CONTENT(msg);
+
+    if (!content->priority_parsed)
+        qd_message_parse_priority(msg);
+
+    return content->priority_present ? content->priority : QDR_DEFAULT_PRIORITY;
+}
+
 bool qd_message_receive_complete(qd_message_t *in_msg)
 {
     if (!in_msg)
@@ -1057,6 +1109,7 @@ bool qd_message_receive_complete(qd_message_t *in_msg)
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
     return msg->content->receive_complete;
 }
+
 
 bool qd_message_send_complete(qd_message_t *in_msg)
 {
@@ -1128,10 +1181,20 @@ qd_message_t *discard_receive(pn_delivery_t *delivery,
     return msg_in;
 }
 
+qd_message_t * qd_get_message_context(pn_delivery_t *delivery)
+{
+    pn_record_t *record    = pn_delivery_attachments(delivery);
+    if (record)
+        return (qd_message_t *) pn_record_get(record, PN_DELIVERY_CTX);
+
+    return 0;
+}
+
 
 qd_message_t *qd_message_receive(pn_delivery_t *delivery)
 {
     pn_link_t        *link = pn_delivery_link(delivery);
+    qd_link_t       *qdl = (qd_link_t *)pn_link_get_context(link);
     ssize_t           rc;
 
     pn_record_t *record    = pn_delivery_attachments(delivery);
@@ -1160,13 +1223,16 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
         return discard_receive(delivery, link, (qd_message_t *)msg);
     }
 
+    // if q2 holdoff has been disabled (disable_q2_holdoff=true), we keep receiving.
+    // if q2 holdoff has been enabled (disable_q2_holdoff=false), if input is in holdoff then just exit.
+    //      When enough buffers
+    //      have been processed and freed by outbound processing then
+    //      message holdoff is cleared and receiving may continue.
     //
-    // If input is in holdoff then just exit. When enough buffers
-    // have been processed and freed by outbound processing then
-    // message holdoff is cleared and receiving may continue.
-    //
-    if (msg->content->q2_input_holdoff) {
-        return (qd_message_t*)msg;
+    if (!qd_link_is_q2_limit_unbounded(qdl) && !msg->content->disable_q2_holdoff) {
+        if (msg->content->q2_input_holdoff) {
+            return (qd_message_t*)msg;
+        }
     }
 
     // Loop until msg is complete, error seen, or incoming bytes are consumed
@@ -1223,9 +1289,11 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
                 DEQ_INSERT_TAIL(msg->content->buffers, msg->content->pending);
                 msg->content->pending = 0;
                 if (qd_message_Q2_holdoff_should_block((qd_message_t *)msg)) {
-                    msg->content->q2_input_holdoff = true;
-                    UNLOCK(msg->content->lock);
-                    break;
+                    if (!qd_link_is_q2_limit_unbounded(qdl)) {
+                        msg->content->q2_input_holdoff = true;
+                        UNLOCK(msg->content->lock);
+                        break;
+                    }
                 }
                 UNLOCK(msg->content->lock);
                 msg->content->pending = qd_buffer();
@@ -1406,7 +1474,6 @@ void qd_message_send(qd_message_t *in_msg,
     qd_buffer_t          *buf     = 0;
     pn_link_t            *pnl     = qd_link_pn(link);
 
-    int                  fanout   = qd_message_fanout(in_msg);
     *restart_rx                   = false;
     *q3_stalled                   = false;
 
@@ -1443,7 +1510,7 @@ void qd_message_send(qd_message_t *in_msg,
         if (content->section_message_header.length > 0) {
             buf    = content->section_message_header.buffer;
             cursor = content->section_message_header.offset + qd_buffer_base(buf);
-            advance(&cursor, &buf, header_consume, send_handler, (void*) pnl);
+            advance_guarded(&cursor, &buf, header_consume, send_handler, (void*) pnl);
         }
 
         //
@@ -1453,7 +1520,7 @@ void qd_message_send(qd_message_t *in_msg,
         if (content->section_delivery_annotation.length > 0) {
             buf    = content->section_delivery_annotation.buffer;
             cursor = content->section_delivery_annotation.offset + qd_buffer_base(buf);
-            advance(&cursor, &buf, da_consume, send_handler, (void*) pnl);
+            advance_guarded(&cursor, &buf, da_consume, send_handler, (void*) pnl);
         }
 
         //
@@ -1473,9 +1540,9 @@ void qd_message_send(qd_message_t *in_msg,
         if (content->field_user_annotations.length > 0) {
             qd_buffer_t *buf2      = content->field_user_annotations.buffer;
             unsigned char *cursor2 = content->field_user_annotations.offset + qd_buffer_base(buf);
-            advance(&cursor2, &buf2,
-                    content->field_user_annotations.length,
-                    send_handler, (void*) pnl);
+            advance_guarded(&cursor2, &buf2,
+                            content->field_user_annotations.length,
+                            send_handler, (void*) pnl);
         }
 
         //
@@ -1495,8 +1562,7 @@ void qd_message_send(qd_message_t *in_msg,
         //
         int ma_consume = content->section_message_annotation.hdr_length + content->section_message_annotation.length;
         if (content->section_message_annotation.length > 0)
-            advance(&cursor, &buf, ma_consume, 0, 0);
-
+            advance_guarded(&cursor, &buf, ma_consume, 0, 0);
 
         msg->cursor.buffer = buf;
 
@@ -1517,7 +1583,11 @@ void qd_message_send(qd_message_t *in_msg,
 
     pn_session_t     *pns  = pn_link_session(pnl);
 
-    while (buf && pn_session_outgoing_bytes(pns) <= QD_QLIMIT_Q3_UPPER) {
+    while (msg->content->aborted ||
+           (buf &&
+            (msg->cursor.cursor < qd_buffer_cursor(buf) || buf->next != 0) &&
+            pn_session_outgoing_bytes(pns) <= QD_QLIMIT_Q3_UPPER)) {
+
         if (msg->content->aborted) {
             if (pn_link_current(pnl)) {
                 msg->send_complete = true;
@@ -1543,11 +1613,15 @@ void qd_message_send(qd_message_t *in_msg,
         if (next_buf) {
             // There is a next buffer, the previous buffer has been fully sent by now.
             qd_buffer_add_fanout(buf);
-            if (fanout == qd_buffer_fanout(buf)) {
+
+            if (qd_message_fanout(in_msg) - msg->content->num_closed_receivers == qd_buffer_fanout(buf)) {
                 qd_buffer_t *local_buf = DEQ_HEAD(content->buffers);
                 while (local_buf && local_buf != next_buf) {
                     DEQ_REMOVE_HEAD(content->buffers);
                     qd_buffer_free(local_buf);
+                    if (!msg->content->buffers_freed)
+                        msg->content->buffers_freed = true;
+
                     local_buf = DEQ_HEAD(content->buffers);
 
                     // by freeing a buffer there now may be room to restart a
@@ -1570,9 +1644,10 @@ void qd_message_send(qd_message_t *in_msg,
             msg->cursor.cursor = qd_buffer_base(next_buf);
         }
         else {
+            // There is no next_buf
             if (qd_message_receive_complete(in_msg)) {
                 //
-                // There is no next_buf and there is no more of the message coming, this means
+                // There is no more of the message coming, this means
                 // that we have completely sent out the message.
                 //
                 msg->send_complete = true;
@@ -1627,10 +1702,17 @@ static int qd_check_field_LH(qd_message_content_t *content,
 static bool qd_message_check_LH(qd_message_content_t *content, qd_message_depth_t depth)
 {
     qd_error_clear();
+
+    //
+    // In the case of a streaming or multi buffer message, there is a change that some buffers might be freed before the entire
+    // message has arrived in which case we cannot reliably check the message using the depth.
+    //
+    if (content->buffers_freed)
+        return true;
+
     qd_buffer_t *buffer  = DEQ_HEAD(content->buffers);
 
     if (!buffer) {
-        qd_error(QD_ERROR_MESSAGE, "No data");
         return false;
     }
 
@@ -1777,7 +1859,7 @@ qd_iterator_t *qd_message_field_iterator(qd_message_t *msg, qd_message_field_t f
 
     qd_buffer_t   *buffer = loc->buffer;
     unsigned char *cursor = qd_buffer_base(loc->buffer) + loc->offset;
-    advance(&cursor, &buffer, loc->hdr_length, 0, 0);
+    advance(&cursor, &buffer, loc->hdr_length);
 
     return qd_iterator_buffer(buffer, cursor - qd_buffer_base(buffer), loc->length, ITER_VIEW_ALL);
 }
@@ -1830,7 +1912,7 @@ void qd_message_compose_1(qd_message_t *msg, const char *to, qd_buffer_list_t *b
 
     qd_compose_start_list(field);
     qd_compose_insert_bool(field, 0);     // durable
-    //qd_compose_insert_null(field);        // priority
+    qd_compose_insert_null(field);        // priority
     //qd_compose_insert_null(field);        // ttl
     //qd_compose_insert_boolean(field, 0);  // first-acquirer
     //qd_compose_insert_uint(field, 0);     // delivery-count
@@ -1893,13 +1975,22 @@ void qd_message_compose_3(qd_message_t *msg, qd_composed_field_t *field1, qd_com
 
     content->buffers = *field1_buffers;
     DEQ_INIT(*field1_buffers);
+    DEQ_APPEND(content->buffers, (*field2_buffers));
+}
 
-    qd_buffer_t *buf = DEQ_HEAD(*field2_buffers);
-    while (buf) {
-        DEQ_REMOVE_HEAD(*field2_buffers);
-        DEQ_INSERT_TAIL(content->buffers, buf);
-        buf = DEQ_HEAD(*field2_buffers);
-    }
+
+void qd_message_compose_4(qd_message_t *msg, qd_composed_field_t *field1, qd_composed_field_t *field2, qd_composed_field_t *field3)
+{
+    qd_message_content_t *content = MSG_CONTENT(msg);
+    content->receive_complete     = true;
+    qd_buffer_list_t     *field1_buffers = qd_compose_buffers(field1);
+    qd_buffer_list_t     *field2_buffers = qd_compose_buffers(field2);
+    qd_buffer_list_t     *field3_buffers = qd_compose_buffers(field3);
+
+    content->buffers = *field1_buffers;
+    DEQ_INIT(*field1_buffers);
+    DEQ_APPEND(content->buffers, (*field2_buffers));
+    DEQ_APPEND(content->buffers, (*field3_buffers));
 }
 
 

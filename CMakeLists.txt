@@ -45,6 +45,13 @@ include(CheckIncludeFiles)
 include(FindPythonInterp)
 include(FindPythonLibs)
 
+
+if (PYTHON_VERSION_MAJOR STREQUAL 3)
+    set(PY_STRING "python3")
+elseif(PYTHON_VERSION_MAJOR STREQUAL 2)
+    set(PY_STRING "python")
+endif()
+
 # Find python-unittest2
 execute_process(COMMAND "${PYTHON_EXECUTABLE}" "-c" "import unittest2"
 			RESULT_VARIABLE UNITTEST2_MISSING
@@ -130,12 +137,16 @@ find_program(VALGRIND_EXECUTABLE valgrind DOC "Location of the valgrind program"
 mark_as_advanced(VALGRIND_EXECUTABLE)
 find_package_handle_standard_args(VALGRIND DEFAULT_MSG VALGRIND_EXECUTABLE)
 option(USE_VALGRIND "Use valgrind when running tests" OFF)
+option(VALGRIND_XML "Write valgrind output as XML" OFF)
 
 if (USE_VALGRIND)
   if (CMAKE_BUILD_TYPE MATCHES "Coverage")
     message(WARNING "Building for coverage analysis; disabling valgrind run-time error detection")
   else ()
     set(TEST_RUNNER "${VALGRIND_EXECUTABLE} --quiet --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite --error-exitcode=42 --suppressions=${CMAKE_SOURCE_DIR}/tests/valgrind.supp")
+    if (VALGRIND_XML)
+      set(TEST_RUNNER "${TEST_RUNNER} --xml=yes --xml-file=valgrind-%p.xml")
+    endif()
   endif ()
 endif()
 
@@ -212,12 +223,15 @@ install(FILES include/qpid/dispatch.h DESTINATION ${INCLUDE_INSTALL_DIR}/qpid)
 install(FILES etc/qdrouterd.conf DESTINATION ${SYSCONF_INSTALL_DIR}/qpid-dispatch)
 install(FILES etc/sasl2/qdrouterd.conf DESTINATION ${SYSCONF_INSTALL_DIR}/sasl2)
 
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tools/qdstat.in ${CMAKE_CURRENT_SOURCE_DIR}/tools/qdstat)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tools/qdmanage.in ${CMAKE_CURRENT_SOURCE_DIR}/tools/qdmanage)
+
+
 # Tools
 install(PROGRAMS
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/qdstat
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/qdmanage
     DESTINATION bin)
-
 
 # Doc files
 install(FILES
@@ -230,6 +244,10 @@ add_subdirectory(src) # Build src first so other subdirs can use QPID_DISPATCH_L
 # run.py environment runner script - needs QPID_DISPATCH_LIB
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run.py.in ${CMAKE_CURRENT_BINARY_DIR}/run.py)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run.py.in ${CMAKE_CURRENT_BINARY_DIR}/tests/run.py)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/authservice.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/authservice.py)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/failoverserver.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/failoverserver.py)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_authz_service_plugin.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_authz_service_plugin.py)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_handle_failover.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_handle_failover.py)
 execute_process(COMMAND ${RUN} --sh OUTPUT_FILE config.sh)
 
 if (NOT UNITTEST2_MISSING)

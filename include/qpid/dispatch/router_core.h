@@ -60,6 +60,20 @@ void qdr_core_free(qdr_core_t *core);
 
 /**
  ******************************************************************************
+ * Miscellaneous functions
+ ******************************************************************************
+ */
+
+/**
+ * Drive the core-internal timer every one second.
+ *
+ * @param core Pointer to the core object returned by qd_core()
+ */
+void qdr_process_tick(qdr_core_t *core);
+
+
+/**
+ ******************************************************************************
  * Route table maintenance functions (Router Control)
  ******************************************************************************
  */
@@ -71,10 +85,10 @@ void qdr_core_set_next_hop(qdr_core_t *core, int router_maskbit, int nh_router_m
 void qdr_core_remove_next_hop(qdr_core_t *core, int router_maskbit);
 void qdr_core_set_cost(qdr_core_t *core, int router_maskbit, int cost);
 void qdr_core_set_valid_origins(qdr_core_t *core, int router_maskbit, qd_bitmask_t *routers);
-void qdr_core_map_destination(qdr_core_t *core, int router_maskbit, const char *address_hash);
+void qdr_core_map_destination(qdr_core_t *core, int router_maskbit, const char *address_hash, int treatment_hint);
 void qdr_core_unmap_destination(qdr_core_t *core, int router_maskbit, const char *address_hash);
 
-typedef void (*qdr_mobile_added_t)   (void *context, const char *address_hash);
+typedef void (*qdr_mobile_added_t)   (void *context, const char *address_hash, qd_address_treatment_t treatment);
 typedef void (*qdr_mobile_removed_t) (void *context, const char *address_hash);
 typedef void (*qdr_link_lost_t)      (void *context, int link_maskbit);
 
@@ -89,7 +103,8 @@ void qdr_core_route_table_handlers(qdr_core_t           *core,
  * In-process messaging functions
  ******************************************************************************
  */
-typedef void (*qdr_receive_t) (void *context, qd_message_t *msg, int link_maskbit, int inter_router_cost);
+typedef void (*qdr_receive_t) (void *context, qd_message_t *msg, int link_maskbit, int inter_router_cost,
+                               uint64_t conn_id);
 
 qdr_subscription_t *qdr_core_subscribe(qdr_core_t             *core,
                                        const char             *address,
@@ -128,16 +143,17 @@ void qdr_send_to2(qdr_core_t *core, qd_message_t *msg, const char *addr,
  */
 
 typedef enum {
-    QD_LINK_ENDPOINT,   ///< A link to a connected endpoint
-    QD_LINK_CONTROL,    ///< A link to a peer router for control messages
-    QD_LINK_ROUTER      ///< A link to a peer router for routed messages
+    QD_LINK_ENDPOINT,      ///< A link to a connected endpoint
+    QD_LINK_CONTROL,       ///< A link to a peer router for control messages
+    QD_LINK_ROUTER,        ///< A link to a peer router for routed messages
+    QD_LINK_EDGE_DOWNLINK  ///< Default link from an interior router to an edge router
 } qd_link_type_t;
 
 typedef enum {
     QDR_ROLE_NORMAL,
     QDR_ROLE_INTER_ROUTER,
     QDR_ROLE_ROUTE_CONTAINER,
-    QDR_ROLE_ON_DEMAND
+    QDR_ROLE_EDGE_CONNECTION
 } qdr_connection_role_t;
 
 typedef void (*qdr_connection_bind_context_t) (qdr_connection_t *context, void* token);
@@ -157,6 +173,7 @@ typedef void (*qdr_connection_bind_context_t) (qdr_connection_t *context, void* 
  *        correlate the connection with waypoints and link-route destinations that use the connection.
  * @param strip_annotations_in True if configured to remove annotations on inbound messages.
  * @param strip_annotations_out True if configured to remove annotations on outbound messages.
+ * @param policy_allow_dynamic_link_routes True if this connection is allowed by policy to create link route destinations.
  * @param link_capacity The capacity, in deliveries, for links in this connection.
  * @param vhost If non-null, this is the vhost of the connection to be used for multi-tenancy.
  * @return Pointer to a connection object that can be used to refer to this connection over its lifetime.
@@ -170,6 +187,7 @@ qdr_connection_t *qdr_connection_opened(qdr_core_t            *core,
                                         const char            *remote_container_id,
                                         bool                   strip_annotations_in,
                                         bool                   strip_annotations_out,
+                                        bool                   policy_allow_dynamic_link_routes,
                                         int                    link_capacity,
                                         const char            *vhost,
                                         qdr_connection_info_t *connection_info,
@@ -298,6 +316,17 @@ void qdr_terminus_add_capability(qdr_terminus_t *term, const char *capability);
  * @return true iff the capability is advertised for this terminus
  */
 bool qdr_terminus_has_capability(qdr_terminus_t *term, const char *capability);
+
+/**
+ * qdr_terminus_waypoint_capability
+ *
+ * If the terminus has a waypoint capability, return the ordinal of the
+ * waypoint.  If not, return zero.
+ *
+ * @param term A qdr_terminus pointer returned by qdr_terminus()
+ * @return 1..9 if the terminus has waypoint capability, 0 otherwise
+ */
+int qdr_terminus_waypoint_capability(qdr_terminus_t *term);
 
 /**
  * qdr_terminus_is_anonymous
@@ -468,6 +497,17 @@ qd_direction_t qdr_link_direction(const qdr_link_t *link);
  * @return 0 or the phase of the link's auto_link.
  */
 int qdr_link_phase(const qdr_link_t *link);
+
+/**
+ * qdr_link_internal_address
+ *
+ * If this link is associated with an auto_link and the auto_link has different
+ * internal and external addresses, return the internal (routing) address.
+ *
+ * @param link Link object
+ * @return 0 or the auto_link's internal address.
+ */
+const char *qdr_link_internal_address(const qdr_link_t *link);
 
 /**
  * qdr_link_is_anonymous
@@ -655,14 +695,17 @@ void qdr_delivery_decref(qdr_core_t *core, qdr_delivery_t *delivery, const char 
 void qdr_delivery_tag(const qdr_delivery_t *delivery, const char **tag, int *length);
 qd_message_t *qdr_delivery_message(const qdr_delivery_t *delivery);
 qdr_error_t *qdr_delivery_error(const qdr_delivery_t *delivery);
+bool qdr_delivery_presettled(const qdr_delivery_t *delivery);
 void qdr_delivery_write_extension_state(qdr_delivery_t *dlv, pn_delivery_t* pdlv, bool update_disposition);
 bool qdr_delivery_send_complete(const qdr_delivery_t *delivery);
 bool qdr_delivery_tag_sent(const qdr_delivery_t *delivery);
 void qdr_delivery_set_tag_sent(const qdr_delivery_t *delivery, bool tag_sent);
 bool qdr_delivery_receive_complete(const qdr_delivery_t *delivery);
+void qdr_delivery_set_disposition(qdr_delivery_t *delivery, uint64_t disposition);
 uint64_t qdr_delivery_disposition(const qdr_delivery_t *delivery);
 void qdr_delivery_set_aborted(const qdr_delivery_t *delivery, bool aborted);
 bool qdr_delivery_is_aborted(const qdr_delivery_t *delivery);
+void qdr_delivery_add_num_closed_receivers(qdr_delivery_t *delivery);
 
 /**
  ******************************************************************************
@@ -679,7 +722,8 @@ typedef enum {
     QD_ROUTER_ADDRESS,
     QD_ROUTER_EXCHANGE,
     QD_ROUTER_BINDING,
-    QD_ROUTER_FORBIDDEN
+    QD_ROUTER_FORBIDDEN,
+    QD_ROUTER_CONN_LINK_ROUTE
 } qd_router_entity_type_t;
 
 typedef struct qdr_query_t qdr_query_t;
@@ -695,10 +739,11 @@ typedef struct qdr_query_t qdr_query_t;
  * @param name The name supplied for the entity
  * @param in_body The body of the request message
  * @param out_body A composed field for the body of the response message
+ * @param in_conn The identity of the connection over which the mgmt message arrived (0 if config file)
  */
 void qdr_manage_create(qdr_core_t *core, void *context, qd_router_entity_type_t type,
                        qd_iterator_t *name, qd_parsed_field_t *in_body, qd_composed_field_t *out_body,
-                       qd_buffer_list_t body_buffers);
+                       qd_buffer_list_t body_buffers, uint64_t in_conn);
 
 /**
  * qdr_manage_delete
@@ -710,9 +755,10 @@ void qdr_manage_create(qdr_core_t *core, void *context, qd_router_entity_type_t 
  * @param type The entity type for the create request
  * @param name The name supplied with the request (or 0 if the identity was supplied)
  * @param identity The identity supplied with the request (or 0 if the name was supplied)
+ * @param in_conn The identity of the connection over which the mgmt message arrived (0 if config file)
  */
 void qdr_manage_delete(qdr_core_t *core, void *context, qd_router_entity_type_t type,
-                       qd_iterator_t *name, qd_iterator_t *identity);
+                       qd_iterator_t *name, qd_iterator_t *identity, uint64_t in_conn);
 
 /**
  * qdr_manage_read
@@ -725,9 +771,11 @@ void qdr_manage_delete(qdr_core_t *core, void *context, qd_router_entity_type_t 
  * @param name The name supplied with the request (or 0 if the identity was supplied)
  * @param identity The identity supplied with the request (or 0 if the name was supplied)
  * @param body A composed field for the body of the response message
+ * @param in_conn The identity of the connection over which the mgmt message arrived (0 if config file)
  */
 void qdr_manage_read(qdr_core_t *core, void *context, qd_router_entity_type_t type,
-                     qd_iterator_t *name, qd_iterator_t *identity, qd_composed_field_t *body);
+                     qd_iterator_t *name, qd_iterator_t *identity, qd_composed_field_t *body,
+                     uint64_t in_conn);
 
 
 /**
@@ -742,10 +790,12 @@ void qdr_manage_read(qdr_core_t *core, void *context, qd_router_entity_type_t ty
  * @param identity The identity supplied with the request (or 0 if the name was supplied)
  * @param in_body The body of the request message
  * @param out_body A composed field for the body of the response message
+ * @param in_conn The identity of the connection over which the mgmt message arrived (0 if config file)
  */
 void qdr_manage_update(qdr_core_t *core, void *context, qd_router_entity_type_t type,
                        qd_iterator_t *name, qd_iterator_t *identity,
-                       qd_parsed_field_t *in_body, qd_composed_field_t *out_body);
+                       qd_parsed_field_t *in_body, qd_composed_field_t *out_body,
+                       uint64_t in_conn);
 
 /**
  * Sequence for running a query:
@@ -763,7 +813,8 @@ void qdr_manage_update(qdr_core_t *core, void *context, qd_router_entity_type_t 
  */
 
 qdr_query_t *qdr_manage_query(qdr_core_t *core, void *context, qd_router_entity_type_t type,
-                              qd_parsed_field_t *attribute_names, qd_composed_field_t *body);
+                              qd_parsed_field_t *attribute_names, qd_composed_field_t *body,
+                              uint64_t in_conn);
 void qdr_query_add_attribute_names(qdr_query_t *query);
 void qdr_query_get_first(qdr_query_t *query, int offset);
 void qdr_query_get_next(qdr_query_t *query);
