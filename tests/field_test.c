@@ -56,16 +56,22 @@ static void release_buffer_chain(qd_buffer_list_t *chain)
 static char* test_view_global_dns(void *context)
 {
     qd_iterator_t *iter = qd_iterator_string("amqp://host/global/sub", ITER_VIEW_ALL);
-    if (!qd_iterator_equal(iter, (unsigned char*) "amqp://host/global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "amqp://host/global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ALL failed";
+    }
 
     qd_iterator_reset_view(iter, ITER_VIEW_ADDRESS_NO_HOST);
-    if (!qd_iterator_equal(iter, (unsigned char*) "global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ADDRESS_NO_HOST failed";
+    }
 
     qd_iterator_reset_view(iter, ITER_VIEW_ADDRESS_HASH);
-    if (!qd_iterator_equal(iter, (unsigned char*) "M0global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "M0global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ADDRESS_HASH failed";
+    }
 
     qd_iterator_free(iter);
 
@@ -76,16 +82,22 @@ static char* test_view_global_dns(void *context)
 static char* test_view_global_non_dns(void *context)
 {
     qd_iterator_t *iter = qd_iterator_string("amqp:/global/sub", ITER_VIEW_ALL);
-    if (!qd_iterator_equal(iter, (unsigned char*) "amqp:/global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "amqp:/global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ALL failed";
+    }
 
     qd_iterator_reset_view(iter, ITER_VIEW_ADDRESS_NO_HOST);
-    if (!qd_iterator_equal(iter, (unsigned char*) "global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ADDRESS_NO_HOST failed";
+    }
 
     qd_iterator_reset_view(iter, ITER_VIEW_ADDRESS_HASH);
-    if (!qd_iterator_equal(iter, (unsigned char*) "M0global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "M0global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ADDRESS_HASH failed";
+    }
 
     qd_iterator_free(iter);
 
@@ -96,16 +108,22 @@ static char* test_view_global_non_dns(void *context)
 static char* test_view_global_no_host(void *context)
 {
     qd_iterator_t *iter = qd_iterator_string("global/sub", ITER_VIEW_ALL);
-    if (!qd_iterator_equal(iter, (unsigned char*) "global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ALL failed";
+    }
 
     qd_iterator_reset_view(iter, ITER_VIEW_ADDRESS_NO_HOST);
-    if (!qd_iterator_equal(iter, (unsigned char*) "global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ADDRESS_NO_HOST failed";
+    }
 
     qd_iterator_reset_view(iter, ITER_VIEW_ADDRESS_HASH);
-    if (!qd_iterator_equal(iter, (unsigned char*) "M0global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "M0global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ADDRESS_HASH failed";
+    }
 
     qd_iterator_free(iter);
 
@@ -116,16 +134,22 @@ static char* test_view_global_no_host(void *context)
 static char* test_view_global_no_host_slash(void *context)
 {
     qd_iterator_t *iter = qd_iterator_string("/global/sub", ITER_VIEW_ALL);
-    if (!qd_iterator_equal(iter, (unsigned char*) "/global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "/global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ALL failed";
+    }
 
     qd_iterator_reset_view(iter, ITER_VIEW_ADDRESS_NO_HOST);
-    if (!qd_iterator_equal(iter, (unsigned char*) "global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ADDRESS_NO_HOST failed";
+    }
 
     qd_iterator_reset_view(iter, ITER_VIEW_ADDRESS_HASH);
-    if (!qd_iterator_equal(iter, (unsigned char*) "M0global/sub"))
+    if (!qd_iterator_equal(iter, (unsigned char*) "M0global/sub")) {
+        qd_iterator_free(iter);
         return "ITER_VIEW_ADDRESS_HASH failed";
+    }
 
     qd_iterator_free(iter);
 
@@ -291,6 +315,8 @@ static char* test_view_address_hash(void *context)
     {"amqp:/mobile",                            "M1mobile"},
     {"mobile",                                  "M1mobile"},
     {"/mobile",                                 "M1mobile"},
+    {"amqp:/_edge/router/sub",                  "Hrouter"},
+    {"_edge/router/sub",                        "Hrouter"},
 
     // Re-run the above tests to make sure trailing dots are ignored.
     {"amqp:/_local/my-addr/sub.",                "Lmy-addr/sub"},
@@ -307,6 +333,60 @@ static char* test_view_address_hash(void *context)
     {"_topo/my-area/my-router/my-addr.",         "Lmy-addr"},
     {"_topo/my-area/router.",                    "Rrouter"},
     {"_topo/my-area/router:",                    "Rrouter:"},
+
+    {0, 0}
+    };
+    int idx;
+
+    for (idx = 0; cases[idx].addr; idx++) {
+        qd_iterator_t *iter = qd_iterator_string(cases[idx].addr, ITER_VIEW_ADDRESS_HASH);
+        qd_iterator_annotate_phase(iter, '1');
+        char *ret = verify_iterator(context, iter, cases[idx].addr, cases[idx].view);
+        qd_iterator_free(iter);
+        if (ret) return ret;
+    }
+
+    for (idx = 0; cases[idx].addr; idx++) {
+        qd_buffer_list_t chain;
+        DEQ_INIT(chain);
+        build_buffer_chain(&chain, cases[idx].addr, 3);
+        qd_iterator_t *iter = qd_iterator_buffer(DEQ_HEAD(chain), 0,
+                                                 strlen(cases[idx].addr),
+                                                 ITER_VIEW_ADDRESS_HASH);
+        qd_iterator_annotate_phase(iter, '1');
+        char *ret = verify_iterator(context, iter, cases[idx].addr, cases[idx].view);
+        release_buffer_chain(&chain);
+        qd_iterator_free(iter);
+        if (ret) return ret;
+    }
+
+    return 0;
+}
+
+
+static char* test_view_address_hash_edge(void *context)
+{
+    struct {const char *addr; const char *view;} cases[] = {
+    {"amqp:/_local/my-addr/sub",                "Lmy-addr/sub"},
+    {"amqp:/_local/my-addr",                    "Lmy-addr"},
+    {"amqp:/_topo/area/router/local/sub",       "L_edge"},
+    {"amqp:/_topo/my-area/router/local/sub",    "L_edge"},
+    {"amqp:/_topo/my-area/my-router/local/sub", "Llocal/sub"},
+    {"amqp:/_topo/area/all/local/sub",          "L_edge"},
+    {"amqp:/_topo/my-area/all/local/sub",       "Tlocal/sub"},
+    {"amqp:/_topo/all/all/local/sub",           "Tlocal/sub"},
+    {"amqp://host:port/_local/my-addr",         "Lmy-addr"},
+    {"_topo/area/router/my-addr",               "L_edge"},
+    {"_topo/my-area/router/my-addr",            "L_edge"},
+    {"_topo/my-area/my-router/my-addr",         "Lmy-addr"},
+    {"_topo/my-area/router",                    "L_edge"},
+    {"amqp:/mobile",                            "M1mobile"},
+    {"mobile",                                  "M1mobile"},
+    {"/mobile",                                 "M1mobile"},
+    {"amqp:/_edge/router/sub",                  "L_edge"},
+    {"_edge/router/sub",                        "L_edge"},
+    {"amqp:/_edge/my-router/sub",               "Lsub"},
+    {"_edge/my-router/sub",                     "Lsub"},
 
     {0, 0}
     };
@@ -489,6 +569,7 @@ static char *field_advance_test(void *context,
             snprintf(fail_text, FAIL_TEXT_SIZE,
                      "Field advance failed.  Expected '%s'",
                      (char *)template );
+            qd_iterator_free(raw);
             return fail_text;
         }
         qd_iterator_advance(iter, increment);
@@ -545,8 +626,11 @@ static char *test_qd_hash_retrieve_prefix_separator(void *context)
     qd_error_t error = qd_hash_insert(hash, iter, "TEST", 0);
 
     // There should be no error on the insert hash
-    if (error != QD_ERROR_NONE)
+    if (error != QD_ERROR_NONE) {
+        qd_iterator_free(iter);
+        qd_hash_free(hash);
         return "qd_hash_insert failed";
+    }
 
     const char *taddr = "policy.org.apache.dev";
 
@@ -579,8 +663,11 @@ static char *test_qd_hash_retrieve_prefix(void *context)
     qd_error_t error = qd_hash_insert(hash, iter, "TEST", 0);
 
     // There should be no error on the insert hash
-    if (error != QD_ERROR_NONE)
+    if (error != QD_ERROR_NONE) {
+        qd_iterator_free(iter);
+        qd_hash_free(hash);
         return "qd_hash_insert failed";
+    }
 
     const char *taddr = "policy.org.apache.dev";
 
@@ -614,8 +701,11 @@ static char *test_qd_hash_retrieve_prefix_no_match(void *context)
     qd_error_t error = qd_hash_insert(hash, iter, "TEST", 0);
 
     // There should be no error on the insert hash
-    if (error != QD_ERROR_NONE)
+    if (error != QD_ERROR_NONE) {
+        qd_iterator_free(iter);
+        qd_hash_free(hash);
         return "qd_hash_insert failed";
+    }
 
     const char *taddr = "policy.org.apache.dev";
 
@@ -649,8 +739,11 @@ static char *test_qd_hash_retrieve_prefix_no_match_separator(void *context)
     qd_error_t error = qd_hash_insert(hash, iter, "TEST", 0);
 
     // There should be no error on the insert hash
-    if (error != QD_ERROR_NONE)
+    if (error != QD_ERROR_NONE) {
+        qd_iterator_free(iter);
+        qd_hash_free(hash);
         return "qd_hash_insert failed";
+    }
 
     const char *taddr = "policy.org.apache.dev";
 
@@ -681,8 +774,11 @@ static char *test_qd_hash_retrieve_prefix_separator_exact_match(void *context)
     qd_error_t error = qd_hash_insert(hash, iter, "TEST", 0);
 
     // There should be no error on the insert hash
-    if (error != QD_ERROR_NONE)
+    if (error != QD_ERROR_NONE) {
+        qd_iterator_free(iter);
+        qd_hash_free(hash);
         return "qd_hash_insert failed";
+    }
 
     const char *taddr = "policy";
 
@@ -713,8 +809,11 @@ static char *test_qd_hash_retrieve_prefix_separator_exact_match_1(void *context)
     qd_error_t error = qd_hash_insert(hash, iter, "TEST", 0);
 
     // There should be no error on the insert hash
-    if (error != QD_ERROR_NONE)
+    if (error != QD_ERROR_NONE) {
+        qd_iterator_free(iter);
+        qd_hash_free(hash);
         return "qd_hash_insert failed";
+    }
 
     const char *taddr = "policy.apache.org";
 
@@ -748,8 +847,11 @@ static char *test_qd_hash_retrieve_prefix_separator_exact_match_slashes(void *co
     qd_error_t error = qd_hash_insert(hash, iter, "TEST", 0);
 
     // There should be no error on the insert hash
-    if (error != QD_ERROR_NONE)
+    if (error != QD_ERROR_NONE) {
+        qd_iterator_free(iter);
+        qd_hash_free(hash);
         return "qd_hash_insert failed";
+    }
 
     const char *taddr = "policy/apache/org";
 
@@ -781,8 +883,11 @@ static char *test_qd_hash_retrieve_prefix_separator_exact_match_dot_at_end(void 
     qd_error_t error = qd_hash_insert(hash, iter, "TEST", 0);
 
     // There should be no error on the insert hash
-    if (error != QD_ERROR_NONE)
+    if (error != QD_ERROR_NONE) {
+        qd_iterator_free(iter);
+        qd_hash_free(hash);
         return "qd_hash_insert failed";
+    }
 
     const char *taddr = "policy.";
 
@@ -814,8 +919,11 @@ static char *test_qd_hash_retrieve_prefix_separator_exact_match_dot_at_end_1(voi
     qd_error_t error = qd_hash_insert(hash, iter, "TEST", 0);
 
     // There should be no error on the insert hash
-    if (error != QD_ERROR_NONE)
+    if (error != QD_ERROR_NONE) {
+        qd_iterator_free(iter);
+        qd_hash_free(hash);
         return "qd_hash_insert failed";
+    }
 
     const char *taddr = "policy.apache.";
 
@@ -899,6 +1007,7 @@ static char *test_prefix_hash(void *context)
             snprintf(error, 200, "Pattern: '%s', expected %d, got %d",
                      patterns[idx].pattern, patterns[idx].entry, position);
             qd_iterator_free(iter);
+            qd_hash_free(hash);
             return error;
         }
         qd_iterator_free(iter);
@@ -973,6 +1082,7 @@ static char *test_prefix_hash_with_space(void *context)
             snprintf(error, 200, "Pattern: '%s', expected %d, got %d",
                      patterns[idx].pattern, patterns[idx].entry, position);
             qd_iterator_free(iter);
+            qd_hash_free(hash);
             return error;
         }
         qd_iterator_free(iter);
@@ -989,7 +1099,7 @@ int field_tests(void)
     int result = 0;
     char *test_group = "field_tests";
 
-    qd_iterator_set_address("my-area", "my-router");
+    qd_iterator_set_address(false, "my-area", "my-router");
 
     TEST_CASE(test_view_global_dns, 0);
     TEST_CASE(test_view_global_non_dns, 0);
@@ -1015,6 +1125,9 @@ int field_tests(void)
     TEST_CASE(test_qd_hash_retrieve_prefix_separator_exact_match_dot_at_end_1, 0);
     TEST_CASE(test_prefix_hash, 0);
     TEST_CASE(test_prefix_hash_with_space, 0);
+
+    qd_iterator_set_address(true, "my-area", "my-router");
+    TEST_CASE(test_view_address_hash_edge, 0);
 
     return result;
 }

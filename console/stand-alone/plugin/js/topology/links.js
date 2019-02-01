@@ -17,27 +17,41 @@ specific language governing permissions and limitations
 under the License.
 */
 
+import {
+  utils
+} from "../amqp/utilities.js";
+
 class Link {
   constructor(source, target, dir, cls, uid) {
     this.source = source;
     this.target = target;
-    this.left = dir != 'out';
-    this.right = (dir == 'out' || dir == 'both');
+    this.left = dir == "in" || dir == "both";
+    this.right = dir == "out" || dir == "both";
     this.cls = cls;
     this.uid = uid;
+  }
+  markerId(end) {
+    let selhigh = this.highlighted ?
+      "highlighted" :
+      (this.selected ?
+        "selected" :
+        "");
+    if (selhigh === "" && (!this.left && !this.right)) selhigh = "unknown";
+    return `-${selhigh}-${end === "end" ? this.target.radius() : this.source.radius()}`;
   }
 }
 
 export class Links {
-  constructor(QDRService, logger) {
+  constructor(logger) {
     this.links = [];
-    this.QDRService = QDRService;
     this.logger = logger;
   }
-  getLinkSource (nodesIndex) {
-    for (let i=0; i<this.links.length; ++i) {
-      if (this.links[i].target === nodesIndex)
-        return i;
+  reset() {
+    this.links.length = 0;
+  }
+  getLinkSource(nodesIndex) {
+    for (let i = 0; i < this.links.length; ++i) {
+      if (this.links[i].target === nodesIndex) return i;
     }
     return -1;
   }
@@ -45,7 +59,7 @@ export class Links {
     for (let i = 0; i < this.links.length; i++) {
       let s = this.links[i].source,
         t = this.links[i].target;
-      if (typeof this.links[i].source == 'object') {
+      if (typeof this.links[i].source == "object") {
         s = s.id;
         t = t.id;
       }
@@ -58,159 +72,229 @@ export class Links {
       }
     }
     //this.logger.debug("creating new link (" + (links.length) + ") between " + nodes[_source].name + " and " + nodes[_target].name);
-    if (this.links.some( function (l) { return l.uid === uid;}))
-      uid = uid + '.' + this.links.length;
+    if (
+      this.links.some(function (l) {
+        return l.uid === uid;
+      })
+    )
+      uid = uid + "." + this.links.length;
     return this.links.push(new Link(_source, _target, dir, cls, uid)) - 1;
   }
-  linkFor (source, target) {
+  linkFor(source, target) {
     for (let i = 0; i < this.links.length; ++i) {
-      if ((this.links[i].source == source) && (this.links[i].target == target))
+      if (this.links[i].source == source && this.links[i].target == target)
         return this.links[i];
-      if ((this.links[i].source == target) && (this.links[i].target == source))
+      if (this.links[i].source == target && this.links[i].target == source)
         return this.links[i];
     }
     // the selected node was a client/broker
     return null;
   }
 
-
-  initializeLinks (nodeInfo, nodes, unknowns, localStorage, height) {
-    let animate = false;
-    let source = 0;
-    let client = 1.0;
-    for (let id in nodeInfo) {
-      let onode = nodeInfo[id];
-      if (!onode['connection'])
-        continue;
-      let conns = onode['connection'].results;
-      let attrs = onode['connection'].attributeNames;
-      //QDRLog.debug("external client parent is " + parent);
-      let normalsParent = {}; // 1st normal node for this parent
-
-      for (let j = 0; j < conns.length; j++) {
-        let connection = this.QDRService.utilities.flatten(attrs, conns[j]);
-        let role = connection.role;
-        let properties = connection.properties || {};
-        let dir = connection.dir;
-        if (role == 'inter-router') {
-          let connId = connection.container;
-          let target = getContainerIndex(connId, nodeInfo, this.QDRService);
-          if (target >= 0) {
-            this.getLink(source, target, dir, '', source + '-' + target);
-          }
-        } /* else if (role == "normal" || role == "on-demand" || role === "route-container")*/ {
-          // not an connection between routers, but an external connection
-          let name = this.QDRService.utilities.nameFromId(id) + '.' + connection.identity;
-
-          // if we have any new clients, animate the force graph to position them
-          let position = localStorage[name] ? JSON.parse(localStorage[name]) : undefined;
-          if ((typeof position == 'undefined')) {
-            animate = true;
-            position = {
-              x: Math.round(nodes.get(source).x + 40 * Math.sin(client / (Math.PI * 2.0))),
-              y: Math.round(nodes.get(source).y + 40 * Math.cos(client / (Math.PI * 2.0))),
-              fixed: false
-            };
-            //QDRLog.debug("new client pos (" + position.x + ", " + position.y + ")")
-          }// else QDRLog.debug("using previous location")
-          if (position.y > height) {
-            position.y = Math.round(nodes.get(source).y + 40 + Math.cos(client / (Math.PI * 2.0)));
-          }
-          let existingNodeIndex = nodes.nodeExists(connection.container);
-          let normalInfo = nodes.normalExists(connection.container);
-          let node = nodes.getOrCreateNode(id, name, role, nodeInfo, nodes.getLength(), position.x, position.y, connection.container, j, position.fixed, properties);
-          let nodeType = this.QDRService.utilities.isAConsole(properties, connection.identity, role, node.key) ? 'console' : 'client';
-          let cdir = getLinkDir(id, connection, onode, this.QDRService);
-          if (existingNodeIndex >= 0) {
-            // make a link between the current router (source) and the existing node
-            this.getLink(source, existingNodeIndex, dir, 'small', connection.name);
-          } else if (normalInfo.nodesIndex) {
-            // get node index of node that contained this connection in its normals array
-            let normalSource = this.getLinkSource(normalInfo.nodesIndex);
-            if (normalSource >= 0) {
-              if (cdir === 'unknown')
-                cdir = dir;
-              node.cdir = cdir;
-              nodes.add(node);
-              // create link from original node to the new node
-              this.getLink(this.links[normalSource].source, nodes.getLength()-1, cdir, 'small', connection.name);
-              // create link from this router to the new node
-              this.getLink(source, nodes.getLength()-1, cdir, 'small', connection.name);
-              // remove the old node from the normals list
-              nodes.get(normalInfo.nodesIndex).normals.splice(normalInfo.normalsIndex, 1);
-            }
-          } else if (role === 'normal') {
-          // normal nodes can be collapsed into a single node if they are all the same dir
-            if (cdir !== 'unknown') {
-              node.user = connection.user;
-              node.isEncrypted = connection.isEncrypted;
-              node.host = connection.host;
-              node.connectionId = connection.identity;
-              node.cdir = cdir;
-              // determine arrow direction by using the link directions
-              if (!normalsParent[nodeType+cdir]) {
-                normalsParent[nodeType+cdir] = node;
-                nodes.add(node);
-                node.normals = [node];
-                // now add a link
-                this.getLink(source, nodes.getLength() - 1, cdir, 'small', connection.name);
-                client++;
-              } else {
-                normalsParent[nodeType+cdir].normals.push(node);
-              }
-            } else {
-              node.id = nodes.getLength() - 1 + unknowns.length;
-              unknowns.push(node);
-            }
-          } else {
-            nodes.add(node);
-            // now add a link
-            this.getLink(source, nodes.getLength() - 1, dir, 'small', connection.name);
-            client++;
-          }
-        }
-      }
-      source++;
+  getPosition(name, nodes, source, client, height, localStorage) {
+    let position = localStorage[name] ? JSON.parse(localStorage[name]) : undefined;
+    if (typeof position == "undefined") {
+      position = {
+        x: Math.round(
+          nodes.get(source).x + 40 * Math.sin(client / (Math.PI * 2.0))
+        ),
+        y: Math.round(
+          nodes.get(source).y + 40 * Math.cos(client / (Math.PI * 2.0))
+        ),
+        fixed: false,
+        animate: true
+      };
+    } else position.animate = false;
+    if (position.y > height) {
+      position.y = Math.round(
+        nodes.get(source).y + 40 + Math.cos(client / (Math.PI * 2.0))
+      );
     }
-    return animate;
+    position.fixed = position.fixed ? true : false;
+    return position;
   }
-  clearHighlighted () {
+
+  initialize(nodeInfo, nodes, unknowns, height, localStorage) {
+    this.reset();
+    let connectionsPerContainer = {};
+    let nodeIds = Object.keys(nodeInfo);
+    // collect connection info for each router
+    for (let source = 0; source < nodeIds.length; source++) {
+      let onode = nodeInfo[nodeIds[source]];
+      // skip any routers without connections
+      if (
+        !onode.connection ||
+        !onode.connection.results ||
+        onode.connection.results.length === 0
+      )
+        continue;
+
+      const suid = nodes.get(source).uid();
+      for (let c = 0; c < onode.connection.results.length; c++) {
+        let connection = utils.flatten(
+          onode.connection.attributeNames,
+          onode.connection.results[c]
+        );
+
+        // this is a connection to another interior router
+        if (connection.role === "inter-router") {
+          const target = getContainerIndex(connection.container, nodeInfo);
+          if (target >= 0) {
+            const tuid = nodes.get(target).uid();
+            this.getLink(source, target, connection.dir, "", `${suid}-${tuid}`);
+          }
+          continue;
+        }
+        if (!connectionsPerContainer[connection.container])
+          connectionsPerContainer[connection.container] = [];
+        let linksDir = getLinkDir(connection, onode);
+        if (linksDir === "unknown") unknowns.push(nodeIds[source]);
+        connectionsPerContainer[connection.container].push({
+          source: source,
+          linksDir: linksDir,
+          connection: connection,
+          resultsIndex: c
+        });
+      }
+    }
+    let unique = {};
+    // create map of type:id:dir to [containers]
+    for (let container in connectionsPerContainer) {
+      let key = getKey(connectionsPerContainer[container]);
+      if (!unique[key]) unique[key] = {
+        c: [],
+        nodes: []
+      };
+      unique[key].c.push(container);
+    }
+    for (let key in unique) {
+      let containers = unique[key].c;
+      for (let i = 0; i < containers.length; i++) {
+        let containerId = containers[i];
+        let connections = connectionsPerContainer[containerId];
+        let container = connections[0];
+        let name =
+          utils.nameFromId(nodeIds[container.source]) +
+          "." +
+          container.connection.identity;
+        let position = this.getPosition(
+          name,
+          nodes,
+          container.source,
+          container.resultsIndex,
+          height,
+          localStorage
+        );
+
+        let node = nodes.getOrCreateNode(
+          nodeIds[container.source],
+          name,
+          container.connection.role,
+          nodes.getLength(),
+          position.x,
+          position.y,
+          container.connection.container,
+          container.resultsIndex,
+          position.fixed,
+          container.connection.properties
+        );
+        node.host = container.connection.host;
+        node.cdir = container.linksDir;
+        node.user = container.connection.user;
+        node.isEncrypted = container.connection.isEncrypted;
+        node.connectionId = container.connection.identity;
+        node.uuid = `${containerId}-${node.routerId}-${node.nodeType}-${node.cdir}`;
+        // in case a created node (or group) is connected to multiple
+        // routers, we need to remember all the routers for traffic animations
+        for (let c = 1; c < connections.length; c++) {
+          if (!node.alsoConnectsTo) node.alsoConnectsTo = [];
+          node.alsoConnectsTo.push({
+            key: nodeIds[connections[c].source],
+            cdir: connections[c].linksDir,
+            connectionId: connections[c].connection.identity
+          });
+        }
+        unique[key].nodes.push(node);
+      }
+    }
+    for (let key in unique) {
+      nodes.add(unique[key].nodes[0]);
+      let target = nodes.nodes.length - 1;
+      unique[key].nodes[0].normals = [unique[key].nodes[0]];
+      for (let n = 1; n < unique[key].nodes.length; n++) {
+        unique[key].nodes[0].normals.push(unique[key].nodes[n]);
+      }
+      let containerId = unique[key].c[0];
+      let links = connectionsPerContainer[containerId];
+      for (let l = 0; l < links.length; l++) {
+        let source = links[l].source;
+        const suid = nodes.get(source).uid();
+        const tuid = nodes.get(target).uid();
+        this.getLink(
+          links[l].source,
+          target,
+          links[l].linksDir,
+          "small",
+          `${suid}-${tuid}`
+        );
+      }
+    }
+  }
+
+  clearHighlighted() {
     for (let i = 0; i < this.links.length; ++i) {
       this.links[i].highlighted = false;
     }
   }
 }
 
-var getContainerIndex = function (_id, nodeInfo, QDRService) {
+var getContainerIndex = function (_id, nodeInfo) {
   let nodeIndex = 0;
   for (let id in nodeInfo) {
-    if (QDRService.utilities.nameFromId(id) === _id)
-      return nodeIndex;
+    if (utils.nameFromId(id) === _id) return nodeIndex;
     ++nodeIndex;
   }
   return -1;
 };
 
-var getLinkDir = function (id, connection, onode, QDRService) {
-  let links = onode['router.link'];
+var getLinkDir = function (connection, onode) {
+  let links = onode["router.link"];
   if (!links) {
-    return 'unknown';
+    return "unknown";
   }
-  let inCount = 0, outCount = 0;
-  links.results.forEach( function (linkResult) {
-    let link = QDRService.utilities.flatten(links.attributeNames, linkResult);
-    if (link.linkType === 'endpoint' && link.connectionId === connection.identity)
-      if (link.linkDir === 'in')
-        ++inCount;
-      else
-        ++outCount;
+  let inCount = 0,
+    outCount = 0;
+  let typeIndex = links.attributeNames.indexOf("linkType");
+  let connectionIdIndex = links.attributeNames.indexOf("connectionId");
+  let dirIndex = links.attributeNames.indexOf("linkDir");
+  links.results.forEach(function (linkResult) {
+    if (
+      linkResult[typeIndex] === "endpoint" &&
+      linkResult[connectionIdIndex] === connection.identity
+    )
+      if (linkResult[dirIndex] === "in")++inCount;
+      else ++outCount;
   });
-  if (inCount > 0 && outCount > 0)
-    return 'both';
-  if (inCount > 0)
-    return 'in';
-  if (outCount > 0)
-    return 'out';
-  return 'unknown';
+  if (inCount > 0 && outCount > 0) return "both";
+  if (inCount > 0) return "in";
+  if (outCount > 0) return "out";
+  return "unknown";
 };
-
+var getKey = function (containers) {
+  let parts = [];
+  let connection = containers[0].connection;
+  let d = {
+    nodeType: connection.role,
+    properties: connection.properties || {}
+  };
+  let connectionType = "client";
+  if (utils.isConsole(connection)) connectionType = "console";
+  else if (utils.isArtemis(d)) connectionType = "artemis";
+  else if (utils.isQpid(d)) connectionType = "qpid";
+  else if (connection.role === "edge") connectionType = "edge";
+  for (let c = 0; c < containers.length; c++) {
+    let container = containers[c];
+    parts.push(`${container.source}-${container.linksDir}`);
+  }
+  return `${connectionType}:${parts.join(":")}`;
+};

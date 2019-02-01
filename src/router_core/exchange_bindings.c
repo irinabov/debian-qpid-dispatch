@@ -905,8 +905,9 @@ static qdr_exchange_t *qdr_exchange(qdr_core_t *core,
         qd_iterator_annotate_phase(address, (char) phase + '0');
         qd_hash_retrieve(core->addr_hash, address, (void **)&ex->qdr_addr);
         if (!ex->qdr_addr) {
-            ex->qdr_addr = qdr_address_CT(core, qdr_treatment_for_address_hash_CT(core,
-                                                                                  address));
+            qdr_address_config_t   *addr_config;
+            qd_address_treatment_t  treatment = qdr_treatment_for_address_hash_CT(core, address, &addr_config);
+            ex->qdr_addr = qdr_address_CT(core, treatment, addr_config);
             qd_hash_insert(core->addr_hash, address, ex->qdr_addr, &ex->qdr_addr->hash_handle);
             DEQ_INSERT_TAIL(core->addrs, ex->qdr_addr);
         }
@@ -927,7 +928,8 @@ static qdr_exchange_t *qdr_exchange(qdr_core_t *core,
         }
 
         qdr_post_mobile_added_CT(core,
-                                 (const char*) qd_hash_key_by_handle(ex->qdr_addr->hash_handle));
+                                 (const char*) qd_hash_key_by_handle(ex->qdr_addr->hash_handle),
+                                 ex->qdr_addr->treatment);
     }
 
     return ex;
@@ -955,8 +957,7 @@ static void qdr_exchange_free(qdr_exchange_t *ex)
     ex->qdr_addr->forwarder = ex->old_forwarder;
     assert(ex->qdr_addr->ref_count > 0);
     ex->qdr_addr->ref_count -= 1;
-    qdr_check_addr_CT(ex->core, ex->qdr_addr, false); // @TODO(kgiusti) ?is
-                                                      // false correct ?
+    qdr_check_addr_CT(ex->core, ex->qdr_addr);
     free(ex->name);
     free(ex->address);
 
@@ -1046,9 +1047,9 @@ static next_hop_t *next_hop(qdr_exchange_t *ex,
         qd_hash_retrieve(ex->core->addr_hash, address, (void **)&nh->qdr_addr);
         if (!nh->qdr_addr) {
             qdr_core_t *core = ex->core;
-            nh->qdr_addr = qdr_address_CT(core,
-                                          qdr_treatment_for_address_hash_CT(core,
-                                                                            address));
+            qdr_address_config_t   *addr_config;
+            qd_address_treatment_t  treatment = qdr_treatment_for_address_hash_CT(core, address, &addr_config);
+            nh->qdr_addr = qdr_address_CT(core, treatment, addr_config);
             qd_hash_insert(core->addr_hash, address, nh->qdr_addr, &nh->qdr_addr->hash_handle);
             DEQ_INSERT_TAIL(core->addrs, nh->qdr_addr);
         }
@@ -1066,8 +1067,7 @@ static void next_hop_release(next_hop_t *nh)
     if (--nh->ref_count == 0) {
         assert(nh->qdr_addr->ref_count > 0);
         if (--nh->qdr_addr->ref_count == 0) {
-            // @TODO(kgiusti) is 'false' ok?
-            qdr_check_addr_CT(nh->exchange->core, nh->qdr_addr, false);
+            qdr_check_addr_CT(nh->exchange->core, nh->qdr_addr);
         }
         DEQ_REMOVE_N(exchange_list, nh->exchange->next_hops, nh);
         assert(!nh->on_xmit_list);

@@ -57,6 +57,16 @@ struct fs_vector_t {
                          9, QD_AMQP_LONG,       0, 0, 0, 1, 0, 0x0102030405060708},  // 15
 {"\x55\x08",             2, QD_AMQP_SMALLLONG,  0, 0, 0, 1, 0, 0x08},                // 16
 {"\x45",                 1, QD_AMQP_LIST0,      0, 0, 0, 0, 0, 0},                   // 17
+{"\x70\xff\xff\xff\xff", 5, QD_AMQP_UINT,       1, 0, 0, 0, UINT32_MAX, 0},          // 18
+{"\x71\x7f\xff\xff\xff", 5, QD_AMQP_INT,        0, 0, 1, 0, 0, INT32_MAX},           // 19
+{"\x71\x80\x00\x00\x00", 5, QD_AMQP_INT,        0, 0, 1, 0, 0, INT32_MIN},           // 20
+
+{"\x80\xff\xff\xff\xff\xff\xff\xff\xff",
+                         9, QD_AMQP_ULONG,      0, 1, 0, 0, UINT64_MAX, 0},          // 21
+{"\x81\x7f\xff\xff\xff\xff\xff\xff\xff",
+                         9, QD_AMQP_LONG,       0, 0, 0, 1, 0, INT64_MAX},           // 22
+{"\x81\x80\x00\x00\x00\x00\x00\x00\x00",
+                         9, QD_AMQP_LONG,       0, 0, 0, 1, 0, INT64_MIN},           // 23
 {0, 0, 0, 0, 0}
 };
 
@@ -64,57 +74,187 @@ struct fs_vector_t {
 static char *test_parser_fixed_scalars(void *context)
 {
     int idx = 0;
+    qd_iterator_t *field = NULL;
+    qd_parsed_field_t *parsed = NULL;
     static char error[1024];
 
+    error[0] = 0;
+
     while (fs_vectors[idx].data) {
-        qd_iterator_t *field  = qd_iterator_binary(fs_vectors[idx].data,
-                                                   fs_vectors[idx].length, ITER_VIEW_ALL);
-        qd_parsed_field_t *parsed = qd_parse(field);
+        field = qd_iterator_binary(fs_vectors[idx].data,
+                                   fs_vectors[idx].length, ITER_VIEW_ALL);
+        parsed = qd_parse(field);
 
         qd_iterator_t *typed_iter = qd_parse_typed(parsed);
 
         int length = qd_iterator_length(typed_iter);
 
-        if (length != fs_vectors[idx].length)
-            return "Length of typed iterator does not match actual length";
+        if (length != fs_vectors[idx].length) {
+            strcpy(error, "Length of typed iterator does not match actual length");
+            break;
+        }
 
-        if (!qd_parse_ok(parsed)) return "Unexpected Parse Error";
+        if (!qd_parse_ok(parsed)) {
+            strcpy(error, "Unexpected Parse Error");
+            break;
+        }
         if (qd_parse_tag(parsed) != fs_vectors[idx].expected_tag) {
             sprintf(error, "(%d) Tag: Expected %02x, Got %02x", idx,
                     fs_vectors[idx].expected_tag, qd_parse_tag(parsed));
-            return error;
+            break;
         }
         if (fs_vectors[idx].check_uint &&
             qd_parse_as_uint(parsed) != fs_vectors[idx].expected_ulong) {
             sprintf(error, "(%d) UINT: Expected %"PRIx64", Got %"PRIx32, idx,
                     fs_vectors[idx].expected_ulong, qd_parse_as_uint(parsed));
-            return error;
+            break;
         }
         if (fs_vectors[idx].check_ulong &&
             qd_parse_as_ulong(parsed) != fs_vectors[idx].expected_ulong) {
             sprintf(error, "(%d) ULONG: Expected %"PRIx64", Got %"PRIx64, idx,
                     fs_vectors[idx].expected_ulong, qd_parse_as_ulong(parsed));
-            return error;
+            break;
         }
         if (fs_vectors[idx].check_int &&
             qd_parse_as_int(parsed) != fs_vectors[idx].expected_long) {
             sprintf(error, "(%d) INT: Expected %"PRIx64", Got %"PRIx32, idx,
                     fs_vectors[idx].expected_long, qd_parse_as_int(parsed));
-            return error;
+            break;
         }
         if (fs_vectors[idx].check_long &&
             qd_parse_as_long(parsed) != fs_vectors[idx].expected_long) {
             sprintf(error, "(%d) LONG: Expected %"PRIx64", Got %"PRIx64, idx,
                     fs_vectors[idx].expected_long, qd_parse_as_long(parsed));
-            return error;
+            break;
         }
         idx++;
-
         qd_iterator_free(field);
+        field = 0;
         qd_parse_free(parsed);
+        parsed = 0;
     }
 
-    return 0;
+    qd_iterator_free(field);
+    qd_parse_free(parsed);
+    return *error ? error : 0;
+}
+
+static char *test_integer_conversion(void *context)
+{
+    const struct fs_vector_t {
+        const char *data;
+        int         length;
+        uint8_t     parse_as;
+        bool        expect_fail;
+        int64_t     expected_int;
+        uint64_t    expected_uint;
+    } fs_vectors[] = {
+        // can successfully convert 64 bit values that are valid in the 32bit range
+        {"\x80\x00\x00\x00\x00\xff\xff\xff\xff", 9, QD_AMQP_UINT, false, 0,         UINT32_MAX},
+        {"\x80\x00\x00\x00\x00\x00\x00\x00\x00", 9, QD_AMQP_UINT, false, 0,         0},
+        {"\x80\x00\x00\x00\x00\x00\x00\x00\x01", 9, QD_AMQP_UINT, false, 0,         1},
+        {"\x81\x00\x00\x00\x00\x7f\xff\xff\xff", 9, QD_AMQP_INT,  false, INT32_MAX, 0},
+        {"\x81\xFF\xFF\xFF\xFF\x80\x00\x00\x00", 9, QD_AMQP_INT,  false, INT32_MIN, 0},
+        {"\x81\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF", 9, QD_AMQP_INT,  false, -1,        0},
+
+        // signed/unsigned conversions
+        {"\x70\x7F\xFF\xFF\xFF",                 5, QD_AMQP_INT,  false, INT32_MAX, 0},
+        {"\x71\x7F\xFF\xFF\xFF",                 5, QD_AMQP_UINT, false, 0,         INT32_MAX},
+        {"\x80\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF", 9, QD_AMQP_LONG, false, INT64_MAX, 0},
+        {"\x81\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF", 9, QD_AMQP_ULONG, false,0,         INT64_MAX},
+        {"\x50\x7F",                             2, QD_AMQP_INT,  false, INT8_MAX,  0},
+        {"\x60\x7F\xFF",                         3, QD_AMQP_INT,  false, INT16_MAX,  0},
+        {"\x53\x7F",                             2, QD_AMQP_INT,  false, INT8_MAX,  0},
+        {"\x55\x7F",                             2, QD_AMQP_UINT, false, 0,         INT8_MAX},
+        {"\x51\x7F",                             2, QD_AMQP_UINT, false, 0,         INT8_MAX},
+        {"\x61\x7F\xFF",                         3, QD_AMQP_UINT, false, 0,         INT16_MAX},
+
+        // strings
+        {"\xa1\x02 1",                           4, QD_AMQP_UINT, false, 0,         1},
+        {"\xa1\x02-1",                           4, QD_AMQP_INT,  false, -1,        0},
+
+        {"\xa1\x14" "18446744073709551615",     22, QD_AMQP_ULONG,false, 0,         UINT64_MAX},
+        {"\xa1\x14" "-9223372036854775808",     22, QD_AMQP_LONG, false, INT64_MIN, 0},
+        {"\xa1\x13" "9223372036854775807",      21, QD_AMQP_LONG, false, INT64_MAX, 0},
+        {"\xa3\x13" "9223372036854775807",      21, QD_AMQP_LONG, false, INT64_MAX, 0},
+
+        // cannot convert 64 bit values that are outside the 32bit range as int32
+        {"\x80\x00\x00\x00\x01\x00\x00\x00\x00", 9, QD_AMQP_UINT, true,  0, 0},
+        {"\x81\x00\x00\x00\x00\x80\x00\x00\x00", 9, QD_AMQP_INT,  true,  0, 0},
+        {"\x81\xFF\xFF\xFF\xFF\x7F\xFF\xFF\xFF", 9, QD_AMQP_INT,  true,  0, 0},
+
+        // bad signed/unsigned conversions
+        {"\x80\x80\x00\x00\x00\x00\x00\x00\x00", 9, QD_AMQP_LONG,  true, 0, 0},
+        {"\x81\x80\x00\x00\x00\x00\x00\x00\x00", 9, QD_AMQP_ULONG, true, 0, 0},
+        {"\x70\x80\x00\x00\x00",                 5, QD_AMQP_LONG,  true, 0, 0},
+        {"\x71\x80\x00\x00\x00",                 5, QD_AMQP_ULONG, true, 0, 0},
+        {"\x55\x80",                             2, QD_AMQP_UINT,  true, 0, 0},
+        {"\x51\x80",                             2, QD_AMQP_UINT,  true, 0, 0},
+        {"\x54\x80",                             2, QD_AMQP_UINT,  true, 0, 0},
+        {"\x61\x80\x00",                         3, QD_AMQP_UINT,  true, 0, 0},
+        {"\x53\x80",                             2, QD_AMQP_INT,   true, 0, 0},
+        {"\x52\x80",                             2, QD_AMQP_INT,   true, 0, 0},
+        {"\x50\x80",                             2, QD_AMQP_LONG,  true, 0, 0},
+        {"\x60\x80",                             2, QD_AMQP_LONG,  true, 0, 0},
+        {NULL},
+    };
+
+    char *error = NULL;
+    for (int i = 0; fs_vectors[i].data && !error; ++i) {
+        qd_iterator_t     *data_iter = qd_iterator_binary(fs_vectors[i].data, fs_vectors[i].length, ITER_VIEW_ALL);
+        qd_parsed_field_t *field = qd_parse(data_iter);
+
+        if (!qd_parse_ok(field)) {
+            error = "unexpected parse error";
+            qd_iterator_free(data_iter);
+            qd_parse_free(field);
+            break;
+        }
+
+        bool equal = false;
+        switch (fs_vectors[i].parse_as) {
+        case QD_AMQP_UINT:
+        {
+            uint32_t tmp = qd_parse_as_uint(field);
+            equal = (tmp == fs_vectors[i].expected_uint);
+            break;
+        }
+        case QD_AMQP_ULONG:
+        {
+            uint64_t tmp = qd_parse_as_ulong(field);
+            equal = (tmp == fs_vectors[i].expected_uint);
+            break;
+        }
+        case QD_AMQP_INT:
+        {
+
+            int32_t tmp = qd_parse_as_int(field);
+            equal = (tmp == fs_vectors[i].expected_int);
+            break;
+        }
+        case QD_AMQP_LONG:
+        {
+            int64_t tmp = qd_parse_as_long(field);
+            equal = (tmp == fs_vectors[i].expected_int);
+            break;
+        }
+        }
+
+        if (!qd_parse_ok(field)) {
+            if (!fs_vectors[i].expect_fail) {
+                error = "unexpected conversion/parse error";
+            }
+        } else if (fs_vectors[i].expect_fail) {
+            error = "Conversion did not fail as expected";
+        } else if (!equal) {
+            error = "unexpected converted value";
+        }
+
+        qd_iterator_free(data_iter);
+        qd_parse_free(field);
+    }
+
+    return error;
 }
 
 
@@ -242,10 +382,14 @@ static char *test_parser_errors(void *context)
                                                    err_vectors[idx].length, ITER_VIEW_ALL);
         qd_parsed_field_t *parsed = qd_parse(field);
         if (qd_parse_ok(parsed)) {
+            qd_parse_free(parsed);
+            qd_iterator_free(field);
             sprintf(error, "(%d) Unexpected Parse Success", idx);
             return error;
         }
         if (strcmp(qd_parse_error(parsed), err_vectors[idx].expected_error) != 0) {
+            qd_parse_free(parsed);
+            qd_iterator_free(field);
             sprintf(error, "(%d) Error: Expected %s, Got %s", idx,
                     err_vectors[idx].expected_error, qd_parse_error(parsed));
             return error;
@@ -266,7 +410,8 @@ static char *test_tracemask(void *context)
     qd_buffer_list_t list;
     static char      error[1024];
 
-    qd_iterator_set_address("0", "ROUTER");
+    error[0] = 0;
+    qd_iterator_set_address(false, "0", "ROUTER");
 
     qd_tracemask_add_router(tm, "amqp:/_topo/0/Router.A", 0);
     qd_tracemask_add_router(tm, "amqp:/_topo/0/Router.B", 1);
@@ -307,11 +452,11 @@ static char *test_tracemask(void *context)
     bm = qd_tracemask_create(tm, pf, &ingress);
     if (qd_bitmask_cardinality(bm) != 3) {
         sprintf(error, "Expected cardinality of 3, got %d", qd_bitmask_cardinality(bm));
-        return error;
+        goto cleanup;
     }
     if (ingress != 0) {
         sprintf(error, "(A) Expected ingress index of 0, got %d", ingress);
-        return error;
+        goto cleanup;
     }
     int total = 0;
     int bit, c;
@@ -320,23 +465,25 @@ static char *test_tracemask(void *context)
     }
     if (total != 17) {
         sprintf(error, "Expected total bit value of 17, got %d", total);
-        return error;
+        goto cleanup;
     }
 
     qd_bitmask_free(bm);
+    bm = 0;
     qd_tracemask_del_router(tm, 3);
     qd_tracemask_remove_link(tm, 0);
 
     ingress = -1;
     bm = qd_tracemask_create(tm, pf, &ingress);
     qd_parse_free(pf);
+    pf = 0;
     if (qd_bitmask_cardinality(bm) != 1) {
         sprintf(error, "Expected cardinality of 1, got %d", qd_bitmask_cardinality(bm));
-        return error;
+        goto cleanup;
     }
     if (ingress != 0) {
         sprintf(error, "(B) Expected ingress index of 0, got %d", ingress);
-        return error;
+        goto cleanup;
     }
 
     total = 0;
@@ -345,16 +492,18 @@ static char *test_tracemask(void *context)
     }
     if (total != 3) {
         sprintf(error, "Expected total bit value of 3, got %d", total);
-        return error;
+        // fallthrough
     }
 
+cleanup:
+    qd_parse_free(pf);
     qd_tracemask_free(tm);
     qd_bitmask_free(bm);
     for (qd_buffer_t *buf = DEQ_HEAD(list); buf; buf = DEQ_HEAD(list)) {
         DEQ_REMOVE_HEAD(list);
         qd_buffer_free(buf);
     }
-    return 0;
+    return *error ? error : 0;
 }
 
 
@@ -367,6 +516,7 @@ int parse_tests()
     TEST_CASE(test_map, 0);
     TEST_CASE(test_parser_errors, 0);
     TEST_CASE(test_tracemask, 0);
+    TEST_CASE(test_integer_conversion, 0);
 
     return result;
 }

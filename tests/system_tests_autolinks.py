@@ -25,6 +25,7 @@ from __future__ import print_function
 
 import unittest2 as unittest
 import json
+from threading import Timer
 from proton import Message
 from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, Process
 from proton.handlers import MessagingHandler
@@ -33,6 +34,328 @@ from subprocess import PIPE, STDOUT
 from qpid_dispatch.management.client import Node
 
 CONNECTION_PROPERTIES = {u'connection': u'properties', u'int_property': 6451}
+
+
+class AutoLinkDetachAfterAttachTest(MessagingHandler):
+    def __init__(self, address, node_addr):
+        super(AutoLinkDetachAfterAttachTest, self).__init__(prefetch=0)
+        self.timer = None
+        self.error = None
+        self.conn = None
+        self.address = address
+        self.n_rx_attach = 0
+        self.n_tx_attach = 0
+        self.node_addr = node_addr
+        self.sender = None
+        self.receiver = None
+
+    def timeout(self):
+        self.error = "Timeout Expired: n_rx_attach=%d n_tx_attach=%d" % (self.n_rx_attach, self.n_tx_attach)
+        self.conn.close()
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.conn = event.container.connect(self.address)
+
+    def on_link_opened(self, event):
+        if event.sender:
+            self.sender = event.sender
+            self.n_tx_attach += 1
+            if event.sender.remote_source.address != self.node_addr:
+                self.error = "Expected sender address '%s', got '%s'" % (self.node_addr, event.sender.remote_source.address)
+                self.timer.cancel()
+                self.conn.close()
+        elif event.receiver:
+            self.receiver = event.receiver
+            self.n_rx_attach += 1
+            if event.receiver.remote_target.address != self.node_addr:
+                self.error = "Expected receiver address '%s', got '%s'" % (self.node_addr, event.receiver.remote_target.address)
+                self.timer.cancel()
+                self.conn.close()
+
+        if self.n_tx_attach == 1 and self.n_rx_attach == 1:
+            # we have received 2 attaches from the router on the
+            # autolink address. Now close the sender and the receiver
+            # The router will retry establishing the autolinks.
+            self.sender.close()
+            self.receiver.close()
+
+        # The router will retry the auto link and the n_tx_attach and
+        # n_rx_attach will be 2
+        if self.n_tx_attach == 2 and self.n_rx_attach == 2:
+            # This if statement will fail if you comment out the call to
+            # qdr_route_auto_link_detached_CT(core, link) in
+            # qdr_link_inbound_detach_CT() (connections.c)
+            self.conn.close()
+            self.timer.cancel()
+
+    def run(self):
+        Container(self).run()
+
+
+class DetachAfterAttachTest(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super(DetachAfterAttachTest, cls).setUpClass()
+        name = "test-router"
+
+        config = Qdrouterd.Config([
+
+            ('router', {'mode': 'standalone', 'id': 'A'}),
+            ('listener', {'host': '127.0.0.1', 'role': 'normal',
+                          'port': cls.tester.get_port()}),
+
+            ('listener', {'role': 'route-container', 'name': 'myListener',
+                          'port': cls.tester.get_port()}),
+
+            ('autoLink', {'addr': 'myListener.1', 'connection': 'myListener',
+                          'direction': 'in'}),
+            ('autoLink', {'addr': 'myListener.1', 'connection': 'myListener',
+                          'direction': 'out'}),
+        ])
+
+        cls.router = cls.tester.qdrouterd(name, config)
+        cls.router.wait_ready()
+        cls.route_address = cls.router.addresses[1]
+
+    def test_auto_link_attach_detach_reattch(self):
+        test = AutoLinkDetachAfterAttachTest(self.route_address, 'myListener.1')
+        test.run()
+        self.assertEqual(None, test.error)
+
+
+class AutoLinkRetryTest(TestCase):
+    inter_router_port = None
+
+    @classmethod
+    def router(cls, name, config):
+        config = Qdrouterd.Config(config)
+        cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
+
+    @classmethod
+    def setUpClass(cls):
+        super(AutoLinkRetryTest, cls).setUpClass()
+        cls.routers = []
+
+        cls.inter_router_port = cls.tester.get_port()
+
+        cls.router('B',
+                    [
+                        ('router', {'mode': 'standalone', 'id': 'B'}),
+                        ('listener', {'role': 'normal',
+                                      'port': cls.tester.get_port()}),
+                        ('listener', {'host': '127.0.0.1',
+                                      'role': 'normal',
+                                      'port': cls.inter_router_port}),
+                        # Note here that the distribution of the address
+                        # 'examples' is set to 'unavailable'
+                        # This will ensure that any attach coming in for
+                        # this address will be rejected.
+                        ('address',
+                         {'prefix': 'examples',
+                          'name': 'unavailable-address',
+                          'distribution': 'unavailable'}),
+                    ])
+
+        cls.router('A', [
+                        ('router', {'mode': 'standalone', 'id': 'A'}),
+                        ('listener', {'host': '127.0.0.1', 'role': 'normal',
+                                      'port': cls.tester.get_port()}),
+
+            ('connector', {'host': '127.0.0.1', 'name': 'connectorToB',
+                           'role': 'route-container',
+                           'port': cls.inter_router_port}),
+
+                        ('autoLink', {'connection': 'connectorToB',
+                                      'addr': 'examples', 'direction': 'in'}),
+                        ('autoLink', {'connection': 'connectorToB',
+                                      'addr': 'examples', 'direction': 'out'}),
+        ])
+
+    def __init__(self, test_method):
+        TestCase.__init__(self, test_method)
+        self.success = False
+        self.timer_delay = 6
+        self.max_attempts = 2
+        self.attempts = 0
+
+    def address(self):
+        return self.routers[1].addresses[0]
+
+    def check_auto_link(self):
+        long_type = 'org.apache.qpid.dispatch.router.config.autoLink'
+        query_command = 'QUERY --type=' + long_type
+        output = json.loads(self.run_qdmanage(query_command))
+
+        if output[0].get('operStatus') == "active":
+            self.success = True
+        else:
+            self.schedule_auto_link_reconnect_test()
+
+        self.attempts += 1
+
+    def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
+        p = self.popen(
+            ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address(), '--indent=-1', '--timeout', str(TIMEOUT)],
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
+            universal_newlines=True)
+        out = p.communicate(input)[0]
+        try:
+            p.teardown()
+        except Exception as e:
+            raise Exception("%s\n%s" % (e, out))
+        return out
+
+    def can_terminate(self):
+        if self.attempts == self.max_attempts:
+            return True
+
+        if self.success:
+            return True
+
+        return False
+
+    def schedule_auto_link_reconnect_test(self):
+        if self.attempts < self.max_attempts:
+            if not self.success:
+                Timer(self.timer_delay, self.check_auto_link).start()
+
+    def test_auto_link_reattch(self):
+        long_type = 'org.apache.qpid.dispatch.router.config.autoLink'
+        query_command = 'QUERY --type=' + long_type
+        output = json.loads(self.run_qdmanage(query_command))
+
+        # Since the distribution of the autoLinked address 'examples'
+        # is set to unavailable, the link route will initially be in the
+        # failed state
+        self.assertEqual(output[0]['operStatus'], 'failed')
+        self.assertEqual(output[0]['lastError'], 'Node not found')
+
+        # Now, we delete the address 'examples' (it becomes available)
+        # The Router A must now
+        # re-attempt to establish the autoLink and once the  autoLink
+        # is up, it should return to the 'active' state.
+        delete_command = 'DELETE --type=address --name=unavailable-address'
+        self.run_qdmanage(delete_command,  address=self.routers[0].addresses[0])
+
+        self.schedule_auto_link_reconnect_test()
+
+        while not self.can_terminate():
+            pass
+
+        self.assertTrue(self.success)
+
+
+class WaypointReceiverPhaseTest(TestCase):
+    inter_router_port = None
+
+    @classmethod
+    def router(cls, name, config):
+        config = Qdrouterd.Config(config)
+
+        cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
+
+    @classmethod
+    def setUpClass(cls):
+        super(WaypointReceiverPhaseTest, cls).setUpClass()
+
+        cls.routers = []
+
+        cls.inter_router_port = cls.tester.get_port()
+        cls.inter_router_port_1 = cls.tester.get_port()
+        cls.backup_port = cls.tester.get_port()
+        cls.backup_url = 'amqp://0.0.0.0:' + str(cls.backup_port)
+
+        WaypointReceiverPhaseTest.router('A', [
+                        ('router', {'mode': 'interior', 'id': 'A'}),
+                        ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.tester.get_port()}),
+                        ('listener', {'host': '0.0.0.0', 'role': 'inter-router', 'port': cls.inter_router_port}),
+                        ('autoLink', {'addr': '0.0.0.0/queue.ext', 'direction': 'in', 'externalAddr': 'EXT'}),
+                        ('autoLink', {'addr': '0.0.0.0/queue.ext', 'direction': 'out', 'externalAddr': 'EXT'}),
+                        ('address', {'prefix': '0.0.0.0/queue', 'waypoint': 'yes'}),
+
+            ])
+
+        WaypointReceiverPhaseTest.router('B',
+                    [
+                        ('router', {'mode': 'interior', 'id': 'B'}),
+                        ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.tester.get_port()}),
+                        ('connector', {'name': 'connectorToB', 'role': 'inter-router',
+                                       'port': cls.inter_router_port, 'verifyHostname': 'no'}),
+                        ('address', {'prefix': '0.0.0.0/queue', 'waypoint': 'yes'}),
+                    ])
+
+        cls.routers[1].wait_router_connected('A')
+
+    def test_two_router_waypoint_no_tenant_external_addr_phase(self):
+        """
+        Attaches two receiver each to one router with an autoLinked address and makes sure that the phase
+        on both receivers is set to 1
+        :return:
+        """
+        test = WaypointTest(self.routers[0].addresses[0], self.routers[1].addresses[0], "0.0.0.0/queue.ext")
+        test.run()
+        self.assertEqual(None, test.error)
+
+
+class WaypointTest(MessagingHandler):
+    def __init__(self, first_host, second_host, dest):
+        super(WaypointTest, self).__init__()
+        self.first_host = first_host
+        self.second_host = second_host
+        self.first_conn = None
+        self.second_conn = None
+        self.error = None
+        self.timer = None
+        self.receiver1 = None
+        self.receiver2 = None
+        self.dest = dest
+        self.receiver1_phase = False
+        self.receiver2_phase = False
+
+    def timeout(self):
+        self.error = "The phase on the receiver links were not set to 1"
+        self.first_conn.close()
+        self.second_conn.close()
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.first_conn = event.container.connect(self.first_host)
+        self.second_conn = event.container.connect(self.second_host)
+        self.receiver1 = event.container.create_receiver(self.first_conn, self.dest, name="AAA")
+        self.receiver2 = event.container.create_receiver(self.second_conn, self.dest, name="BBB")
+
+    def on_link_opened(self, event):
+        if event.receiver == self.receiver1:
+            local_node = Node.connect(self.first_host, timeout=TIMEOUT)
+            out = local_node.query(type='org.apache.qpid.dispatch.router.link')
+            link_type_index = out.attribute_names.index('linkType')
+            link_dir_index = out.attribute_names.index('linkDir')
+            owning_addr_index = out.attribute_names.index('owningAddr')
+            link_name_index = out.attribute_names.index('linkName')
+
+            for result in out.results:
+                if result[link_type_index] == "endpoint" and result[link_dir_index] == "out" and result[link_name_index] == 'AAA' and result[owning_addr_index] == 'M10.0.0.0/queue.ext':
+                    self.receiver1_phase = True
+        elif event.receiver == self.receiver2:
+            local_node = Node.connect(self.second_host, timeout=TIMEOUT)
+            out = local_node.query(type='org.apache.qpid.dispatch.router.link')
+            link_type_index = out.attribute_names.index('linkType')
+            link_dir_index = out.attribute_names.index('linkDir')
+            owning_addr_index = out.attribute_names.index('owningAddr')
+            link_name_index = out.attribute_names.index('linkName')
+
+            for result in out.results:
+                if result[link_type_index] == "endpoint" and result[link_dir_index] == "out" and result[link_name_index] == 'BBB' and result[owning_addr_index] == 'M10.0.0.0/queue.ext':
+                    self.receiver2_phase = True
+
+        if self.receiver1_phase and self.receiver2_phase:
+            self.first_conn.close()
+            self.second_conn.close()
+            self.timer.cancel()
+
+    def run(self):
+        Container(self).run()
 
 
 class AutolinkTest(TestCase):

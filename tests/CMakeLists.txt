@@ -32,7 +32,8 @@ set(unit_test_SOURCES
     tool_test.c
     failoverlist_test.c
     timer_test.c
-    parse_tree_tests
+    core_timer_test.c
+    parse_tree_tests.c
     proton_utils_tests.c
     )
 if (USE_MEMORY_POOL)
@@ -83,6 +84,7 @@ foreach(py_test_module
 #   system_tests_broker
     system_tests_link_routes
     system_tests_link_routes_add_external_prefix
+    system_tests_link_route_credit
     system_tests_autolinks
     system_tests_drain
     system_tests_management
@@ -99,6 +101,7 @@ foreach(py_test_module
     system_tests_user_id
     system_tests_user_id_proxy
     system_tests_two_routers
+    system_tests_interior_sync_up
     system_tests_distribution
     system_tests_multi_tenancy
     system_tests_dynamic_terminus
@@ -116,8 +119,14 @@ foreach(py_test_module
     system_tests_cmdline_parsing
     system_tests_bad_configuration
     system_tests_ssl
+    system_tests_edge_router
+    system_tests_core_endpoint
     ${SYSTEM_TESTS_HTTP}
     ${CONSOLE_TEST}
+    system_tests_priority
+    system_tests_core_client
+    system_tests_address_lookup
+    system_tests_multi_phase
     )
 
   add_test(${py_test_module} ${TEST_WRAP} -x unit2 -v ${py_test_module})

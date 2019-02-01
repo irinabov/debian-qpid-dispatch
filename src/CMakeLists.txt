@@ -39,11 +39,13 @@ add_custom_command (
 if(NOT LIBWEBSOCKETS_FOUND)
 include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/router_core
   ${CMAKE_CURRENT_BINARY_DIR}
   )
 else()
 include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/router_core
   ${CMAKE_CURRENT_BINARY_DIR}
   ${LIBWEBSOCKETS_INCLUDE_DIRS}
   )
@@ -58,12 +60,12 @@ set(qpid_dispatch_SOURCES
   compose.c
   connection_manager.c
   container.c
+  discriminator.c
   dispatch.c
   entity.c
   entity_cache.c
   failoverlist.c
   hash.c
-  iovec.c
   iterator.c
   log.c
   message.c
@@ -76,6 +78,7 @@ set(qpid_dispatch_SOURCES
   python_embedded.c
   router_agent.c
   router_config.c
+  address_lookup_utils.c
   router_core/agent.c
   router_core/agent_address.c
   router_core/agent_config_address.c
@@ -84,7 +87,11 @@ set(qpid_dispatch_SOURCES
   router_core/agent_config_link_route.c
   router_core/agent_link.c
   router_core/agent_router.c
+  router_core/agent_conn_link_route.c
   router_core/connections.c
+  router_core/core_events.c
+  router_core/core_link_endpoint.c
+  router_core/core_client_api.c
   router_core/error.c
   router_core/exchange_bindings.c
   router_core/forwarder.c
@@ -95,6 +102,16 @@ set(qpid_dispatch_SOURCES
   router_core/management_agent.c
   router_core/terminus.c
   router_core/transfer.c
+  router_core/core_timer.c
+  router_core/modules/edge_router/module.c
+  router_core/modules/edge_router/addr_proxy.c
+  router_core/modules/edge_router/connection_manager.c
+  router_core/modules/edge_router/link_route_proxy.c
+  router_core/modules/edge_router/edge_mgmt.c
+  router_core/modules/test_hooks/core_test_hooks.c
+  router_core/modules/edge_addr_tracking/edge_addr_tracking.c
+  router_core/modules/address_lookup_server/address_lookup_server.c
+  router_core/modules/address_lookup_client/lookup_client.c
   router_node.c
   router_pynode.c
   schema_enum.c

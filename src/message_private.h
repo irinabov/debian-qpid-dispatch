@@ -77,6 +77,7 @@ typedef struct {
     qd_field_location_t  section_body;                    // The message body: Data
     qd_field_location_t  section_footer;                  // The footer
     qd_field_location_t  field_user_annotations;          // Opaque user message annotations, not a real field.
+
     qd_field_location_t  field_message_id;                // The string value of the message-id
     qd_field_location_t  field_user_id;                   // The string value of the user-id
     qd_field_location_t  field_to;                        // The string value of the to field
@@ -107,6 +108,7 @@ typedef struct {
     qd_parsed_field_t   *ma_pf_trace;
     int                  ma_int_phase;
     sys_atomic_t         fanout;                         // The number of receivers for this message. This number does not include in-process subscribers.
+    int                  num_closed_receivers;
     qd_link_t           *input_link;                     // message received on this link
 
     bool                 ma_parsed;                      // have parsed annotations in incoming message
@@ -115,6 +117,10 @@ typedef struct {
     bool                 q2_input_holdoff;               // hold off calling pn_link_recv
     bool                 aborted;                        // receive completed with abort flag set
     bool                 disable_q2_holdoff;             // Disable the Q2 flow control
+    bool                 buffers_freed;                  // Has at least one buffer been freed ?
+    bool                 priority_parsed;
+    bool                 priority_present;
+    uint8_t              priority;                       // The priority of this message
 } qd_message_content_t;
 
 typedef struct {
@@ -141,6 +147,10 @@ ALLOC_DECLARE(qd_message_content_t);
 void qd_message_initialize();
 
 qd_iterator_pointer_t qd_message_cursor(qd_message_pvt_t *msg);
+
+#define QDR_N_PRIORITIES     10
+#define QDR_MAX_PRIORITY     (QDR_N_PRIORITIES - 1)
+#define QDR_DEFAULT_PRIORITY  4
 
 ///@}
 

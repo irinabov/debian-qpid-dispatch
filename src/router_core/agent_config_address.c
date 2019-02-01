@@ -31,6 +31,7 @@
 #define QDR_CONFIG_ADDRESS_IN_PHASE      6
 #define QDR_CONFIG_ADDRESS_OUT_PHASE     7
 #define QDR_CONFIG_ADDRESS_PATTERN       8
+#define QDR_CONFIG_ADDRESS_PRIORITY      9
 
 const char *qdr_config_address_columns[] =
     {"name",
@@ -42,6 +43,7 @@ const char *qdr_config_address_columns[] =
      "ingressPhase",
      "egressPhase",
      "pattern",
+     "priority",
      0};
 
 const char *CONFIG_ADDRESS_TYPE = "org.apache.qpid.dispatch.router.config.address";
@@ -118,6 +120,10 @@ static void qdr_config_address_insert_column_CT(qdr_address_config_t *addr, int 
 
     case QDR_CONFIG_ADDRESS_OUT_PHASE:
         qd_compose_insert_int(body, addr->out_phase);
+        break;
+
+    case QDR_CONFIG_ADDRESS_PRIORITY:
+        qd_compose_insert_int(body, addr->priority);
         break;
     }
 }
@@ -303,8 +309,8 @@ void qdra_config_address_create_CT(qdr_core_t         *core,
                                    qdr_query_t        *query,
                                    qd_parsed_field_t  *in_body)
 {
+    char *pattern = NULL;
     qd_iterator_t *iter = NULL;
-    char *buf = NULL;
 
     while (true) {
         //
@@ -340,43 +346,34 @@ void qdra_config_address_create_CT(qdr_core_t         *core,
         qd_parsed_field_t *waypoint_field  = qd_parse_value_by_key(in_body, qdr_config_address_columns[QDR_CONFIG_ADDRESS_WAYPOINT]);
         qd_parsed_field_t *in_phase_field  = qd_parse_value_by_key(in_body, qdr_config_address_columns[QDR_CONFIG_ADDRESS_IN_PHASE]);
         qd_parsed_field_t *out_phase_field = qd_parse_value_by_key(in_body, qdr_config_address_columns[QDR_CONFIG_ADDRESS_OUT_PHASE]);
+        qd_parsed_field_t *priority_field  = qd_parse_value_by_key(in_body, qdr_config_address_columns[QDR_CONFIG_ADDRESS_PRIORITY]);
 
         //
         // Either a prefix or a pattern field is mandatory.  Prefix and pattern
         // are mutually exclusive. Fail if either both or none are given.
         //
-        if ((!prefix_field && !pattern_field) || (prefix_field && pattern_field)) {
+        const char *msg = NULL;
+        if (!prefix_field && !pattern_field) {
+            msg = "Either a 'prefix' or 'pattern' attribute must be provided";
+        } else if (prefix_field && pattern_field) {
+            msg = "Cannot specify both a 'prefix' and a 'pattern' attribute";
+        }
+        if (msg) {
             query->status = QD_AMQP_BAD_REQUEST;
-            query->status.description = prefix_field ? "cannot specify both prefix and pattern"
-                : "a prefix or pattern field is mandatory";
+            query->status.description = msg;
             qd_log(core->agent_log, QD_LOG_ERROR, "Error performing CREATE of %s: %s", CONFIG_ADDRESS_TYPE, query->status.description);
             break;
         }
 
-        // strip leading and trailing token separators
-        qd_iterator_t *tmp = qd_iterator_dup(qd_parse_raw(prefix_field ? prefix_field : pattern_field));
-        const int len = qd_iterator_length(tmp);
-        buf = malloc(len + 3);   // +'/#' if needed
-        char *pattern = qd_iterator_strncpy(tmp, buf, len + 1);
-        qd_iterator_free(tmp);
-
-        // note: see parse_tree.c for acceptable separator characters
-        while (*pattern && strchr("./", *pattern))
-            pattern++;
-        while (*pattern && strchr("./", pattern[strlen(pattern) - 1]))
-            pattern[strlen(pattern) - 1] = '\0';
-
-        if (!*pattern) {
+        // validate the pattern/prefix, add "/#" if prefix
+        pattern = qdra_config_address_validate_pattern_CT((prefix_field) ? prefix_field : pattern_field,
+                                                          !!prefix_field,
+                                                          &msg);
+        if (!pattern) {
             query->status = QD_AMQP_BAD_REQUEST;
-            query->status.description = "invalid address pattern";
+            query->status.description = msg;
             qd_log(core->agent_log, QD_LOG_ERROR, "Error performing CREATE of %s: %s", CONFIG_ADDRESS_TYPE, query->status.description);
             break;
-        }
-
-        if (prefix_field) {
-            // convert the old prefix value into a pattern by appending '/#'
-            // (match zero or more tokens)
-            strcat(pattern, "/#");
         }
 
         iter = qd_iterator_string(pattern, ITER_VIEW_ALL);
@@ -396,6 +393,7 @@ void qdra_config_address_create_CT(qdr_core_t         *core,
         bool waypoint  = waypoint_field  ? qd_parse_as_bool(waypoint_field) : false;
         long in_phase  = in_phase_field  ? qd_parse_as_long(in_phase_field)  : -1;
         long out_phase = out_phase_field ? qd_parse_as_long(out_phase_field) : -1;
+        long priority  = priority_field  ? qd_parse_as_long(priority_field)  : -1;
 
         //
         // Handle the address-phasing logic.  If the phases are provided, use them.  Otherwise
@@ -417,18 +415,31 @@ void qdra_config_address_create_CT(qdr_core_t         *core,
         }
 
         //
+        // Validate the priority values.
+        //
+        if (priority > QDR_MAX_PRIORITY ) {
+            query->status = QD_AMQP_BAD_REQUEST;
+            query->status.description = "Priority value, if present, must be between 0 and QDR_MAX_PRIORITY";
+            qd_log(core->agent_log, QD_LOG_ERROR, "Error performing CREATE of %s: %s", CONFIG_ADDRESS_TYPE, query->status.description);
+            break;
+        }
+
+        //
         // The request is good.  Create the entity and insert it into the hash index and list.
         //
 
         addr = new_qdr_address_config_t();
         DEQ_ITEM_INIT(addr);
+        addr->ref_count = 1; // Represents the reference from the addr_config list
         addr->name      = name ? (char*) qd_iterator_copy(name) : 0;
         addr->identity  = qdr_identifier(core);
         addr->treatment = qdra_address_treatment_CT(distrib_field);
         addr->in_phase  = in_phase;
         addr->out_phase = out_phase;
-        addr->pattern   = (char *) qd_iterator_copy(iter);
         addr->is_prefix = !!prefix_field;
+        addr->pattern   = pattern;
+        addr->priority  = priority;
+        pattern = 0;
 
         qd_iterator_reset_view(iter, ITER_VIEW_ALL);
         qd_parse_tree_add_pattern(core->addr_parse_tree, iter, addr);
@@ -462,10 +473,8 @@ void qdra_config_address_create_CT(qdr_core_t         *core,
     } else
         qdr_query_free(query);
 
-    if (buf) {
-        free(buf);
-        qd_iterator_free(iter);
-    }
+    free(pattern);
+    qd_iterator_free(iter);
 }
 
 
@@ -522,4 +531,62 @@ void qdra_config_address_get_CT(qdr_core_t    *core,
     //
     qdr_agent_enqueue_response_CT(core, query);
 
+}
+
+
+// given an address pattern parsed field, validate it and convert it to a string
+char *qdra_config_address_validate_pattern_CT(qd_parsed_field_t *pattern_field,
+                                              bool is_prefix,
+                                              const char **error)
+{
+    char *buf = NULL;
+    char *pattern = NULL;
+    uint8_t tag = qd_parse_tag(pattern_field);
+    qd_iterator_t *p_iter = qd_parse_raw(pattern_field);
+    int len = qd_iterator_length(p_iter);
+    *error = NULL;
+
+    if ((tag != QD_AMQP_STR8_UTF8 && tag != QD_AMQP_STR32_UTF8)
+        || len == 0)
+    {
+        *error = ((is_prefix)
+                  ? "Prefix must be a non-empty string type"
+                  : "Pattern must be a non-empty string type");
+        goto exit;
+    }
+
+    buf = (char *)qd_iterator_copy(p_iter);
+    char *begin = buf;
+    // strip leading token separators
+    // note: see parse_tree.c for acceptable separator characters
+    while (*begin && strchr("./", *begin))
+        begin++;
+
+    // strip trailing separators
+    while (*begin) {
+        char *end = &begin[strlen(begin) - 1];
+        if (!strchr("./", *end))
+            break;
+        *end = 0;
+    }
+
+    if (*begin == 0) {
+        *error = ((is_prefix)
+                  ? "Prefix invalid - no tokens"
+                  : "Pattern invalid - no tokens");
+        goto exit;
+    }
+
+    if (is_prefix) {
+        // convert a prefix match into a valid pattern by appending "/#"
+        pattern = malloc(strlen(begin) + 3);
+        strcpy(pattern, begin);
+        strcat(pattern, "/#");
+    } else {
+        pattern = strdup(begin);
+    }
+
+exit:
+    free(buf);
+    return pattern;
 }

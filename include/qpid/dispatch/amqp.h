@@ -126,6 +126,17 @@ extern const char * const QD_CAPABILITY_ANONYMOUS_RELAY;
 /// @{
 extern const char * const QD_CAPABILITY_ROUTER_CONTROL;
 extern const char * const QD_CAPABILITY_ROUTER_DATA;
+extern const char * const QD_CAPABILITY_EDGE_DOWNLINK;
+extern const char * const QD_CAPABILITY_WAYPOINT_DEFAULT;
+extern const char * const QD_CAPABILITY_WAYPOINT1;
+extern const char * const QD_CAPABILITY_WAYPOINT2;
+extern const char * const QD_CAPABILITY_WAYPOINT3;
+extern const char * const QD_CAPABILITY_WAYPOINT4;
+extern const char * const QD_CAPABILITY_WAYPOINT5;
+extern const char * const QD_CAPABILITY_WAYPOINT6;
+extern const char * const QD_CAPABILITY_WAYPOINT7;
+extern const char * const QD_CAPABILITY_WAYPOINT8;
+extern const char * const QD_CAPABILITY_WAYPOINT9;
 /// @}
 
 /** @name Dynamic Node Properties */
@@ -139,11 +150,18 @@ extern const char * const QD_CONNECTION_PROPERTY_PRODUCT_KEY;
 extern const char * const QD_CONNECTION_PROPERTY_PRODUCT_VALUE;
 extern const char * const QD_CONNECTION_PROPERTY_VERSION_KEY;
 extern const char * const QD_CONNECTION_PROPERTY_COST_KEY;
+extern const char * const QD_CONNECTION_PROPERTY_CONN_ID;
 extern const char * const QD_CONNECTION_PROPERTY_FAILOVER_LIST_KEY;
 extern const char * const QD_CONNECTION_PROPERTY_FAILOVER_NETHOST_KEY;
 extern const char * const QD_CONNECTION_PROPERTY_FAILOVER_PORT_KEY;
 extern const char * const QD_CONNECTION_PROPERTY_FAILOVER_SCHEME_KEY;
 extern const char * const QD_CONNECTION_PROPERTY_FAILOVER_HOSTNAME_KEY;
+/// @}
+
+/** @name Terminus Addresses */
+/// @{
+extern const char * const QD_TERMINUS_EDGE_ADDRESS_TRACKING;
+extern const char * const QD_TERMINUS_ADDRESS_LOOKUP;
 /// @}
 
 /** @name AMQP error codes. */
@@ -176,5 +194,10 @@ extern const char * const QD_AMQP_COND_ILLEGAL_STATE;
 extern const char * const QD_AMQP_COND_FRAME_SIZE_TOO_SMALL;
 /// @};
 
+/** @name AMQP link endpoint role. */
+/// @{
+#define QD_AMQP_LINK_ROLE_SENDER   false
+#define QD_AMQP_LINK_ROLE_RECEIVER true
+/// @};
 
 #endif

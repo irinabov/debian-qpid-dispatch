@@ -66,6 +66,7 @@ Several types of listeners are defined by their role.
 | normal | The connection is used for AMQP clients using normal message delivery.
 | inter-router | The connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections.
 | route-container | The connection is a broker or other resource that holds known addresses. The router will use this connection to create links as necessary. The addresses are available for routing only after the remote resource has created a connection.
+| edge | The connection is between an edge router and an interior router.
 |===
 
 === Connector
@@ -86,6 +87,7 @@ Several types of connectors are defined by their role.
 | normal | The connection is used for AMQP clients using normal message delivery. On this connector the router will initiate the connection but it will never create any links. Links are to be created by the peer that accepts the connection.
 | inter-router | The connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections.
 | route-container | The connection is to a broker or other resource that holds known addresses. The router will use this connection to create links as necessary. The addresses are available for routing only after the router has created a connection to the remote resource.
+| edge | The connection is between an edge router and an interior router.
 |===
 
 == Addresses
@@ -260,26 +262,24 @@ Anycast distribution delivers each message to one consumer whereas
 multicast distribution delivers each message to all consumers.
 
 Anycast delivery is reliable when the message deliveries are
-unsettled.  There is a reliability contract that the router network
+unsettled. There is a reliability contract that the router network
 abides by when delivering unsettled messages to anycast addresses.
 For every such delivery sent by a producer, the router network
 guarantees that one of the following outcomes will occur:
 
-* The delivery shall be settled with ACCEPTED or REJECTED disposition
-  where the disposition is supplied by the consumer.
-* The delivery shall be settled with RELEASED disposition, meaning
-  that the message was not delivered to any consumer.
-* The delivery shall be settled with MODIFIED disposition, meaning
-  that the message may have been delivered to a consumer but should be
-  considered in-doubt and re-sent.
-* The connection to the producer shall be dropped, signifying that all
-  unsettled deliveries should now be considered in-doubt by the
-  producer and later re-sent.
+* The delivery shall be settled with ACCEPTED or REJECTED disposition where the disposition is supplied by the consumer.
 
-Multicast delivery is not reliable.  If a producer sends an unsettled
-delivery, the ingress router shall settle the delivery with ACCEPTED
-disposition regardless of whether the message was delivered to any
-consumers.
+* The delivery shall be settled with RELEASED disposition, meaning that the message was not delivered to any consumer.
+
+* The delivery shall be settled with MODIFIED disposition, meaning that the message may have been delivered to a consumer but should be considered in-doubt and re-sent.
+
+* The connection to the producer shall be dropped, signifying that all unsettled deliveries should now be considered in-doubt by the producer and later re-sent.
+
+Multicast delivery is not reliable. If a producer sends an unsettled delivery, the disposition may be ACCEPTED or RELEASED.
+
+* If ACCEPTED, there is no guarantee that the message was delivered to any consumer.
+
+* If RELEASED, the message was definitely not delivered to any consumer.
 
 ==== Balanced
 

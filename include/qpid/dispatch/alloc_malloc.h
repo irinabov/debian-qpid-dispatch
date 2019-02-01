@@ -19,6 +19,9 @@
  * under the License.
  */
 
+#include <stdint.h>
+#include <string.h>
+
 /**
  *@file
  *
@@ -30,13 +33,19 @@
     T *new_##T(void);                           \
     void free_##T(T *p)
 
-#define ALLOC_DEFINE_CONFIG(T,S,A,C)                                    \
-    T *new_##T(void) { size_t *a = (A); return (T*) malloc((S)+ (a ? *a : 0)); } \
-    void free_##T(T *p) { free(p); } \
+#define ALLOC_DEFINE_CONFIG(T,S,A,C)                \
+    T *new_##T(void) { size_t *a = (A);             \
+        T *p = malloc((S)+ (a ? *a : 0));           \
+        QD_MEMORY_FILL(p, QD_MEMORY_INIT, (S) + (a ? *a : 0)); \
+        return p; }                                 \
+    void free_##T(T *p) { size_t *a = (A);          \
+        QD_MEMORY_FILL(p, QD_MEMORY_FREE, (S) + (a ? *a : 0)); \
+        free(p); }                                  \
     void *unused##T
 
 #define ALLOC_DEFINE(T) ALLOC_DEFINE_CONFIG(T, sizeof(T), 0, 0)
 
+static inline uint32_t qd_alloc_sequence(void *p) { return 0; }
 static inline void qd_alloc_initialize(void) {}
 static inline void qd_alloc_debug_dump(const char *file) {}
 static inline void qd_alloc_finalize(void) {}
