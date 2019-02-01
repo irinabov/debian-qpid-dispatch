@@ -39,6 +39,7 @@ import { ChordController } from './plugin/js/chord/qdrChord.js';
 import { ListController } from './plugin/js/qdrList.js';
 import { TopAddressesController } from './plugin/js/qdrTopAddressesController.js';
 import { ChartDialogController } from './plugin/js/dlgChartController.js';
+import { DetailDialogController, SubTable } from './plugin/js/dlgDetailController.js';
 import { SettingsController } from './plugin/js/qdrSettings.js';
 import { SchemaController } from './plugin/js/qdrSchema.js';
 import { ChartsController } from './plugin/js/qdrCharts.js';
@@ -51,7 +52,7 @@ import { posint } from './plugin/js/posintDirective.js';
    */
   QDR.module = angular.module('QDR', ['ngRoute', 'ngSanitize', 'ngResource', 'ui.bootstrap',
     'ui.grid', 'ui.grid.selection', 'ui.grid.autoResize', 'ui.grid.resizeColumns', 'ui.grid.saveState',
-    'ui.slider', 'ui.checkbox']);
+    'ui.slider', 'ui.checkbox', 'patternfly.charts', 'patternfly.card']);
 
   // set up the routing for this plugin
   QDR.module.config(function($routeProvider) {
@@ -89,7 +90,7 @@ import { posint } from './plugin/js/posintDirective.js';
 
   QDR.module.filter('to_trusted', ['$sce', function($sce){
     return function(text) {
-      return $sce.trustAsHtml(text);
+      return $sce.trustAsHtml(text+'');
     };
   }]);
 
@@ -132,6 +133,13 @@ import { posint } from './plugin/js/posintDirective.js';
     };
   });
 
+  QDR.module.filter('truncate', function () {
+    return function (str) {
+      if (!isNaN(parseFloat(str)) && isFinite(str))
+        return Math.round(str);
+      return str;
+    };
+  });
   // one-time initialization happens in the run function
   // of our module
   QDR.module.run( ['$rootScope', '$route', '$timeout', '$location', '$log', 'QDRService', 'QDRChartService',  function ($rootScope, $route, $timeout, $location, $log, QDRService, QDRChartService) {
@@ -239,6 +247,7 @@ import { posint } from './plugin/js/posintDirective.js';
   QDR.module.controller('QDR.OverviewLogsController', OverviewLogsController);
   QDR.module.controller('QDR.TopAddressesController', TopAddressesController);
   QDR.module.controller('QDR.ChartDialogController', ChartDialogController);
+  QDR.module.controller('QDR.DetailDialogController', DetailDialogController);
   QDR.module.controller('QDR.SettingsController', SettingsController);
   QDR.module.controller('QDR.TopologyController', TopologyController);
   QDR.module.controller('QDR.ChordController', ChordController);
@@ -249,6 +258,7 @@ import { posint } from './plugin/js/posintDirective.js';
   QDR.module.service('QDRService', QDRService);
   QDR.module.service('QDRChartService', QDRChartService);
   QDR.module.directive('posint', posint);
+  QDR.module.directive('subTable', SubTable.create);
   //  .directive('exampleDirective', () => new ExampleDirective);
 }({}));
 

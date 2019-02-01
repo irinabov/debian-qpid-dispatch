@@ -221,6 +221,14 @@ void qd_message_set_ingress_annotation(qd_message_t *msg, qd_composed_field_t *i
 qd_message_t *qd_message_receive(pn_delivery_t *delivery);
 
 /**
+ * Returns the PN_DELIVERY_CTX record from the attachments
+ *
+ * @param delivery An incoming delivery from a link
+ * @return - pointer to qd_message_t object
+ */
+qd_message_t * qd_get_message_context(pn_delivery_t *delivery);
+
+/**
  * Send the message outbound on an outgoing link.
  *
  * @param msg A pointer to a message to be sent.
@@ -259,6 +267,7 @@ ssize_t qd_message_field_copy(qd_message_t *msg, qd_message_field_t field, char 
 void qd_message_compose_1(qd_message_t *msg, const char *to, qd_buffer_list_t *buffers);
 void qd_message_compose_2(qd_message_t *msg, qd_composed_field_t *content);
 void qd_message_compose_3(qd_message_t *msg, qd_composed_field_t *content1, qd_composed_field_t *content2);
+void qd_message_compose_4(qd_message_t *msg, qd_composed_field_t *content1, qd_composed_field_t *content2, qd_composed_field_t *content3);
 
 /** Put string representation of a message suitable for logging in buffer.
  * @return buffer
@@ -365,6 +374,12 @@ size_t qd_message_fanout(qd_message_t *msg);
 void qd_message_add_fanout(qd_message_t *msg);
 
 /**
+ * Increments the num_closed_receivers by 1. This is necessary to track the number of receivers that
+ * dropped out during or just before transmission of a large message.
+ */
+void qd_message_add_num_closed_receivers(qd_message_t *in_msg);
+
+/**
  * Disable the Q2-holdoff for this message.
  *
  * @param msg A pointer to the message
@@ -410,6 +425,14 @@ bool qd_message_aborted(const qd_message_t *msg);
  * @param aborted
  */
 void qd_message_set_aborted(const qd_message_t *msg, bool aborted);
+
+/**
+ * Return message priority
+ * @param msg A pointer to the message
+ * @return The message priority value. Default if not present.
+ */
+uint8_t qd_message_get_priority(qd_message_t *msg);
+
 
 ///@}
 

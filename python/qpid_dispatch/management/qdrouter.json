@@ -374,7 +374,7 @@
             "singleton": true,
             "attributes": {
                 "id": {
-                    "description":"Router's unique identity. The router will fail to start without id.",
+                    "description":"Router's unique identity. If not specified, a random identity will be assigned at startup.",
                     "type": "string",
                     "required": false,
                     "create": true
@@ -382,10 +382,11 @@
                 "mode": {
                     "type": [
                         "standalone",
-                        "interior"
+                        "interior",
+                        "edge"
                     ],
                     "default": "standalone",
-                    "description": "In standalone mode, the router operates as a single component.  It does not participate in the routing protocol and therefore will not cooperate with other routers. In interior mode, the router operates in cooperation with other interior routers in an interconnected network.",
+                    "description": "In standalone mode, the router operates as a single component.  It does not participate in the routing protocol and therefore will not cooperate with other routers. In interior mode, the router operates in cooperation with other interior routers in an interconnected network.  In edge mode, the router can make a connection to an interior router and join a network without causing that network to recompute paths.",
                     "create": true
                 },
                 "area": {
@@ -468,7 +469,17 @@
                     "create": true,
                     "required": false,
                     "default": true
-                },                
+                },
+                "timestampsInUTC": {
+                    "type": "boolean",
+                    "description": "Use UTC time rather than localtime in logs.",
+                    "create": true
+                },
+                "timestampFormat": {
+                    "type": "string",
+                    "description": "Format string to use for timestamps in logs.",
+                    "create": true
+                },
                 "allowUnsettledMulticast": {
                     "type": "boolean",
                     "description": "(DEPRECATED) If true, allow senders to send unsettled deliveries to multicast addresses.  These deliveries shall be settled by the ingress router.  If false, unsettled deliveries to multicast addresses shall be rejected.",
@@ -703,10 +714,11 @@
                     "type": [
                         "normal",
                         "inter-router",
-                        "route-container"
+                        "route-container",
+                        "edge"
                     ],
                     "default": "normal",
-                    "description": "The role of an established connection. In the normal role, the connection is assumed to be used for AMQP clients that are doing normal message delivery over the connection.  In the inter-router role, the connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections. route-container role can be used for router-container connections, for example, a router-broker connection.",
+                    "description": "The role of an established connection. In the normal role, the connection is assumed to be used for AMQP clients that are doing normal message delivery over the connection.  In the inter-router role, the connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections. route-container role can be used for router-container connections, for example, a router-broker connection.  In the edge role, the connection is assumed to be between an edge router and an interior router.",
                     "create": true
                 },
                 "cost": {
@@ -867,10 +879,11 @@
                     "type": [
                         "normal",
                         "inter-router",
-                        "route-container"
+                        "route-container",
+                        "edge"
                     ],
                     "default": "normal",
-                    "description": "The role of an established connection. In the normal role, the connection is assumed to be used for AMQP clients that are doing normal message delivery over the connection.  In the inter-router role, the connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections. route-container role can be used for router-container connections, for example, a router-broker connection.",
+                    "description": "The role of an established connection. In the normal role, the connection is assumed to be used for AMQP clients that are doing normal message delivery over the connection.  In the inter-router role, the connection is assumed to be to another router in the network.  Inter-router discovery and routing protocols can only be used over inter-router connections. route-container role can be used for router-container connections, for example, a router-broker connection.  In the edge role, the connection is assumed to be between and edge router and an interior router.",
                     "create": true
                 },
                 "cost": {
@@ -986,6 +999,7 @@
                         "MESSAGE",
                         "SERVER",
                         "AGENT",
+                        "AUTHSERVICE",
                         "CONTAINER",
                         "ERROR",
                         "POLICY",
@@ -995,8 +1009,7 @@
                         "DEFAULT"
                     ],
                     "required": true,
-                    "description": "Module to configure. The special module 'DEFAULT' specifies defaults for all modules.",
-                    "update": true
+                    "description": "Module to configure. The special module 'DEFAULT' specifies defaults for all modules."
                 },
                 "enable": {
                     "type": "string",
@@ -1106,6 +1119,12 @@
                 "egressPhase": {
                     "type": "integer",
                     "description": "Advanced - Override the egress phase for this address",
+                    "create": true,
+                    "required": false
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "All messages sent to this address which lack an intrinsic priority will be assigned this priority.",
                     "create": true,
                     "required": false
                 }
@@ -1420,6 +1439,10 @@
                 "ingressHistogram": {
                     "type": "list",
                     "description": "For outgoing links on connections with 'normal' role.  This histogram shows the number of settled deliveries on the link that ingressed the network at each interior router node."
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "For inter-router links, this is the message priority being handled."
                 }
             }
         },
@@ -1501,6 +1524,10 @@
                 "trackedDeliveries": {
                     "type": "integer",
                     "description": "Number of transit deliveries being tracked for this address (for balanced distribution)."
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "The message priority being handled by this address."
                 }
             }
         },
@@ -1841,6 +1868,20 @@
                     "required": false,
                     "create": true
                 },
+                "allowWaypointLinks": {
+                    "type": "boolean",
+                    "description": "Whether this connection is allowed to claim 'waypoint.N' capability for attached links.  This allows endpoints to act as waypoints without needing auto-links.",
+                    "default": true,
+                    "required": false,
+                    "create": true
+                },
+                "allowDynamicLinkRoutes": {
+                    "type": "boolean",
+                    "description": "Whether this connection is allowed to dynamically create connection-scoped link route destinations.",
+                    "default": true,
+                    "required": false,
+                    "create": true
+                },
                 "sources": {
                     "type": "string",
                     "description": "A list of source addresses from which users in this group may receive messages. To specify multiple addresses, separate the addresses with either a comma or a space. If you do not specify any addresses, users in this group are not allowed to receive messages from any addresses. You can use the substitution token '${user}' to specify an address that contains a user's authenticated user name. You can use an asterisk ('*') wildcard to match one or more characters in an address. However, this wildcard is only recognized if it is the last character in the address name. You may specify attributes 'sources' or 'sourcePattern' but not both at the same time.",
@@ -1907,6 +1948,31 @@
                 "arg2": {"type": "string", "create": true, "update": true},
                 "num1": {"type": "integer", "create": true, "update": true},
                 "num2": {"type": "integer", "create": true, "update": true}
+            }
+        },
+
+        "router.connection.linkRoute": {
+            "description": "[EXPERIMENTAL] A linkRoute that is scoped to the connection that created it. Connection linkRoutes only exist within the context of a connection and when the connection is closed, they vanish. This differs from configured linkRoutes (router.config.linkRoute) which remain configured should their associated connection restart. Connection linkRoutes may be used by a client to create link-routed message flows that are automatically removed when the client disconnects.  Note well that connection.linkRoute cannot be declared in a configuration file - they must be created at run time via management operations over the connection which they are to be used. Connection linkRoutes are only visible to management access that is via the containing connection.",
+            "extends": "configurationEntity",
+            "operations": ["CREATE", "DELETE"],
+            "attributes" : {
+                "pattern": {
+                    "description": "A wildcarded pattern for address matching. Incoming addresses are matched against this pattern. Matching addresses use the configured settings. The pattern consists of one or more tokens separated by a forward slash '/'. A token can be one of the following: a * character, a # character, or a sequence of characters that do not include /, *, or #.  The * token matches any single token.  The # token matches zero or more tokens. * has higher precedence than #, and exact match has the highest precedence.",
+                    "type": "string",
+                    "create": true,
+                    "required": true
+                },
+                "direction": {
+                    "description": "The permitted direction of links: 'in' means client senders; 'out' means client receivers",
+                    "type": ["in", "out"],
+                    "create": true,
+                    "required": true
+                },
+                "containerId": {
+                    "type": "string",
+                    "description": "Name of the container which has instantiated this linkRoute.",
+                    "create": false
+                }
             }
         }
     }

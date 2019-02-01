@@ -20,6 +20,7 @@
  */
 
 #include "dispatch_private.h"
+#include "message_private.h"
 #include <qpid/dispatch/router_core.h>
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/atomic.h>
@@ -37,12 +38,25 @@ typedef struct qdr_auto_link_t       qdr_auto_link_t;
 typedef struct qdr_conn_identifier_t qdr_conn_identifier_t;
 typedef struct qdr_connection_ref_t  qdr_connection_ref_t;
 typedef struct qdr_exchange          qdr_exchange_t;
+typedef struct qdr_edge_t            qdr_edge_t;
+
+
+#include "core_link_endpoint.h"
+#include "core_events.h"
+#include "core_attach_address_lookup.h"
 
 qdr_forwarder_t *qdr_forwarder_CT(qdr_core_t *core, qd_address_treatment_t treatment);
 int qdr_forward_message_CT(qdr_core_t *core, qdr_address_t *addr, qd_message_t *msg, qdr_delivery_t *in_delivery,
                            bool exclude_inprocess, bool control);
 bool qdr_forward_attach_CT(qdr_core_t *core, qdr_address_t *addr, qdr_link_t *in_link, qdr_terminus_t *source,
                            qdr_terminus_t *target);
+void qdr_forward_link_direct_CT(qdr_core_t       *core,
+                                qdr_connection_t *conn,
+                                qdr_link_t       *in_link,
+                                qdr_terminus_t   *source,
+                                qdr_terminus_t   *target,
+                                char             *strip,
+                                char             *insert);
 
 typedef enum {
     QDR_CONDITION_NO_ROUTE_TO_DESTINATION,
@@ -88,6 +102,7 @@ struct qdr_action_t {
             int           router_maskbit;
             int           nh_router_maskbit;
             int           cost;
+            int           treatment_hint;
             qd_bitmask_t *router_set;
             qdr_field_t  *address;
         } route_table;
@@ -150,6 +165,16 @@ struct qdr_action_t {
             qd_buffer_list_t         body_buffers;
         } agent;
 
+        //
+        // Arguments for general use
+        //
+        struct {
+            void *context_1;
+            void *context_2;
+            void *context_3;
+            void *context_4;
+        } general;
+
     } args;
 };
 
@@ -176,6 +201,8 @@ struct qdr_general_work_t {
     qdr_receive_t               on_message;
     void                       *on_message_context;
     qd_message_t               *msg;
+    uint64_t                    in_conn_id;
+    int                         treatment;
 };
 
 ALLOC_DECLARE(qdr_general_work_t);
@@ -269,6 +296,7 @@ struct qdr_query_t {
     int                      next_offset;
     bool                     more;
     qd_amqp_error_t          status;
+    uint64_t                 in_conn;  // or perhaps a pointer???
 };
 
 DEQ_DECLARE(qdr_query_t, qdr_query_list_t); 
@@ -290,7 +318,8 @@ DEQ_DECLARE(qdr_node_t, qdr_node_list_t);
 void qdr_router_node_free(qdr_core_t *core, qdr_node_t *rnode);
 
 #define PEER_CONTROL_LINK(c,n) ((n->link_mask_bit >= 0) ? (c)->control_links_by_mask_bit[n->link_mask_bit] : 0)
-#define PEER_DATA_LINK(c,n)    ((n->link_mask_bit >= 0) ? (c)->data_links_by_mask_bit[n->link_mask_bit] : 0)
+// PEER_DATA_LINK has gotten more complex with prioritized links, and is now a function, peer_data_link().
+
 
 
 struct qdr_router_ref_t {
@@ -354,7 +383,7 @@ struct qdr_delivery_t {
     qdr_subscription_list_t subscriptions;
     qdr_delivery_ref_list_t peers;             /// Use this list if there if the delivery has more than one peer.
     bool                    multicast;         /// True if this delivery is targeted for a multicast address.
-
+    bool                    via_edge;          /// True if this delivery arrived via an edge-connection.
 };
 
 ALLOC_DECLARE(qdr_delivery_t);
@@ -367,7 +396,8 @@ void qdr_del_delivery_ref(qdr_delivery_ref_list_t *list, qdr_delivery_ref_t *ref
 #define QDR_LINK_LIST_CLASS_ADDRESS    0
 #define QDR_LINK_LIST_CLASS_WORK       1
 #define QDR_LINK_LIST_CLASS_CONNECTION 2
-#define QDR_LINK_LIST_CLASSES          3
+#define QDR_LINK_LIST_CLASS_LOCAL      3
+#define QDR_LINK_LIST_CLASSES          4
 
 typedef enum {
     QDR_LINK_OPER_UP,
@@ -381,6 +411,7 @@ struct qdr_link_t {
     qdr_core_t              *core;
     uint64_t                 identity;
     void                    *user_context;
+    void                    *edge_context;       ///< Opaque context to be used for edge-related purposes
     qdr_connection_t        *conn;               ///< [ref] Connection that owns this link
     qd_link_type_t           link_type;
     qd_direction_t           link_direction;
@@ -388,9 +419,12 @@ struct qdr_link_t {
     char                    *name;
     char                    *disambiguated_name;
     char                    *terminus_addr;
+    int                      attach_count;       ///< 1 or 2 depending on the state of the lifecycle
     int                      detach_count;       ///< 0, 1, or 2 depending on the state of the lifecycle
     qdr_address_t           *owning_addr;        ///< [ref] Address record that owns this link
+    int                      phase;
     qdr_link_t              *connected_link;     ///< [ref] If this is a link-route, reference the connected link
+    qdrc_endpoint_t         *core_endpoint;      ///< [ref] Set if this link terminates on an in-core endpoint
     qdr_link_ref_t          *ref[QDR_LINK_LIST_CLASSES];  ///< Pointers to containing reference objects
     qdr_auto_link_t         *auto_link;          ///< [ref] Auto_link that owns this link
     qdr_delivery_list_t      undelivered;        ///< Deliveries to be forwarded or sent
@@ -401,11 +435,15 @@ struct qdr_link_t {
     int                      capacity;
     int                      credit_to_core; ///< Number of the available credits incrementally given to the core
     int                      credit_pending; ///< Number of credits to be issued once consumers are available
+    int                      credit_stored;  ///< Number of credits given to the link before it was ready to process them.
     bool                     admin_enabled;
     bool                     strip_annotations_in;
     bool                     strip_annotations_out;
     bool                     drain_mode;
     bool                     stalled_outbound;  ///< Indicates that this link is stalled on outbound buffer backpressure
+    bool                     detach_received;   ///< True on core receipt of inbound attach
+    bool                     detach_send_done;  ///< True once the detach has been sent by the I/O thread
+    bool                     edge;              ///< True if this link is in an edge-connection
     char                    *strip_prefix;
     char                    *insert_prefix;
     bool                     terminus_survives_disconnect;
@@ -418,6 +456,7 @@ struct qdr_link_t {
     uint64_t  released_deliveries;
     uint64_t  modified_deliveries;
     uint64_t *ingress_histogram;
+    uint8_t   priority;
 };
 
 ALLOC_DECLARE(qdr_link_t);
@@ -432,7 +471,8 @@ ALLOC_DECLARE(qdr_link_ref_t);
 DEQ_DECLARE(qdr_link_ref_t, qdr_link_ref_list_t);
 
 void qdr_add_link_ref(qdr_link_ref_list_t *ref_list, qdr_link_t *link, int cls);
-void qdr_del_link_ref(qdr_link_ref_list_t *ref_list, qdr_link_t *link, int cls);
+bool qdr_del_link_ref(qdr_link_ref_list_t *ref_list, qdr_link_t *link, int cls);
+void move_link_ref(qdr_link_t *link, int from_cls, int to_cls);
 
 
 struct qdr_connection_ref_t {
@@ -448,12 +488,17 @@ void qdr_del_connection_ref(qdr_connection_ref_list_t *ref_list, qdr_connection_
 
 struct qdr_address_t {
     DEQ_LINKS(qdr_address_t);
+    qdr_address_config_t      *config;
     qdr_subscription_list_t    subscriptions; ///< In-process message subscribers
     qdr_connection_ref_list_t  conns;         ///< Local Connections for route-destinations
     qdr_link_ref_list_t        rlinks;        ///< Locally-Connected Consumers
     qdr_link_ref_list_t        inlinks;       ///< Locally-Connected Producers
     qd_bitmask_t              *rnodes;        ///< Bitmask of remote routers with connected consumers
     qd_hash_handle_t          *hash_handle;   ///< Linkage back to the hash table entry
+    qdrc_endpoint_desc_t      *core_endpoint; ///< [ref] Set if this address is bound to an in-core endpoint
+    void                      *core_endpoint_context;
+    qdr_link_t                *edge_inlink;   ///< [ref] In-link from connected Interior router (on edge router)
+    qdr_link_t                *edge_outlink;  ///< [ref] Out-link to connected Interior router (on edge router)
     qd_address_treatment_t     treatment;
     qdr_forwarder_t           *forwarder;
     int                        ref_count;     ///< Number of link-routes + auto-links referencing this address
@@ -477,7 +522,7 @@ struct qdr_address_t {
     //
     // State for "exchange" treatment
     //
-    qdr_exchange_t      *exchange;  // weak ref
+    qdr_exchange_t *exchange;  // weak ref
 
     //
     // State for "link balanced" treatment
@@ -496,24 +541,33 @@ struct qdr_address_t {
     uint64_t deliveries_ingress_route_container;
 
     ///@}
+
+    int priority;
 };
 
 ALLOC_DECLARE(qdr_address_t);
 DEQ_DECLARE(qdr_address_t, qdr_address_list_t);
 
-qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment);
+qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment, qdr_address_config_t *config);
 qdr_address_t *qdr_add_local_address_CT(qdr_core_t *core, char aclass, const char *addr, qd_address_treatment_t treatment);
+qdr_address_t *qdr_add_mobile_address_CT(qdr_core_t *core, const char* prefix, const char *addr, qd_address_treatment_t treatment, bool edge);
 void qdr_core_remove_address(qdr_core_t *core, qdr_address_t *addr);
+void qdr_core_bind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_link_t *link);
+void qdr_core_unbind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_link_t *link);
+void qdr_core_bind_address_conn_CT(qdr_core_t *core, qdr_address_t *addr, qdr_connection_t *conn);
+void qdr_core_unbind_address_conn_CT(qdr_core_t *core, qdr_address_t *addr, qdr_connection_t *conn);
 
 struct qdr_address_config_t {
     DEQ_LINKS(qdr_address_config_t);
     char                   *name;
     uint64_t                identity;
+    uint32_t                ref_count;
     char                   *pattern;
     bool                    is_prefix;
     qd_address_treatment_t  treatment;
     int                     in_phase;
     int                     out_phase;
+    int                     priority;
 };
 
 ALLOC_DECLARE(qdr_address_config_t);
@@ -529,7 +583,7 @@ bool qdr_is_addr_treatment_multicast(qdr_address_t *addr);
 //
 
 struct qdr_connection_info_t {
-    const  char                *container;
+    char                       *container;
     char                       *sasl_mechanisms;
     char                       *host;
     bool                        is_encrypted;
@@ -547,6 +601,8 @@ struct qdr_connection_info_t {
 
 ALLOC_DECLARE(qdr_connection_info_t);
 
+DEQ_DECLARE(qdr_link_route_t, qdr_link_route_list_t);
+
 struct qdr_connection_t {
     DEQ_LINKS(qdr_connection_t);
     DEQ_LINKS_N(ACTIVATE, qdr_connection_t);
@@ -559,33 +615,30 @@ struct qdr_connection_t {
     qdr_conn_identifier_t      *conn_id;
     bool                        strip_annotations_in;
     bool                        strip_annotations_out;
+    bool                        policy_allow_dynamic_link_routes;
     int                         link_capacity;
     int                         mask_bit;
     qdr_connection_work_list_t  work_list;
     sys_mutex_t                *work_lock;
     qdr_link_ref_list_t         links;
-    qdr_link_ref_list_t         links_with_work;
+    qdr_link_ref_list_t         links_with_work[QDR_N_PRIORITIES];
     char                       *tenant_space;
     int                         tenant_space_len;
     qdr_connection_info_t      *connection_info;
     void                       *user_context; /* Updated from IO thread, use work_lock */
+    qdr_link_route_list_t       conn_link_routes;  // connection scoped link routes
 };
 
 ALLOC_DECLARE(qdr_connection_t);
 DEQ_DECLARE(qdr_connection_t, qdr_connection_list_t);
 
-// Address hash prefixes for link routes:
-//  'C' old style prefix address, incoming
-//  'D' old style prefix address, outgoing
-//  'E' link route pattern address, incoming
-//  'F' link route pattern address, outgoing
-#define QDR_IS_LINK_ROUTE_PREFIX(p) ((p) == 'C' || (p) == 'D')
-#define QDR_IS_LINK_ROUTE(p) ((p) == 'E' || (p) == 'F' || QDR_IS_LINK_ROUTE_PREFIX(p))
-#define QDR_LINK_ROUTE_DIR(p) (((p) == 'C' || (p) == 'E') ? QD_INCOMING : QD_OUTGOING)
+#define QDR_IS_LINK_ROUTE_PREFIX(p) ((p) == QD_ITER_HASH_PREFIX_LINKROUTE_ADDR_IN || (p) == QD_ITER_HASH_PREFIX_LINKROUTE_ADDR_OUT)
+#define QDR_IS_LINK_ROUTE(p) ((p) == QD_ITER_HASH_PREFIX_LINKROUTE_PATTERN_IN || (p) == QD_ITER_HASH_PREFIX_LINKROUTE_PATTERN_OUT || QDR_IS_LINK_ROUTE_PREFIX(p))
+#define QDR_LINK_ROUTE_DIR(p) (((p) == QD_ITER_HASH_PREFIX_LINKROUTE_ADDR_IN || (p) == QD_ITER_HASH_PREFIX_LINKROUTE_PATTERN_IN) ? QD_INCOMING : QD_OUTGOING)
 #define QDR_LINK_ROUTE_HASH(dir, is_prefix) \
     (((dir) == QD_INCOMING)                 \
-     ? ((is_prefix) ? 'C' : 'E')            \
-     : ((is_prefix) ? 'D' : 'F'))
+     ? ((is_prefix) ? QD_ITER_HASH_PREFIX_LINKROUTE_ADDR_IN  : QD_ITER_HASH_PREFIX_LINKROUTE_PATTERN_IN)    \
+     : ((is_prefix) ? QD_ITER_HASH_PREFIX_LINKROUTE_ADDR_OUT : QD_ITER_HASH_PREFIX_LINKROUTE_PATTERN_OUT))
 
 struct qdr_link_route_t {
     DEQ_LINKS(qdr_link_route_t);
@@ -601,11 +654,27 @@ struct qdr_link_route_t {
     char                   *pattern;
     char                   *add_prefix;
     char                   *del_prefix;
+    qdr_connection_t       *parent_conn;
 };
 
 ALLOC_DECLARE(qdr_link_route_t);
-DEQ_DECLARE(qdr_link_route_t, qdr_link_route_list_t);
 void qdr_core_delete_link_route(qdr_core_t *core, qdr_link_route_t *lr);
+void qdr_core_delete_auto_link (qdr_core_t *core,  qdr_auto_link_t *al);
+
+// Core timer related field/data structures
+typedef void (*qdr_timer_cb_t)(qdr_core_t *core, void* context);
+
+typedef struct qdr_core_timer_t {
+    DEQ_LINKS(struct qdr_core_timer_t);
+    qdr_timer_cb_t  handler;
+    void           *context;
+    uint32_t        delta_time_seconds;
+    bool            scheduled;
+} qdr_core_timer_t;
+
+ALLOC_DECLARE(qdr_core_timer_t);
+DEQ_DECLARE(qdr_core_timer_t, qdr_core_timer_list_t);
+
 
 typedef enum {
     QDR_AUTO_LINK_STATE_INACTIVE,
@@ -623,11 +692,14 @@ struct qdr_auto_link_t {
     char                  *name;
     qdr_address_t         *addr;
     char                  *external_addr;
+    const char            *internal_addr;
     int                    phase;
+    int                    retry_attempts;
     qd_direction_t         dir;
     qdr_conn_identifier_t *conn_id;
     qdr_link_t            *link;
     qdr_auto_link_state_t  state;
+    qdr_core_timer_t      *retry_timer; // If the auto link attach fails or gets disconnected, this timer retries the attach.
     char                  *last_error;
 };
 
@@ -646,6 +718,10 @@ struct qdr_conn_identifier_t {
 ALLOC_DECLARE(qdr_conn_identifier_t);
 DEQ_DECLARE(qdr_exchange_t, qdr_exchange_list_t);
 
+typedef struct qdr_priority_sheaf_t {
+    qdr_link_t *links[QDR_N_PRIORITIES];
+    int count;
+} qdr_priority_sheaf_t;
 
 struct qdr_core_t {
     qd_dispatch_t     *qd;
@@ -658,12 +734,17 @@ struct qdr_core_t {
     sys_mutex_t       *action_lock;
 
     sys_mutex_t             *work_lock;
+    qdr_core_timer_list_t    scheduled_timers;
     qdr_general_work_list_t  work_list;
     qd_timer_t              *work_timer;
 
     qdr_connection_list_t open_connections;
+    qdr_connection_t     *active_edge_connection;
     qdr_connection_list_t connections_to_activate;
     qdr_link_list_t       open_links;
+
+    qdrc_attach_addr_lookup_t  addr_lookup_handler;
+    void                      *addr_lookup_context;
 
     //
     // Agent section
@@ -698,6 +779,13 @@ struct qdr_core_t {
     qdr_link_deliver_t         deliver_handler;
     qdr_delivery_update_t      delivery_update_handler;
 
+    //
+    // Events section
+    //
+    qdrc_event_subscription_list_t conn_event_subscriptions;
+    qdrc_event_subscription_list_t link_event_subscriptions;
+    qdrc_event_subscription_list_t addr_event_subscriptions;
+
     qd_router_mode_t  router_mode;
     const char       *router_area;
     const char       *router_id;
@@ -720,7 +808,7 @@ struct qdr_core_t {
     qd_bitmask_t         *neighbor_free_mask;
     qdr_node_t          **routers_by_mask_bit;
     qdr_link_t          **control_links_by_mask_bit;
-    qdr_link_t          **data_links_by_mask_bit;
+    qdr_priority_sheaf_t *data_links_by_mask_bit;
     uint64_t              cost_epoch;
 
     uint64_t              next_tag;
@@ -748,9 +836,25 @@ struct qdr_core_t {
 
 };
 
+struct qdr_terminus_t {
+    qdr_field_t            *address;
+    pn_durability_t         durability;
+    pn_expiry_policy_t      expiry_policy;
+    pn_seconds_t            timeout;
+    bool                    dynamic;
+    bool                    coordinator;
+    pn_distribution_mode_t  distribution_mode;
+    pn_data_t              *properties;
+    pn_data_t              *filter;
+    pn_data_t              *outcomes;
+    pn_data_t              *capabilities;
+};
+
+ALLOC_DECLARE(qdr_terminus_t);
+
 void *router_core_thread(void *arg);
 uint64_t qdr_identifier(qdr_core_t* core);
-void qdr_management_agent_on_message(void *context, qd_message_t *msg, int link_id, int cost);
+void qdr_management_agent_on_message(void *context, qd_message_t *msg, int link_id, int cost, uint64_t in_conn_id);
 void  qdr_route_table_setup_CT(qdr_core_t *core);
 void  qdr_agent_setup_CT(qdr_core_t *core);
 void  qdr_forwarder_setup_CT(qdr_core_t *core);
@@ -759,13 +863,20 @@ void qdr_action_enqueue(qdr_core_t *core, qdr_action_t *action);
 void qdr_link_issue_credit_CT(qdr_core_t *core, qdr_link_t *link, int credit, bool drain);
 void qdr_drain_inbound_undelivered_CT(qdr_core_t *core, qdr_link_t *link, qdr_address_t *addr);
 void qdr_addr_start_inlinks_CT(qdr_core_t *core, qdr_address_t *addr);
+
+/**
+ * Returns true if the passed in address is a mobile address, false otherwise
+ * If the first character of the address_key (obtained using its hash_handle) is M, the address is mobile.
+ */
+bool qdr_address_is_mobile_CT(qdr_address_t *addr);
+
 void qdr_delivery_push_CT(qdr_core_t *core, qdr_delivery_t *dlv);
 void qdr_delivery_release_CT(qdr_core_t *core, qdr_delivery_t *delivery);
 void qdr_delivery_failed_CT(qdr_core_t *core, qdr_delivery_t *delivery);
 bool qdr_delivery_settled_CT(qdr_core_t *core, qdr_delivery_t *delivery);
 void qdr_delivery_decref_CT(qdr_core_t *core, qdr_delivery_t *delivery, const char *label);
 void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_link_t *link, qd_message_t *msg);
-
+void qdr_in_process_send_to_CT(qdr_core_t *core, qd_iterator_t *address, qd_message_t *msg, bool exclude_inprocess, bool control);
 /**
  * Links the in_dlv to the out_dlv and increments ref counts of both deliveries
  */
@@ -795,19 +906,24 @@ qdr_delivery_t *qdr_delivery_next_peer_CT(qdr_delivery_t *dlv);
 
 void qdr_agent_enqueue_response_CT(qdr_core_t *core, qdr_query_t *query);
 
-void qdr_post_mobile_added_CT(qdr_core_t *core, const char *address_hash);
+void qdr_post_mobile_added_CT(qdr_core_t *core, const char *address_hash, qd_address_treatment_t treatment);
 void qdr_post_mobile_removed_CT(qdr_core_t *core, const char *address_hash);
 void qdr_post_link_lost_CT(qdr_core_t *core, int link_maskbit);
 
 void qdr_post_general_work_CT(qdr_core_t *core, qdr_general_work_t *work);
-void qdr_check_addr_CT(qdr_core_t *core, qdr_address_t *addr, bool was_local);
+void qdr_check_addr_CT(qdr_core_t *core, qdr_address_t *addr);
 bool qdr_is_addr_treatment_multicast(qdr_address_t *addr);
 qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *peer, qdr_link_t *link, qd_message_t *msg);
 void qdr_forward_deliver_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery_t *dlv);
 void qdr_connection_free(qdr_connection_t *conn);
 void qdr_connection_activate_CT(qdr_core_t *core, qdr_connection_t *conn);
-qd_address_treatment_t qdr_treatment_for_address_CT(qdr_core_t *core, qdr_connection_t *conn, qd_iterator_t *iter, int *in_phase, int *out_phase);
-qd_address_treatment_t qdr_treatment_for_address_hash_CT(qdr_core_t *core, qd_iterator_t *iter);
+qdr_address_config_t *qdr_config_for_address_CT(qdr_core_t *core, qdr_connection_t *conn, qd_iterator_t *iter);
+qd_address_treatment_t qdr_treatment_for_address_hash_CT(qdr_core_t *core, qd_iterator_t *iter, qdr_address_config_t **addr_config);
+qd_address_treatment_t qdr_treatment_for_address_hash_with_default_CT(qdr_core_t *core, qd_iterator_t *iter, qd_address_treatment_t default_treatment, qdr_address_config_t **addr_config);
+qdr_edge_t *qdr_edge(qdr_core_t *);
+void qdr_edge_free(qdr_edge_t *);
+void qdr_edge_connection_opened(qdr_edge_t *edge, qdr_connection_t *conn);
+void qdr_edge_connection_closed(qdr_edge_t *edge);
 
 void qdr_connection_enqueue_work_CT(qdr_core_t            *core,
                                     qdr_connection_t      *conn,
@@ -824,10 +940,55 @@ qdr_link_t *qdr_create_link_CT(qdr_core_t       *core,
                                qdr_terminus_t   *target);
 
 void qdr_link_outbound_detach_CT(qdr_core_t *core, qdr_link_t *link, qdr_error_t *error, qdr_condition_t condition, bool close);
+void qdr_link_outbound_second_attach_CT(qdr_core_t *core, qdr_link_t *link, qdr_terminus_t *source, qdr_terminus_t *target);
 
 qdr_query_t *qdr_query(qdr_core_t              *core,
                        void                    *context,
                        qd_router_entity_type_t  type,
-                       qd_composed_field_t     *body);
+                       qd_composed_field_t     *body,
+                       uint64_t                 conn_id);
+
+/**
+ * Create a new timer which will only be used inside the code thread.
+ *
+ * @param core Pointer to the core object returned by qd_core()
+ * @callback Callback function to be invoked when timer fires.
+ * @timer_context Context to be used when firing callback
+ */
+qdr_core_timer_t *qdr_core_timer_CT(qdr_core_t *core, qdr_timer_cb_t callback, void *timer_context);
+
+
+/**
+ * Schedules a core timer with a delay. The timer will fire after "delay" seconds
+ * @param core Pointer to the core object returned by qd_core()
+ * @param timer Timer object that needs to be scheduled.
+ * @param delay The number of seconds to wait before firing the timer
+ */
+void qdr_core_timer_schedule_CT(qdr_core_t *core, qdr_core_timer_t *timer, uint32_t delay);
+
+/**
+ * Cancels an already scheduled timeer. This does not free the timer. It is the responsibility of the person who
+ * created the timer to free it.
+ * @param core Pointer to the core object returned by qd_core()
+ * @param timer Timer object that needs to be scheduled.
+ *
+ */
+void qdr_core_timer_cancel_CT(qdr_core_t *core, qdr_core_timer_t *timer);
+
+/**
+ * Cancels the timer if it is scheduled and and free it.
+ * @param core Pointer to the core object returned by qd_core()
+ * @param timer Timer object that needs to be scheduled.
+ */
+void qdr_core_timer_free_CT(qdr_core_t *core, qdr_core_timer_t *timer);
+
+/**
+ * Clears the sheaf of priority links in a connection.
+ * Call this when a connection is being closed, when the mask-bit
+ * for that sheaf is being returned to the core for re-use.
+ * @param core Pointer to the core object returned by qd_core()
+ * @param n uint8_t index for the sheaf to be reset prior to re-use.
+ */
+void qdr_reset_sheaf(qdr_core_t *core, uint8_t n);
 
 #endif

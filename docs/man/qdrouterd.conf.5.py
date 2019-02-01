@@ -34,6 +34,12 @@ from qpid_dispatch_internal.compat import dict_itervalues
 CONNECTOR = 'org.apache.qpid.dispatch.connector'
 LISTENER = 'org.apache.qpid.dispatch.listener'
 
+# avoid writing these config entity types to the man file, they are not allowed
+# in the configuration file and are only supported at run time via management
+#
+TYPE_FILTER = ['router.connection.linkRoute']
+
+
 class ManPageWriter(SchemaWriter):
 
     def __init__(self):
@@ -42,8 +48,8 @@ class ManPageWriter(SchemaWriter):
     def attribute_type(self, attr, holder):
         # Don't show read-only attributes
         if not attr.create and not attr.update:
-            # It is ok to show the console attributes
-            if not holder.short_name == "console":
+            # It is ok to show the console and log attributes
+            if not holder.short_name == "console" and not holder.short_name == "log":
                 return
         super(ManPageWriter, self).attribute_type(attr, holder, show_create=False, show_update=False)
 
@@ -136,6 +142,8 @@ listener {
 
             config = self.schema.entity_type("configurationEntity")
             for entity_type in dict_itervalues(self.schema.entity_types):
+                if entity_type.short_name in TYPE_FILTER:
+                    continue
                 if config in entity_type.all_bases:
                     with self.section(entity_type.short_name):
                         if entity_type.description:

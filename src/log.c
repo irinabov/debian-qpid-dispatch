@@ -83,6 +83,12 @@ DEQ_DECLARE(log_sink_t, log_sink_list_t);
 static log_sink_list_t sink_list = {0};
 
 const char *format = "%Y-%m-%d %H:%M:%S.%%06lu %z";
+bool utc = false;
+
+void qd_log_global_options(const char* _format, bool _utc) {
+    if (_format) format = _format;
+    utc = _utc;
+}
 
 static const char* SINK_STDOUT = "stdout";
 static const char* SINK_STDERR = "stderr";
@@ -303,14 +309,16 @@ static void write_log(qd_log_source_t *log_source, qd_log_entry_t *entry)
         buf[0] = '\0';
 
         time_t sec = entry->time.tv_sec;
-        struct tm *local_tm = localtime(&sec);
+        struct tm *time = utc ? gmtime(&sec) : localtime(&sec);
         char fmt[100];
-        strftime(fmt, sizeof fmt, format, local_tm);
+        strftime(fmt, sizeof fmt, format, time);
         snprintf(buf, 100, fmt, entry->time.tv_usec);
 
         aprintf(&begin, end, "%s ", buf);
     }
+
     aprintf(&begin, end, "%s (%s) %s", entry->module, level->name, entry->text);
+
     if (default_bool(log_source->includeSource, default_log_source->includeSource) && entry->file)
         aprintf(&begin, end, " (%s:%d)", entry->file, entry->line);
     aprintf(&begin, end, "\n");
@@ -403,6 +411,8 @@ void qd_vlog_impl(qd_log_source_t *source, qd_log_level_t level, const char *fil
 
     if (!qd_log_enabled(source, level)) return;
 
+    // Bounded buffer of log entries, keep most recent.
+    sys_mutex_lock(log_lock);
     qd_log_entry_t *entry = new_qd_log_entry_t();
     DEQ_ITEM_INIT(entry);
     entry->module = source->module;
@@ -412,9 +422,6 @@ void qd_vlog_impl(qd_log_source_t *source, qd_log_level_t level, const char *fil
     gettimeofday(&entry->time, NULL);
     vsnprintf(entry->text, TEXT_MAX, fmt, ap);
     write_log(source, entry);
-
-    // Bounded buffer of log entries, keep most recent.
-    sys_mutex_lock(log_lock);
     DEQ_INSERT_TAIL(entries, entry);
     if (DEQ_SIZE(entries) > LIST_MAX)
         qd_log_entry_free_lh(DEQ_HEAD(entries));
@@ -445,7 +452,7 @@ PyObject *qd_log_recent_py(long limit) {
         int i = 0;
         // NOTE: PyList_SetItem steals a reference so no leak here.
         PyList_SetItem(py_entry, i++, PyUnicode_FromString(entry->module));
-        const char* level = level_name(entry->level);
+        const char* level = level_name( level_index_for_bit(entry->level) + 2 );
         PyList_SetItem(py_entry, i++, level ? PyUnicode_FromString(level) : inc_none());
         PyList_SetItem(py_entry, i++, PyUnicode_FromString(entry->text));
         PyList_SetItem(py_entry, i++, entry->file ? PyUnicode_FromString(entry->file) : inc_none());
@@ -545,7 +552,6 @@ qd_error_t qd_log_entity(qd_entity_t *entity) {
         if (qd_entity_has(entity, "includeSource"))
             src->includeSource = qd_entity_get_bool(entity, "includeSource");
         QD_ERROR_BREAK();
-
     } while(0);
 
     if (module)

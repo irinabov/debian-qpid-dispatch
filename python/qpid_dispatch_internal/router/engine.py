@@ -98,12 +98,12 @@ class RouterEngine(object):
                 raise ValueError("No router configuration found")
         return self._config
 
-    def addressAdded(self, addr):
+    def addressAdded(self, addr, treatment):
         """
         """
         try:
-            if addr[0] in 'MCDEF':
-                self.mobile_address_engine.add_local_address(addr)
+            if addr[0] in 'MCDEFH':
+                self.mobile_address_engine.add_local_address(addr, treatment)
         except Exception:
             self.log_ma(LOG_ERROR, "Exception in new-address processing\n%s" % format_exc(LOG_STACK_LIMIT))
 
@@ -111,7 +111,7 @@ class RouterEngine(object):
         """
         """
         try:
-            if addr[0] in 'MCDEF':
+            if addr[0] in 'MCDEFH':
                 self.mobile_address_engine.del_local_address(addr)
         except Exception:
             self.log_ma(LOG_ERROR, "Exception in del-address processing\n%s" % format_exc(LOG_STACK_LIMIT))

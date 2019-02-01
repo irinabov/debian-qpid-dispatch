@@ -22,7 +22,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <qpid/dispatch/buffer.h>
-#include <qpid/dispatch/iovec.h>
 
 
 /**@file
@@ -44,6 +43,21 @@
  * @{
  */
 typedef struct qd_iterator_t qd_iterator_t;
+
+/**
+ * Address Hash Prefix Values
+ */
+#define QD_ITER_HASH_PREFIX_TOPOLOGICAL           'T'
+#define QD_ITER_HASH_PREFIX_LOCAL                 'L'
+#define QD_ITER_HASH_PREFIX_AREA                  'A'
+#define QD_ITER_HASH_PREFIX_ROUTER                'R'
+#define QD_ITER_HASH_PREFIX_MOBILE                'M'
+#define QD_ITER_HASH_PREFIX_LINKROUTE_ADDR_IN     'C'
+#define QD_ITER_HASH_PREFIX_LINKROUTE_ADDR_OUT    'D'
+#define QD_ITER_HASH_PREFIX_LINKROUTE_PATTERN_IN  'E'
+#define QD_ITER_HASH_PREFIX_LINKROUTE_PATTERN_OUT 'F'
+#define QD_ITER_HASH_PREFIX_GLOBAL_PLACEHOLDER    'G'
+#define QD_ITER_HASH_PREFIX_EDGE_SUMMARY          'H'
 
 
 /**
@@ -81,6 +95,11 @@ typedef struct qd_iterator_t qd_iterator_t;
  *                        L^^^^^^^
  *     amqp:/<mobile>
  *         M0^^^^^^^^
+ *     amqp:/_edge/<my-router>/<local>
+ *                            L^^^^^^^
+ *     amqp:/_edge/<router>/<local>
+ *                H^^^^^^^^          [ interior mode ]
+ *         L_edge                    [ edge mode ]
  *
  * ITER_VIEW_NODE_HASH - Isolate the hashable part of a router-id, used for headers
  *
@@ -126,7 +145,7 @@ typedef struct {
  * @param area The name of the router's area
  * @param router The identifier of the router in the area
  */
-void qd_iterator_set_address(const char *area, const char *router);
+void qd_iterator_set_address(bool edge_mode, const char *area, const char *router);
 
 /** @} */
 /** \name lifecycle
@@ -308,6 +327,8 @@ int qd_iterator_ncopy(qd_iterator_t *iter, unsigned char* buffer, int n);
  */
 unsigned char *qd_iterator_copy(qd_iterator_t *iter);
 
+uint8_t qd_iterator_uint8(qd_iterator_t *iter);
+
 /**
  * Return a new iterator that is a duplicate of the original iterator, referring
  * to the same base data.  If the input iterator pointer is NULL, the duplicate
@@ -324,17 +345,6 @@ qd_iterator_t *qd_iterator_dup(const qd_iterator_t *iter);
  * @return buffer.
  */
 char* qd_iterator_strncpy(qd_iterator_t *iter, char* buffer, int n);
-
-/**
- * Return the contents of this iter into an iovec structure.  This is used in a
- * scatter/gather IO mechanism.  If the iterator spans multiple physical buffers,
- * the iovec structure will contain one pointer per buffer.
- *
- * @param iter A field iterator
- * @return An iovec structure that references the data in the iterator's buffers.
- */
-qd_iovec_t *qd_iterator_iovec(const qd_iterator_t *iter);
-
 
 /** @} */
 /** \name annotation

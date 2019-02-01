@@ -138,6 +138,7 @@ static void delete_qdr_sasl_relay_t(qdr_sasl_relay_t* instance)
 {
     if (instance->authentication_service_address) free(instance->authentication_service_address);
     if (instance->sasl_init_hostname) free(instance->sasl_init_hostname);
+    if (instance->ssl_domain) pn_ssl_domain_free(instance->ssl_domain);
     if (instance->mechlist) free(instance->mechlist);
     if (instance->selected_mechanism) free(instance->selected_mechanism);
     if (instance->response.start) free(instance->response.start);
@@ -200,6 +201,15 @@ static bool remote_sasl_init_server(pn_transport_t* transport)
         pn_data_put_symbol(data, pn_bytes(13, "ADDRESS-AUTHZ"));
         pn_data_exit(data);
 
+        data = pn_connection_properties(impl->downstream);
+        pn_data_put_map(data);
+        pn_data_enter(data);
+        pn_data_put_symbol(data, pn_bytes(strlen(QD_CONNECTION_PROPERTY_PRODUCT_KEY), QD_CONNECTION_PROPERTY_PRODUCT_KEY));
+        pn_data_put_string(data, pn_bytes(strlen(QD_CONNECTION_PROPERTY_PRODUCT_VALUE), QD_CONNECTION_PROPERTY_PRODUCT_VALUE));
+        pn_data_put_symbol(data, pn_bytes(strlen(QD_CONNECTION_PROPERTY_VERSION_KEY), QD_CONNECTION_PROPERTY_VERSION_KEY));
+        pn_data_put_string(data, pn_bytes(strlen(QPID_DISPATCH_VERSION), QPID_DISPATCH_VERSION));
+        pn_data_exit(data);
+
         pn_proactor_connect(proactor, impl->downstream, impl->authentication_service_address);
         return true;
     } else {
@@ -233,7 +243,7 @@ static void remote_sasl_free(pn_transport_t *transport)
             }
         } else {
             impl->upstream_released = true;
-            if (impl->downstream_released) {
+            if (impl->downstream_released || impl->downstream == 0) {
                 delete_qdr_sasl_relay_t(impl);
             }
         }
@@ -246,9 +256,6 @@ static void set_policy_settings(pn_connection_t* conn, permissions_t* permission
         qd_connection_t *qd_conn = (qd_connection_t*) pn_connection_get_context(conn);
         qd_conn->policy_settings = NEW(qd_policy_settings_t);
         ZERO(qd_conn->policy_settings);
-
-        qd_conn->policy_settings->denialCounts = NEW(qd_policy_denial_counts_t);
-        ZERO(qd_conn->policy_settings->denialCounts);
 
         if (permissions->targets.start && permissions->targets.capacity) {
             qd_conn->policy_settings->targets = qd_policy_compile_allowed_csv(permissions->targets.start);
@@ -286,6 +293,7 @@ static void remote_sasl_prepare(pn_transport_t *transport)
             switch (impl->outcome) {
             case PN_SASL_OK:
                 set_policy_settings(impl->upstream, &impl->permissions);
+                qd_log(auth_service_log, QD_LOG_INFO, "authenticated as %s", impl->username);
                 pnx_sasl_succeed_authentication(transport, impl->username);
                 break;
             default:
@@ -567,18 +575,18 @@ static void* parse_properties(pn_data_t* data, permission_handler handler, void*
     return context;
 }
 
-static pn_bytes_t extract_authenticated_identity(pn_data_t* data)
+static pn_data_t* extract_map_entry(pn_data_t* data, const char* name)
 {
-    pn_bytes_t result = pn_bytes_null;
+    pn_data_t* result = 0;
     size_t count = pn_data_get_map(data);
     pn_data_enter(data);
-    for (size_t i = 0; !result.size && i < count/2; i++) {
+    for (size_t i = 0; !result && i < count/2; i++) {
         if (pn_data_next(data)) {
-            if (pn_data_type(data) == PN_SYMBOL) {
-                pn_bytes_t key = pn_data_get_symbol(data);
-                if (key.size && key.start && strncmp(key.start, "authenticated-identity", min(key.size, 22)) == 0) {
+            if (pn_data_type(data) == PN_SYMBOL || pn_data_type(data) == PN_STRING) {
+                pn_bytes_t key = pn_data_type(data) == PN_SYMBOL ? pn_data_get_symbol(data) : pn_data_get_string(data);
+                if (key.size && key.start && strncmp(key.start, name, min(key.size, strlen(name))) == 0) {
                     pn_data_next(data);
-                    result = pn_data_get_string(data);
+                    result = data;
                 } else {
                     //key didn't match, move to next pair
                     pn_data_next(data);
@@ -588,6 +596,20 @@ static pn_bytes_t extract_authenticated_identity(pn_data_t* data)
                 pn_data_next(data);
             }
         }
+    }
+    return result;
+}
+
+static pn_bytes_t extract_authenticated_identity(pn_data_t* data)
+{
+    pn_bytes_t result = pn_bytes_null;
+    pn_data_t* authid = extract_map_entry(data, "authenticated-identity");
+    if (authid) {
+        pn_data_t* id = extract_map_entry(authid, "sub");
+        if (id) {
+            result = pn_data_get_string(id);
+        }
+        pn_data_exit(data);
     }
     pn_data_exit(data);
     pn_data_rewind(data);
