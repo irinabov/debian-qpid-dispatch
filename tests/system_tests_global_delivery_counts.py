@@ -19,7 +19,7 @@
 
 from time import sleep
 
-from proton import Condition, Message, Delivery, PENDING, ACCEPTED, REJECTED, Url, symbol, Timeout
+from proton import Condition, Message, Delivery,  Timeout
 from system_test import TestCase, Qdrouterd, TIMEOUT
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
@@ -37,7 +37,7 @@ class OneRouterModifiedTest(TestCase):
             ('router', {'mode': 'standalone', 'id': 'A'}),
             ('listener', {'port': listen_port, 'authenticatePeer': False, 'saslMechanisms': 'ANONYMOUS'})])
 
-        cls.router = Qdrouterd(name="A", config=config, wait=True)
+        cls.router = cls.tester.qdrouterd(name="A", config=config, wait=True)
 
     def test_one_router_modified_counts(self):
         address = self.router.addresses[0]
@@ -66,7 +66,7 @@ class OneRouterRejectedTest(TestCase):
             ('router', {'mode': 'standalone', 'id': 'A'}),
             ('listener', {'port': listen_port, 'authenticatePeer': False, 'saslMechanisms': 'ANONYMOUS'})])
 
-        cls.router = Qdrouterd(name="A", config=config, wait=True)
+        cls.router = cls.tester.qdrouterd(name="A", config=config, wait=True)
 
     def test_one_router_rejected_counts(self):
         address = self.router.addresses[0]
@@ -96,7 +96,7 @@ class OneRouterReleasedDroppedPresettledTest(TestCase):
             ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
             ('listener', {'port': listen_port, 'authenticatePeer': False, 'saslMechanisms': 'ANONYMOUS'})])
 
-        cls.router = Qdrouterd(name="A", config=config, wait=True)
+        cls.router = cls.tester.qdrouterd(name="A", config=config, wait=True)
 
     def test_one_router_released_dropped_counts(self):
         address = self.router.addresses[0]
@@ -222,7 +222,7 @@ class LinkRouteIngressEgressTransitTest(TestCase):
         # to settle
         cls.routers[2].wait_router_connected('QDR.B')
         cls.routers[1].wait_router_connected('QDR.C')
-        cls.routers[2].wait_address("pulp.task", remotes=1, delay=0.5)
+        cls.routers[2].wait_address("pulp.task", remotes=1, delay=3)
 
         # This is not a classic router network in the sense that QDR.A and D are acting as brokers. We allow a little
         # bit more time for the routers to stabilize.
@@ -364,7 +364,7 @@ class OneRouterIngressEgressTest(TestCase):
             ('router', {'mode': 'standalone', 'id': 'A'}),
             ('listener', {'port': listen_port, 'authenticatePeer': False, 'saslMechanisms': 'ANONYMOUS'})])
 
-        cls.router = Qdrouterd(name="A", config=config, wait=True)
+        cls.router = cls.tester.qdrouterd(name="A", config=config, wait=True)
 
     def test_one_router_ingress_egress_counts(self):
         address = self.router.addresses[0]
@@ -408,7 +408,7 @@ class RouteContainerEgressCount(TestCase):
             ('autoLink', {'addr': 'myListener.1', 'connection': 'myListener', 'direction': 'out'}),
         ])
 
-        cls.router = Qdrouterd(name="A", config=config, wait=True)
+        cls.router = cls.tester.qdrouterd(name="A", config=config, wait=True)
 
     def test_route_container_egress(self):
         regular_addr = self.router.addresses[0]
@@ -449,7 +449,7 @@ class RouteContainerIngressCount(TestCase):
             ('autoLink', {'addr': 'myListener.1', 'connection': 'myListener', 'direction': 'out'}),
         ])
 
-        cls.router = Qdrouterd(name="A", config=config, wait=True)
+        cls.router = cls.tester.qdrouterd(name="A", config=config, wait=True)
 
     def test_route_container_ingress(self):
         regular_addr = self.router.addresses[0]
@@ -495,10 +495,8 @@ class IngressEgressTwoRouterTest(MessagingHandler):
 
     def on_start(self, event):
         self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
-        self.conn_sender = event.container.connect(self.address1)
         self.conn_recv = event.container.connect(self.address2)
         self.receiver = event.container.create_receiver(self.conn_recv, self.dest)
-        self.sender = event.container.create_sender(self.conn_sender, self.dest)
 
     def on_sendable(self, event):
         if not self.start:
@@ -512,6 +510,9 @@ class IngressEgressTwoRouterTest(MessagingHandler):
     def on_link_opened(self, event):
         if event.receiver == self.receiver:
             self.start = True
+            self.conn_sender = event.container.connect(self.address1)
+            self.sender = event.container.create_sender(self.conn_sender,
+                                                        self.dest)
 
     def on_message(self, event):
         if event.receiver == self.receiver:
@@ -597,8 +598,6 @@ class RouteContainerEgressTest(MessagingHandler):
         self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.receiver_conn = event.container.connect(self.route_container_addr)
         self.receiver = event.container.create_receiver(self.receiver_conn, self.dest)
-        self.sender_conn = event.container.connect(self.sender_addr)
-        self.sender = event.container.create_sender(self.sender_conn, self.dest)
 
     def timeout(self):
         self.error = "Timeout Expired: self.n_sent=%d self.n_received=%d" % (self.n_sent, self.self.n_received)
@@ -624,6 +623,8 @@ class RouteContainerEgressTest(MessagingHandler):
     def on_link_opened(self, event):
         if event.receiver == self.receiver:
             self.start = True
+            self.sender_conn = event.container.connect(self.sender_addr)
+            self.sender = event.container.create_sender(self.sender_conn, self.dest)
 
     def run(self):
         Container(self).run()
@@ -726,11 +727,12 @@ class IngressEgressTransitLinkRouteTest(MessagingHandler):
         self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
         self.receiver_conn = event.container.connect(self.receiver_addr)
         self.receiver = event.container.create_receiver(self.receiver_conn, self.dest)
-        self.sender_conn = event.container.connect(self.sender_addr)
-        self.sender = event.container.create_sender(self.sender_conn, self.dest)
 
     def on_link_opened(self, event):
         if event.receiver == self.receiver:
+            self.sender_conn = event.container.connect(self.sender_addr)
+            self.sender = event.container.create_sender(self.sender_conn,
+                                                        self.dest)
             self.start = True
 
     def on_sendable(self, event):

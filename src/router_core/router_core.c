@@ -20,6 +20,7 @@
 #include "router_core_private.h"
 #include "route_control.h"
 #include "exchange_bindings.h"
+#include "core_events.h"
 #include <stdio.h>
 #include <strings.h>
 
@@ -47,6 +48,7 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     core->router_mode = mode;
     core->router_area = area;
     core->router_id   = id;
+
     DEQ_INIT(core->exchanges);
 
     //
@@ -129,7 +131,14 @@ void qdr_core_free(qdr_core_t *core)
 
     qdr_link_route_t *link_route = 0;
     while ( (link_route = DEQ_HEAD(core->link_routes))) {
+        DEQ_REMOVE_HEAD(core->link_routes);
         qdr_core_delete_link_route(core, link_route);
+    }
+
+    qdr_auto_link_t *auto_link = 0;
+    while ( (auto_link = DEQ_HEAD(core->auto_links))) {
+        DEQ_REMOVE_HEAD(core->auto_links);
+        qdr_core_delete_auto_link(core, auto_link);
     }
 
     qdr_exchange_free_all(core);
@@ -152,6 +161,20 @@ void qdr_core_free(qdr_core_t *core)
     qdr_node_t *rnode = 0;
     while ( (rnode = DEQ_HEAD(core->routers)) ) {
         qdr_router_node_free(core, rnode);
+    }
+
+    qdr_link_t *link = DEQ_HEAD(core->open_links);
+    while (link) {
+        DEQ_REMOVE_HEAD(core->open_links);
+        free(link->name);
+        free(link->disambiguated_name);
+        free(link->terminus_addr);
+        free(link->ingress_histogram);
+        free(link->insert_prefix);
+        free(link->strip_prefix);
+        link->name = 0;
+        free_qdr_link_t(link);
+        link = DEQ_HEAD(core->open_links);
     }
 
     qdr_connection_t *conn = DEQ_HEAD(core->open_connections);
@@ -286,17 +309,23 @@ void qdr_action_enqueue(qdr_core_t *core, qdr_action_t *action)
 }
 
 
-qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment)
+qdr_address_t *qdr_address_CT(qdr_core_t *core, qd_address_treatment_t treatment, qdr_address_config_t *config)
 {
     if (treatment == QD_TREATMENT_UNAVAILABLE)
         return 0;
     qdr_address_t *addr = new_qdr_address_t();
     ZERO(addr);
+    addr->config    = config;
     addr->treatment = treatment;
     addr->forwarder = qdr_forwarder_CT(core, treatment);
     addr->rnodes    = qd_bitmask(0);
     addr->add_prefix = 0;
     addr->del_prefix = 0;
+    addr->priority   = -1;
+
+    if (config)
+        config->ref_count++;
+
     return addr;
 }
 
@@ -312,7 +341,7 @@ qdr_address_t *qdr_add_local_address_CT(qdr_core_t *core, char aclass, const cha
 
     qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
     if (!addr) {
-        addr = qdr_address_CT(core, treatment);
+        addr = qdr_address_CT(core, treatment, 0);
         if (addr) {
             qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
             DEQ_INSERT_TAIL(core->addrs, addr);
@@ -322,6 +351,53 @@ qdr_address_t *qdr_add_local_address_CT(qdr_core_t *core, char aclass, const cha
     }
     qd_iterator_free(iter);
     return addr;
+}
+
+
+qdr_address_t *qdr_add_mobile_address_CT(qdr_core_t *core, const char *prefix, const char *address, qd_address_treatment_t treatment, bool edge)
+{
+    char           addr_string_stack[1000];
+    char          *addr_string = addr_string_stack;
+    bool           allocated   = false;
+    qdr_address_t *addr = 0;
+    qd_iterator_t *iter = 0;
+
+    size_t len = strlen(prefix) + strlen(address) + 3;
+    if (len > sizeof(addr_string_stack)) {
+        allocated = true;
+        addr_string = (char*) malloc(len);
+    }
+
+    snprintf(addr_string, len, "%s%s%s", edge ? "H" : "M0", prefix, address);
+    iter = qd_iterator_string(addr_string, ITER_VIEW_ALL);
+
+    qd_hash_retrieve(core->addr_hash, iter, (void**) &addr);
+    if (!addr) {
+        addr = qdr_address_CT(core, treatment, 0);
+        if (addr) {
+            qd_hash_insert(core->addr_hash, iter, addr, &addr->hash_handle);
+            DEQ_INSERT_TAIL(core->addrs, addr);
+        }
+    }
+
+    qd_iterator_free(iter);
+    if (allocated)
+        free(addr_string);
+    return addr;
+}
+
+
+bool qdr_address_is_mobile_CT(qdr_address_t *addr)
+{
+    if (!addr)
+        return false;
+
+    const char *addr_str = (const char *)qd_hash_key_by_handle(addr->hash_handle);
+
+    if (addr_str && addr_str[0] == QD_ITER_HASH_PREFIX_MOBILE)
+        return true;
+
+    return false;
 }
 
 bool qdr_is_addr_treatment_multicast(qdr_address_t *addr)
@@ -335,7 +411,6 @@ bool qdr_is_addr_treatment_multicast(qdr_address_t *addr)
 
 void qdr_core_delete_link_route(qdr_core_t *core, qdr_link_route_t *lr)
 {
-    DEQ_REMOVE(core->link_routes, lr);
     free(lr->add_prefix);
     free(lr->del_prefix);
     free(lr->name);
@@ -343,8 +418,26 @@ void qdr_core_delete_link_route(qdr_core_t *core, qdr_link_route_t *lr)
     free_qdr_link_route_t(lr);
 }
 
+void qdr_core_delete_auto_link(qdr_core_t *core, qdr_auto_link_t *al)
+{
+    free(al->name);
+    free(al->external_addr);
+    free_qdr_auto_link_t(al);
+}
+
+static void free_address_config(qdr_address_config_t *addr)
+{
+    free(addr->name);
+    free(addr->pattern);
+    free_qdr_address_config_t(addr);
+}
+
 void qdr_core_remove_address(qdr_core_t *core, qdr_address_t *addr)
 {
+    qdr_address_config_t *config = addr->config;
+    if (config && --config->ref_count == 0)
+        free_address_config(config);
+
     // Remove the address from the list, hash index, and parse tree
     DEQ_REMOVE(core->addrs, addr);
     if (addr->hash_handle) {
@@ -366,8 +459,84 @@ void qdr_core_remove_address(qdr_core_t *core, qdr_address_t *addr)
     else if (addr->treatment == QD_TREATMENT_ANYCAST_BALANCED) {
         free(addr->outstanding_deliveries);
     }
+    free(addr->add_prefix);
+    free(addr->del_prefix);
     free_qdr_address_t(addr);
 }
+
+
+void qdr_core_bind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_link_t *link)
+{
+    const char *key = (const char*) qd_hash_key_by_handle(addr->hash_handle);
+    link->owning_addr = addr;
+    if (key && (*key == QD_ITER_HASH_PREFIX_MOBILE))
+        link->phase = (int) (key[1] - '0');
+
+    if (link->link_direction == QD_OUTGOING) {
+        qdr_add_link_ref(&addr->rlinks, link, QDR_LINK_LIST_CLASS_ADDRESS);
+        if (DEQ_SIZE(addr->rlinks) == 1) {
+            if (key && (*key == QD_ITER_HASH_PREFIX_EDGE_SUMMARY || *key == QD_ITER_HASH_PREFIX_MOBILE))
+                qdr_post_mobile_added_CT(core, key, addr->treatment);
+            qdr_addr_start_inlinks_CT(core, addr);
+            qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_BECAME_LOCAL_DEST, addr);
+        } else if (DEQ_SIZE(addr->rlinks) == 2 && qd_bitmask_cardinality(addr->rnodes) == 0)
+            qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_TWO_DEST, addr);
+    } else {  // link->link_direction == QD_INCOMING
+        qdr_add_link_ref(&addr->inlinks, link, QDR_LINK_LIST_CLASS_ADDRESS);
+        if (DEQ_SIZE(addr->inlinks) == 1)
+            qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_BECAME_SOURCE, addr);
+        else if (DEQ_SIZE(addr->inlinks) == 2)
+            qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_TWO_SOURCE, addr);
+    }
+}
+
+
+void qdr_core_unbind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_link_t *link)
+{
+    link->owning_addr = 0;
+
+    if (link->link_direction == QD_OUTGOING) {
+        qdr_del_link_ref(&addr->rlinks, link, QDR_LINK_LIST_CLASS_ADDRESS);
+        if (DEQ_SIZE(addr->rlinks) == 0) {
+            const char *key = (const char*) qd_hash_key_by_handle(addr->hash_handle);
+            if (key && (*key == QD_ITER_HASH_PREFIX_MOBILE || *key == QD_ITER_HASH_PREFIX_EDGE_SUMMARY))
+                qdr_post_mobile_removed_CT(core, key);
+            qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_NO_LONGER_LOCAL_DEST, addr);
+        } else if (DEQ_SIZE(addr->rlinks) == 1 && qd_bitmask_cardinality(addr->rnodes) == 0)
+            qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_ONE_LOCAL_DEST, addr);
+    } else {
+        bool removed = qdr_del_link_ref(&addr->inlinks, link, QDR_LINK_LIST_CLASS_ADDRESS);
+        if (removed) {
+            if (DEQ_SIZE(addr->inlinks) == 0)
+                qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_NO_LONGER_SOURCE, addr);
+            else if (DEQ_SIZE(addr->inlinks) == 1)
+                qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_ONE_SOURCE, addr);
+        }
+    }
+}
+
+
+void qdr_core_bind_address_conn_CT(qdr_core_t *core, qdr_address_t *addr, qdr_connection_t *conn)
+{
+    qdr_add_connection_ref(&addr->conns, conn);
+    if (DEQ_SIZE(addr->conns) == 1) {
+        const char *key = (const char*) qd_hash_key_by_handle(addr->hash_handle);
+        qdr_post_mobile_added_CT(core, key, addr->treatment);
+        qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_BECAME_LOCAL_DEST, addr);
+    }
+}
+
+
+void qdr_core_unbind_address_conn_CT(qdr_core_t *core, qdr_address_t *addr, qdr_connection_t *conn)
+{
+    qdr_del_connection_ref(&addr->conns, conn);
+    if (DEQ_IS_EMPTY(addr->conns)) {
+        const char *key = (const char*) qd_hash_key_by_handle(addr->hash_handle);
+        qdr_post_mobile_removed_CT(core, key);
+        qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_NO_LONGER_LOCAL_DEST, addr);
+    }
+}
+
 
 void qdr_core_remove_address_config(qdr_core_t *core, qdr_address_config_t *addr)
 {
@@ -376,14 +545,11 @@ void qdr_core_remove_address_config(qdr_core_t *core, qdr_address_config_t *addr
     // Remove the address from the list and the parse tree
     DEQ_REMOVE(core->addr_config, addr);
     qd_parse_tree_remove_pattern(core->addr_parse_tree, pattern);
+    addr->ref_count--;
 
-    // Free resources associated with this address.
-    if (addr->name) {
-        free(addr->name);
-    }
+    if (addr->ref_count == 0)
+        free_address_config(addr);
     qd_iterator_free(pattern);
-    free(addr->pattern);
-    free_qdr_address_config_t(addr);
 }
 
 void qdr_add_link_ref(qdr_link_ref_list_t *ref_list, qdr_link_t *link, int cls)
@@ -399,13 +565,23 @@ void qdr_add_link_ref(qdr_link_ref_list_t *ref_list, qdr_link_t *link, int cls)
 }
 
 
-void qdr_del_link_ref(qdr_link_ref_list_t *ref_list, qdr_link_t *link, int cls)
+bool qdr_del_link_ref(qdr_link_ref_list_t *ref_list, qdr_link_t *link, int cls)
 {
     if (link->ref[cls]) {
         DEQ_REMOVE(*ref_list, link->ref[cls]);
         free_qdr_link_ref_t(link->ref[cls]);
         link->ref[cls] = 0;
+        return true;
     }
+    return false;
+}
+
+
+void move_link_ref(qdr_link_t *link, int from_cls, int to_cls)
+{
+    assert(link->ref[to_cls] == 0);
+    link->ref[to_cls] = link->ref[from_cls];
+    link->ref[from_cls] = 0;
 }
 
 
@@ -498,5 +674,12 @@ uint64_t qdr_identifier(qdr_core_t* core)
     uint64_t id = core->next_identifier++;
     sys_mutex_unlock(core->id_lock);
     return id;
+}
+
+void qdr_reset_sheaf(qdr_core_t *core, uint8_t n)
+{
+  qdr_priority_sheaf_t *sheaf = core->data_links_by_mask_bit + n;
+  sheaf->count = 0;
+  memset(sheaf->links, 0, QDR_N_PRIORITIES * sizeof(void *));
 }
 

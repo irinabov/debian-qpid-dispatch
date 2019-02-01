@@ -18,6 +18,7 @@
  */
 
 #include "router_core_private.h"
+#include "module.h"
 
 /**
  * Creates a thread that is dedicated to managing and using the routing table.
@@ -28,6 +29,31 @@
  */
 
 ALLOC_DEFINE(qdr_action_t);
+
+
+typedef struct qdrc_module_t {
+    DEQ_LINKS(struct qdrc_module_t);
+    const char          *name;
+    qdrc_module_enable_t enable;
+    qdrc_module_init_t   on_init;
+    qdrc_module_final_t  on_final;
+    void                *context;
+    bool                 enabled;
+} qdrc_module_t;
+
+DEQ_DECLARE(qdrc_module_t, qdrc_module_list_t);
+static qdrc_module_list_t registered_modules = {0,0};
+
+void qdr_register_core_module(const char *name, qdrc_module_enable_t enable, qdrc_module_init_t on_init, qdrc_module_final_t on_final)
+{
+    qdrc_module_t *module = NEW(qdrc_module_t);
+    ZERO(module);
+    module->name     = name;
+    module->enable   = enable;
+    module->on_init  = on_init;
+    module->on_final = on_final;
+    DEQ_INSERT_TAIL(registered_modules, module);
+}
 
 
 static void qdr_activate_connections_CT(qdr_core_t *core)
@@ -51,6 +77,21 @@ void *router_core_thread(void *arg)
     qdr_forwarder_setup_CT(core);
     qdr_route_table_setup_CT(core);
     qdr_agent_setup_CT(core);
+
+    //
+    // Initialize registered modules
+    //
+    qdrc_module_t *module = DEQ_HEAD(registered_modules);
+    while (module) {
+        module->enabled = module->enable(core);
+        if (module->enabled) {
+            module->on_init(core, &module->context);
+            qd_log(core->log, QD_LOG_INFO, "Core module enabled: %s", module->name);
+        } else
+            qd_log(core->log, QD_LOG_INFO, "Core module present but disabled: %s", module->name);
+            
+        module = DEQ_NEXT(module);
+    }
 
     qd_log(core->log, QD_LOG_INFO, "Router Core thread running. %s/%s", core->router_area, core->router_id);
     while (core->running) {
@@ -89,6 +130,18 @@ void *router_core_thread(void *arg)
         // Activate all connections that were flagged for activation during the above processing
         //
         qdr_activate_connections_CT(core);
+    }
+
+    //
+    // Finalize registered modules
+    //
+    module = DEQ_TAIL(registered_modules);
+    while (module) {
+        if (module->enabled) {
+            qd_log(core->log, QD_LOG_INFO, "Finalizing core module: %s", module->name);
+            module->on_final(module->context);
+        }
+        module = DEQ_PREV(module);
     }
 
     qd_log(core->log, QD_LOG_INFO, "Router Core thread exited");

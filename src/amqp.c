@@ -32,9 +32,20 @@ const int          QD_MA_MAX_KEY_LEN = 16;
 const int          QD_MA_N_KEYS      = 4;  // max number of router annotations to send/receive
 const int          QD_MA_FILTER_LEN  = 5;  // N tailing inbound entries to search for stripping
 
-const char * const QD_CAPABILITY_ROUTER_CONTROL  = "qd.router";
-const char * const QD_CAPABILITY_ROUTER_DATA     = "qd.router-data";
-const char * const QD_CAPABILITY_ANONYMOUS_RELAY = "ANONYMOUS-RELAY";
+const char * const QD_CAPABILITY_ROUTER_CONTROL   = "qd.router";
+const char * const QD_CAPABILITY_ROUTER_DATA      = "qd.router-data";
+const char * const QD_CAPABILITY_EDGE_DOWNLINK    = "qd.router-edge-downlink";
+const char * const QD_CAPABILITY_WAYPOINT_DEFAULT = "qd.waypoint";
+const char * const QD_CAPABILITY_WAYPOINT1        = "qd.waypoint.1";
+const char * const QD_CAPABILITY_WAYPOINT2        = "qd.waypoint.2";
+const char * const QD_CAPABILITY_WAYPOINT3        = "qd.waypoint.3";
+const char * const QD_CAPABILITY_WAYPOINT4        = "qd.waypoint.4";
+const char * const QD_CAPABILITY_WAYPOINT5        = "qd.waypoint.5";
+const char * const QD_CAPABILITY_WAYPOINT6        = "qd.waypoint.6";
+const char * const QD_CAPABILITY_WAYPOINT7        = "qd.waypoint.7";
+const char * const QD_CAPABILITY_WAYPOINT8        = "qd.waypoint.8";
+const char * const QD_CAPABILITY_WAYPOINT9        = "qd.waypoint.9";
+const char * const QD_CAPABILITY_ANONYMOUS_RELAY  = "ANONYMOUS-RELAY";
 
 const char * const QD_DYNAMIC_NODE_PROPERTY_ADDRESS = "x-opt-qd.address";
 
@@ -42,11 +53,15 @@ const char * const QD_CONNECTION_PROPERTY_PRODUCT_KEY           = "product";
 const char * const QD_CONNECTION_PROPERTY_PRODUCT_VALUE         = "qpid-dispatch-router";
 const char * const QD_CONNECTION_PROPERTY_VERSION_KEY           = "version";
 const char * const QD_CONNECTION_PROPERTY_COST_KEY              = "qd.inter-router-cost";
+const char * const QD_CONNECTION_PROPERTY_CONN_ID               = "qd.conn-id";
 const char * const QD_CONNECTION_PROPERTY_FAILOVER_LIST_KEY     = "failover-server-list";
 const char * const QD_CONNECTION_PROPERTY_FAILOVER_NETHOST_KEY  = "network-host";
 const char * const QD_CONNECTION_PROPERTY_FAILOVER_PORT_KEY     = "port";
 const char * const QD_CONNECTION_PROPERTY_FAILOVER_SCHEME_KEY   = "scheme";
 const char * const QD_CONNECTION_PROPERTY_FAILOVER_HOSTNAME_KEY = "hostname";
+
+const char * const QD_TERMINUS_EDGE_ADDRESS_TRACKING = "_$qd.edge_addr_tracking";
+const char * const QD_TERMINUS_ADDRESS_LOOKUP        = "_$qd.addr_lookup";
 
 const qd_amqp_error_t QD_AMQP_OK = { 200, "OK" };
 const qd_amqp_error_t QD_AMQP_CREATED = { 201, "Created" };

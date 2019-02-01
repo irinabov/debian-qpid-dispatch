@@ -34,16 +34,22 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 import errno, os, time, socket, random, subprocess, shutil, unittest, __main__, re, sys
+from subprocess import PIPE, STDOUT
 from copy import copy
 try:
     import queue as Queue   # 3.x
 except ImportError:
     import Queue as Queue   # 2.7
 from threading import Thread
+from threading import Event
+import json
+import uuid
 
 import proton
 from proton import Message, Timeout
+from proton.handlers import MessagingHandler
 from proton.utils import BlockingConnection
+from proton.reactor import AtLeastOnce, Container
 from qpid_dispatch.management.client import Node
 from qpid_dispatch_internal.compat import dict_iteritems
 
@@ -325,7 +331,7 @@ class Qdrouterd(Process):
             self.defaults()
             return "".join(["%s {\n%s}\n"%(n, props(p, 1)) for n, p in self])
 
-    def __init__(self, name=None, config=Config(), pyinclude=None, wait=True, perform_teardown=True):
+    def __init__(self, name=None, config=Config(), pyinclude=None, wait=True, perform_teardown=True, cl_args=[]):
         """
         @param name: name used for for output files, default to id from config.
         @param config: router configuration
@@ -339,7 +345,7 @@ class Qdrouterd(Process):
         if not default_log:
             config.append(
                 ('log', {'module':'DEFAULT', 'enable':'trace+', 'includeSource': 'true', 'outputFile':name+'.log'}))
-        args = ['qdrouterd', '-c', config.write(name)]
+        args = ['qdrouterd', '-c', config.write(name)] + cl_args
         env_home = os.environ.get('QPID_DISPATCH_HOME')
         if pyinclude:
             args += ['-I', pyinclude]
@@ -389,37 +395,32 @@ class Qdrouterd(Process):
         """Return list of configured ports for all listeners"""
         return [l['port'] for l in self.config.sections('listener')]
 
+    def _cfg_2_host_port(self, c):
+        host = c['host']
+        port = c['port']
+        protocol_family = c.get('protocolFamily', 'IPv4')
+        if protocol_family == 'IPv6':
+            return "[%s]:%s" % (host, port)
+        elif protocol_family == 'IPv4':
+            return "%s:%s" % (host, port)
+        raise Exception("Unknown protocol family: %s" % protocol_family)
+
     @property
     def addresses(self):
         """Return amqp://host:port addresses for all listeners"""
-        address_list = []
-        for l in self.config.sections('listener'):
-            protocol_family = l.get('protocolFamily')
-            if protocol_family == 'IPv6':
-                address_list.append("amqp://[%s]:%s"%(l['host'], l['port']))
-            elif protocol_family == 'IPv4':
-                address_list.append("amqp://%s:%s"%(l['host'], l['port']))
-            else:
-                # Default to IPv4
-                address_list.append("amqp://%s:%s"%(l['host'], l['port']))
+        cfg = self.config.sections('listener')
+        return ["amqp://%s" % self._cfg_2_host_port(l) for l in cfg]
 
-        return address_list
+    @property
+    def connector_addresses(self):
+        """Return list of amqp://host:port for all connectors"""
+        cfg = self.config.sections('connector')
+        return ["amqp://%s" % self._cfg_2_host_port(c) for c in cfg]
 
     @property
     def hostports(self):
         """Return host:port for all listeners"""
-        address_list = []
-        for l in self.config.sections('listener'):
-            protocol_family = l.get('protocolFamily')
-            if protocol_family == 'IPv6':
-                address_list.append("[%s]:%s"%(l['host'], l['port']))
-            elif protocol_family == 'IPv4':
-                address_list.append("%s:%s"%(l['host'], l['port']))
-            else:
-                # Default to IPv4
-                address_list.append("%s:%s"%(l['host'], l['port']))
-
-        return address_list
+        return [self._cfg_2_host_port(l) for l in self.config.sections('listener')]
 
     def is_connected(self, port, host='127.0.0.1'):
         """If router has a connection to host:port:identity return the management info.
@@ -436,11 +437,14 @@ class Qdrouterd(Process):
         except:
             return False
 
-    def wait_address(self, address, subscribers=0, remotes=0, **retry_kwargs):
+    def wait_address(self, address, subscribers=0, remotes=0, containers=0,
+                     count=1, **retry_kwargs ):
         """
         Wait for an address to be visible on the router.
         @keyword subscribers: Wait till subscriberCount >= subscribers
         @keyword remotes: Wait till remoteCount >= remotes
+        @keyword containers: Wait till containerCount >= remotes
+        @keyword count: Wait until >= count matching addresses are found
         @param retry_kwargs: keyword args for L{retry}
         """
         def check():
@@ -449,11 +453,14 @@ class Qdrouterd(Process):
             # endswith check is because of M0/L/R prefixes
             addrs = self.management.query(
                 type='org.apache.qpid.dispatch.router.address',
-                attribute_names=[u'name', u'subscriberCount', u'remoteCount']).get_entities()
+                attribute_names=[u'name', u'subscriberCount', u'remoteCount', u'containerCount']).get_entities()
 
             addrs = [a for a in addrs if a['name'].endswith(address)]
 
-            return addrs and addrs[0]['subscriberCount'] >= subscribers and addrs[0]['remoteCount'] >= remotes
+            return (len(addrs) >= count
+                    and addrs[0]['subscriberCount'] >= subscribers
+                    and addrs[0]['remoteCount'] >= remotes
+                    and addrs[0]['containerCount'] >= containers)
         assert retry(check, **retry_kwargs)
 
     def get_host(self, protocol_family):
@@ -662,33 +669,36 @@ class SkipIfNeeded(object):
     Decorator class that can be used along with test methods
     to provide skip test behavior when using both python2.6 or
     a greater version.
-    This decorator can be used with sub-classes of TestCase and the
-    sub-class must contain a dictionary named "skip" (test_name as key
-    and 0[run] or 1[skip] as the value).
+    This decorator can be used in test methods and a boolean
+    condition must be provided (skip parameter) to define whether
+    or not the test will be skipped.
     """
-    def __init__(self, test_name, reason):
-        self.test_name = test_name
+    def __init__(self, skip, reason):
+        """
+        :param skip: if True the method wont be called
+        :param reason: reason why test was skipped
+        """
+        self.skip = skip
         self.reason = reason
 
     def __call__(self, f):
 
         def wrap(*args, **kwargs):
             """
-            Wraps original test method's invocation looking for an instance
-            attribute named "skip" (should be a dictionary composed by
-            "test_name" as a key and value of 0 [run] or 1 [skip]).
-            When running test with python < 2.7, if the "skip" dictionary
-            contains the given test_name with a value of 1, the original
-            method won't be called. If running python >= 2.7, then
+            Wraps original test method's invocation and dictates whether or
+            not the test will be executed based on value (boolean) of the
+            skip parameter.
+            When running test with python < 2.7, if the "skip" parameter is
+            true, the original method won't be called. If running python >= 2.7, then
             skipTest will be called with given "reason" and original method
             will be invoked.
             :param args:
             :return:
             """
             instance = args[0]
-            if isinstance(instance, TestCase) and hasattr(instance, "skip") and instance.skip[self.test_name]:
+            if self.skip:
                 if sys.version_info < (2, 7):
-                    print("%s -> skipping (python<2.7) ..." % self.test_name)
+                    print("%s -> skipping (python<2.7) [%s] ..." % (f.__name__, self.reason))
                     return
                 else:
                     instance.skipTest(self.reason)
@@ -708,65 +718,279 @@ def main_module():
     return os.path.splitext(os.path.basename(__main__.__file__))[0]
 
 
-class AsyncTestReceiver(object):
+class AsyncTestReceiver(MessagingHandler):
     """
     A simple receiver that runs in the background and queues any received
-    messages.  Messages can be retrieved from this thread via the queue member
+    messages.  Messages can be retrieved from this thread via the queue member.
+    :param wait: block the constructor until the link has been fully
+                 established.
+    :param recover_link: restart on remote link detach
     """
     Empty = Queue.Empty
 
-    def __init__(self, address, source, credit=100, timeout=0.1,
-                 conn_args=None, link_args=None):
-        """
-        Runs a BlockingReceiver in a separate thread.
-
-        :param address: address of router (URL)
-        :param source: the node address to consume from
-        :param credit: max credit for receiver
-        :param timeout: receive poll frequency in seconds
-        :param conn_args: map of BlockingConnection arguments
-        :param link_args: map of BlockingReceiver arguments
-        """
+    def __init__(self, address, source, conn_args=None, container_id=None,
+                 wait=True, recover_link=False):
         super(AsyncTestReceiver, self).__init__()
+        self.address = address
+        self.source = source
+        self.conn_args = conn_args
         self.queue = Queue.Queue()
-        kwargs = {'url': address}
-        if conn_args:
-            kwargs.update(conn_args)
-        self._conn = BlockingConnection(**kwargs)
-        kwargs = {'address': source,
-                  'credit': credit}
-        if link_args:
-            kwargs.update(link_args)
-        self._rcvr = self._conn.create_receiver(**kwargs)
-        self._thread = Thread(target=self._poll)
-        self._run = True
-        self._timeout = timeout
+        self._conn = None
+        self._container = Container(self)
+        cid = container_id or "ATR-%s:%s" % (source, uuid.uuid4())
+        self._container.container_id = cid
+        self._ready = Event()
+        self._recover_link = recover_link
+        self._recover_count = 0
+        self._stop_thread = False
+        self._thread = Thread(target=self._main)
+        self._thread.daemon = True
+        self._thread.start()
+        if wait and self._ready.wait(timeout=TIMEOUT) is False:
+            raise Exception("Timed out waiting for receiver start")
+
+    def _main(self):
+        self._container.start()
+        while self._container.process():
+            if self._stop_thread:
+                if self._conn:
+                    self._conn.close()
+                    self._conn = None
+
+    def stop(self, timeout=TIMEOUT):
+        self._stop_thread = True
+        self._container.wakeup()
+        self._thread.join(timeout=TIMEOUT)
+        if self._thread.is_alive():
+            raise Exception("AsyncTestReceiver did not exit")
+
+    def on_start(self, event):
+        kwargs = {'url': self.address}
+        if self.conn_args:
+            kwargs.update(self.conn_args)
+        self._conn = event.container.connect(**kwargs)
+
+    def on_connection_opened(self, event):
+        kwargs = {'source': self.source}
+        rcv = event.container.create_receiver(event.connection,
+                                              **kwargs)
+    def on_link_opened(self, event):
+        self._ready.set()
+
+    def on_link_closing(self, event):
+        event.link.close()
+        if self._recover_link and not self._stop_thread:
+            # lesson learned: the generated link name will be the same as the
+            # old link (which is bad) so we specify a new one
+            self._recover_count += 1
+            kwargs = {'source': self.source,
+                      'name': "%s:%s" % (event.link.name, self._recover_count)}
+            rcv = event.container.create_receiver(event.connection,
+                                                  **kwargs)
+
+    def on_message(self, event):
+        self.queue.put(event.message)
+
+
+class AsyncTestSender(MessagingHandler):
+    """
+    A simple sender that runs in the background and sends 'count' messages to a
+    given target.
+    """
+    def __init__(self, address, target, count=1, body=None, container_id=None):
+        super(AsyncTestSender, self).__init__()
+        self.address = address
+        self.target = target
+        self.count = count
+        self._unaccepted = count
+        self._body = body or "test"
+        self._container = Container(self)
+        cid = container_id or "ATS-%s:%s" % (target, uuid.uuid4())
+        self._container.container_id = cid
+        self._thread = Thread(target=self._main)
+        self._thread.daemon = True
         self._thread.start()
 
-    def _poll(self):
-        """
-        Thread main loop
-        """
+    def _main(self):
+        self._container.start()
+        while self._container.process():
+            pass
 
-        while self._run:
-            try:
-                msg = self._rcvr.receive(timeout=self._timeout)
-            except Timeout:
-                continue
-            try:
-                self._rcvr.accept()
-            except IndexError:
-                # PROTON-1743
-                pass
-            self.queue.put(msg)
-        self._rcvr.close()
-        self._conn.close()
+    def wait(self):
+        # don't stop it - wait until everything is sent
+        self._thread.join(timeout=TIMEOUT)
+        assert not self._thread.is_alive(), "sender did not complete"
 
-    def stop(self, timeout=10):
-        """
-        Called to terminate the AsyncTestReceiver
-        """
-        self._run = False
-        self._thread.join(timeout=timeout)
+    def on_start(self, event):
+        self._conn = self._container.connect(self.address)
 
+    def on_connection_opened(self, event):
+        self._sender = self._container.create_sender(self._conn,
+                                                     target=self.target,
+                                                     options=AtLeastOnce())
+
+    def on_sendable(self, event):
+        if self.count:
+            self._sender.send(Message(body=self._body))
+            self.count -= 1
+
+    def on_accepted(self, event):
+        self._unaccepted -= 1;
+        if self._unaccepted == 0:
+            self._conn.close()
+            self._conn = None
+
+
+class QdManager(object):
+    """
+    A means to invoke qdmanage during a testcase
+    """
+    def __init__(self, tester, address=None, timeout=TIMEOUT):
+        # 'tester' - can be 'self' when called in a test,
+        # or an instance any class derived from Process (like Qdrouterd)
+        self._tester = tester
+        self._timeout = timeout
+        self._address = address
+
+    def __call__(self, cmd, address=None, input=None, expect=Process.EXIT_OK,
+                 timeout=None):
+        assert address or self._address, "address missing"
+        p = self._tester.popen(
+            ['qdmanage'] + cmd.split(' ')
+            + ['--bus', address or self._address,
+               '--indent=-1',
+               '--timeout', str(timeout or self._timeout)],
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
+            universal_newlines=True)
+        out = p.communicate(input)[0]
+        try:
+            p.teardown()
+        except Exception as e:
+            raise Exception("%s\n%s" % (e, out))
+        return out
+
+    def create(self, long_type, kwargs):
+        cmd = "CREATE --type=%s" % long_type
+        for k, v in kwargs.items():
+            cmd += " %s=%s" % (k, v)
+        return json.loads(self(cmd))
+
+    def delete(self, long_type, name=None, identity=None):
+        cmd = 'DELETE --type=%s' %  long_type
+        if identity is not None:
+            cmd += " --identity=%s" % identity
+        elif name is not None:
+            cmd += " --name=%s" % name
+        else:
+            assert False, "name or identity not supplied!"
+        self(cmd)
+
+    def query(self, long_type):
+        return json.loads(self('QUERY --type=%s' % long_type))
+
+    def get_log(self, limit=None):
+        cmd = 'GET-LOG'
+        if (limit):
+            cmd += " limit=%s" % limit
+        return json.loads(self(cmd))
+
+
+class MgmtMsgProxy(object):
+    """
+    Utility for creating and inspecting management messages
+    """
+    class _Response(object):
+        def __init__(self, status_code, status_description, body):
+            self.status_code        = status_code
+            self.status_description = status_description
+            if body.__class__ == dict and len(body.keys()) == 2 and 'attributeNames' in body.keys() and 'results' in body.keys():
+                results = []
+                names   = body['attributeNames']
+                for result in body['results']:
+                    result_map = {}
+                    for i in range(len(names)):
+                        result_map[names[i]] = result[i]
+                    results.append(MgmtMsgProxy._Response(status_code, status_description, result_map))
+                self.attrs = {'results': results}
+            else:
+                self.attrs = body
+
+        def __getattr__(self, key):
+            return self.attrs[key]
+
+
+    def __init__(self, reply_addr):
+        self.reply_addr = reply_addr
+
+    def response(self, msg):
+        ap = msg.properties
+        return self._Response(ap['statusCode'], ap['statusDescription'], msg.body)
+
+    def query_connections(self):
+        ap = {'operation': 'QUERY', 'type': 'org.apache.qpid.dispatch.connection'}
+        return Message(properties=ap, reply_to=self.reply_addr)
+
+    def query_links(self):
+        ap = {'operation': 'QUERY', 'type': 'org.apache.qpid.dispatch.router.link'}
+        return Message(properties=ap, reply_to=self.reply_addr)
+
+    def query_link_routes(self):
+        ap = {'operation': 'QUERY',
+              'type': 'org.apache.qpid.dispatch.router.config.linkRoute'}
+        return Message(properties=ap, reply_to=self.reply_addr)
+
+    def query_addresses(self):
+        ap = {'operation': 'QUERY',
+              'type': 'org.apache.qpid.dispatch.router.address'}
+        return Message(properties=ap, reply_to=self.reply_addr)
+
+    def create_link_route(self, name, kwargs):
+        ap = {'operation': 'CREATE',
+              'type': 'org.apache.qpid.dispatch.router.config.linkRoute',
+              'name': name}
+        return Message(properties=ap, reply_to=self.reply_addr,
+                       body=kwargs)
+
+    def delete_link_route(self, name):
+        ap = {'operation': 'DELETE',
+              'type': 'org.apache.qpid.dispatch.router.config.linkRoute',
+              'name': name}
+        return Message(properties=ap, reply_to=self.reply_addr)
+
+    def create_connector(self, name, **kwargs):
+        ap = {'operation': 'CREATE',
+              'type': 'org.apache.qpid.dispatch.connector',
+              'name': name}
+        return Message(properties=ap, reply_to=self.reply_addr,
+                       body=kwargs)
+
+    def delete_connector(self, name):
+        ap = {'operation': 'DELETE',
+              'type': 'org.apache.qpid.dispatch.connector',
+              'name': name}
+        return Message(properties=ap, reply_to=self.reply_addr)
+
+    def query_conn_link_routes(self):
+        ap = {'operation': 'QUERY',
+              'type': 'org.apache.qpid.dispatch.router.connection.linkRoute'}
+        return Message(properties=ap, reply_to=self.reply_addr)
+
+    def create_conn_link_route(self, name, kwargs):
+        ap = {'operation': 'CREATE',
+              'type': 'org.apache.qpid.dispatch.router.connection.linkRoute',
+              'name': name}
+        return Message(properties=ap, reply_to=self.reply_addr,
+                       body=kwargs)
+
+    def delete_conn_link_route(self, name):
+        ap = {'operation': 'DELETE',
+              'type': 'org.apache.qpid.dispatch.router.connection.linkRoute',
+              'name': name}
+        return Message(properties=ap, reply_to=self.reply_addr)
+
+    def read_conn_link_route(self, name):
+        ap = {'operation': 'READ',
+              'type': 'org.apache.qpid.dispatch.router.connection.linkRoute',
+              'name': name}
+        return Message(properties=ap, reply_to=self.reply_addr)
 
