@@ -66,7 +66,6 @@ struct qd_link_t {
 
 DEQ_DECLARE(qd_link_t, qd_link_list_t);
 
-ALLOC_DECLARE(qd_link_t);
 ALLOC_DEFINE(qd_link_t);
 ALLOC_DEFINE(qd_link_ref_t);
 
@@ -308,8 +307,11 @@ static int close_handler(qd_container_t *container, pn_connection_t *conn, qd_co
     // Close all links, passing QD_LOST as the reason.  These links are not
     // being properly 'detached'.  They are being orphaned.
     //
+    if (qd_conn)
+        qd_conn->closed = true;
     close_links(container, conn, true);
-    notify_closed(container, qd_conn, qd_connection_get_context(qd_conn));
+    if (qd_conn)
+        notify_closed(container, qd_conn, qd_connection_get_context(qd_conn));
     return 0;
 }
 
@@ -401,8 +403,14 @@ void qd_conn_event_batch_complete(qd_container_t *container, qd_connection_t *qd
 
     while(to_free) {
         if (!conn_closed) {
-            if (to_free->pn_link)
+            if (to_free->pn_link) {
+                qd_link_t *qd_link = (qd_link_t*) pn_link_get_context(to_free->pn_link);
+                if (qd_link) {
+                    qd_link->pn_link = 0;
+                }
+                pn_link_set_context(to_free->pn_link, 0);
                 pn_link_free(to_free->pn_link);
+            }
             if (to_free->pn_session)
                 pn_session_free(to_free->pn_session);
         }
@@ -426,6 +434,7 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
 
     case PN_CONNECTION_REMOTE_OPEN :
         qd_connection_set_user(qd_conn);
+        qd_conn->open_container = (void *)container;
         if (pn_connection_state(conn) & PN_LOCAL_UNINIT) {
             // This Open is an externally initiated connection
             // Let policy engine decide
@@ -439,18 +448,23 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
              * connection since by stalling the current connection it will never be
              * run, so we need some other thread context to run it in.
              */
-            qd_conn->open_container = (void *)container;
             qd_policy_amqp_open(qd_conn);
         } else {
             // This Open is in response to an internally initiated connection
-            notify_opened(container, qd_conn, qd_connection_get_context(qd_conn));
+            qd_policy_amqp_open_connector(qd_conn);
         }
         break;
 
     case PN_CONNECTION_REMOTE_CLOSE :
+        if (qd_conn)
+            qd_conn->closed = true;
         if (pn_connection_state(conn) == (PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED)) {
             close_links(container, conn, false);
             pn_connection_close(conn);
+            qd_conn_event_batch_complete(container, qd_conn, true);
+        } else if (pn_connection_state(conn) == (PN_LOCAL_CLOSED | PN_REMOTE_CLOSED)) {
+            close_links(container, conn, false);
+            notify_closed(container, qd_conn, qd_connection_get_context(qd_conn));
             qd_conn_event_batch_complete(container, qd_conn, true);
         }
         break;
@@ -627,17 +641,19 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
     case PN_DELIVERY :
         delivery = pn_event_delivery(event);
         pn_link  = pn_event_link(event);
+
         if (pn_link_is_receiver(pn_link))
             do_receive(delivery);
 
-        if (pn_delivery_updated(delivery)) {
+        if (pn_delivery_updated(delivery) || pn_delivery_settled(delivery)) {
             do_updated(delivery);
             pn_delivery_clear(delivery);
         }
         break;
 
     case PN_CONNECTION_WAKE:
-        writable_handler(container, conn, qd_conn);
+        if (!qd_conn->closed)
+            writable_handler(container, conn, qd_conn);
         break;
 
     case PN_TRANSPORT_CLOSED:
@@ -676,7 +692,6 @@ void qd_container_free(qd_container_t *container)
     if (!container) return;
     if (container->default_node)
         qd_container_destroy_node(container->default_node);
-
     qd_link_t *link = DEQ_HEAD(container->links);
     while (link) {
         DEQ_REMOVE_HEAD(container->links);
@@ -961,7 +976,7 @@ qd_connection_t *qd_link_connection(qd_link_t *link)
         return 0;
 
     qd_connection_t *ctx = pn_connection_get_context(conn);
-    if (!ctx || !ctx->opened || ctx->closed)
+    if (!ctx || !ctx->opened)
         return 0;
 
     return ctx;
