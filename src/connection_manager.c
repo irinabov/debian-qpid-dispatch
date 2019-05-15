@@ -304,7 +304,7 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
     bool requireEncryption  = qd_entity_opt_bool(entity, "requireEncryption", false);    CHECK();
     bool requireSsl         = qd_entity_opt_bool(entity, "requireSsl",        false);    CHECK();
 
-    memset(config, 0, sizeof(*config));
+    ZERO(config);
     config->log_message          = qd_entity_opt_string(entity, "messageLoggingComponents", 0);     CHECK();
     config->log_bits             = populate_log_message(config);
     config->port                 = qd_entity_get_string(entity, "port");              CHECK();
@@ -312,18 +312,12 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
     config->role                 = qd_entity_get_string(entity, "role");              CHECK();
     config->inter_router_cost    = qd_entity_opt_long(entity, "cost", 1);             CHECK();
     config->protocol_family      = qd_entity_opt_string(entity, "protocolFamily", 0); CHECK();
+    config->healthz              = qd_entity_opt_bool(entity, "healthz", true);       CHECK();
+    config->metrics              = qd_entity_opt_bool(entity, "metrics", true);       CHECK();
+    config->websockets           = qd_entity_opt_bool(entity, "websockets", true);    CHECK();
     config->http                 = qd_entity_opt_bool(entity, "http", false);         CHECK();
     config->http_root_dir        = qd_entity_opt_string(entity, "httpRootDir", false);   CHECK();
-
-    // Because of a potential conflict when console is installed or not installed,
-    // we now want to require that the config file explicitly specify HTTP root
-    // if it wants full HTTP service. If it does not specify HTTP root, it will
-    // be useful for AMQP-over-websockets, but will not serve any static content.
-    config->http = config->http || config->http_root_dir;
-    if (config->http && ! config->http_root_dir) {
-        qd_log(qd->connection_manager->log_source, QD_LOG_INFO, "HTTP service is requested but no httpRootDir specified. The router will serve AMQP-over-websockets but no static content.");
-    }
-
+    config->http = config->http || config->http_root_dir; /* httpRoot implies http */
     config->max_frame_size       = qd_entity_get_long(entity, "maxFrameSize");        CHECK();
     config->max_sessions         = qd_entity_get_long(entity, "maxSessions");         CHECK();
     uint64_t ssn_frames          = qd_entity_opt_long(entity, "maxSessionFrames", 0); CHECK();
@@ -338,6 +332,7 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
     config->sasl_plugin          = qd_entity_opt_string(entity, "saslPlugin", 0);   CHECK();
     config->link_capacity        = qd_entity_opt_long(entity, "linkCapacity", 0);     CHECK();
     config->multi_tenant         = qd_entity_opt_bool(entity, "multiTenant", false);  CHECK();
+    config->policy_vhost         = qd_entity_opt_string(entity, "policyVhost", 0);    CHECK();
     set_config_host(config, entity);
 
     //
@@ -779,7 +774,11 @@ qd_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_entity_t *
 {
     qd_connection_manager_t *cm = qd->connection_manager;
     qd_connector_t *ct = qd_server_connector(qd->server);
+
+    qd_error_clear();
+
     if (ct && load_server_config(qd, &ct->config, entity, false) == QD_ERROR_NONE) {
+        ct->policy_vhost = qd_entity_opt_string(entity, "policyVhost", 0); CHECK();
         DEQ_ITEM_INIT(ct);
         DEQ_INSERT_TAIL(cm->connectors, ct);
         log_config(cm->log_source, &ct->config, "Connector");
@@ -806,6 +805,8 @@ qd_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_entity_t *
 
         return ct;
     }
+
+  error:
     qd_log(cm->log_source, QD_LOG_ERROR, "Unable to create connector: %s", qd_error_message());
     qd_connector_decref(ct);
     return 0;

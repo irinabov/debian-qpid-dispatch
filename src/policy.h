@@ -53,6 +53,8 @@ struct qd_policy__settings_s {
     bool allowUserIdProxy;
     bool allowWaypointLinks;
     bool allowDynamicLinkRoutes;
+    bool allowAdminStatusUpdate;
+    bool outgoingConnection;
     char *sources;
     char *targets;
     char *sourcePattern;
@@ -162,6 +164,16 @@ bool qd_policy_approve_amqp_receiver_link(pn_link_t *pn_link, qd_connection_t *q
  **/
 void qd_policy_amqp_open(qd_connection_t *conn);
 
+
+/** Allow or deny an outgoing connector connection.
+ * An Open performative was received over a new connection.
+ * Consult local policy to determine if this host/user is
+ *  allowed to make this connection.
+ * Denied pn_connections are closed with a condition.
+ **/
+void qd_policy_amqp_open_connector(qd_connection_t *conn);
+
+
 /** Dispose of policy settings
  * 
  * @param settings the settings to be destroyed
@@ -215,4 +227,11 @@ char * qd_policy_host_pattern_lookup(qd_policy_t *policy, const char *hostPatter
  * @return the ruleset string to be used in policy settings.
  */
 char * qd_policy_compile_allowed_csv(char * csv);
+/**
+ * Approve sending of message on anonymous link based on connection's policy.
+ *
+ * @param[in] address the address from the message 'to' field
+ * @param[in] qd_conn dispatch connection with policy settings
+ */
+bool qd_policy_approve_message_target(qd_iterator_t *address, qd_connection_t *qd_conn);
 #endif

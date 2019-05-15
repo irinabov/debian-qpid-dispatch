@@ -68,16 +68,24 @@ static void qdr_activate_connections_CT(qdr_core_t *core)
 }
 
 
-void *router_core_thread(void *arg)
+static void qdr_do_message_to_addr_free(qdr_core_t *core, qdr_general_work_t *work)
 {
-    qdr_core_t        *core = (qdr_core_t*) arg;
-    qdr_action_list_t  action_list;
-    qdr_action_t      *action;
+    qdr_delivery_cleanup_t *cleanup = DEQ_HEAD(work->delivery_cleanup_list);
 
-    qdr_forwarder_setup_CT(core);
-    qdr_route_table_setup_CT(core);
-    qdr_agent_setup_CT(core);
+    while (cleanup) {
+        DEQ_REMOVE_HEAD(work->delivery_cleanup_list);
+        if (cleanup->msg)
+            qd_message_free(cleanup->msg);
+        if (cleanup->iter)
+            qd_iterator_free(cleanup->iter);
+        free_qdr_delivery_cleanup_t(cleanup);
+        cleanup = DEQ_HEAD(work->delivery_cleanup_list);
+    }
+}
 
+
+void qdr_modules_init(qdr_core_t *core)
+{
     //
     // Initialize registered modules
     //
@@ -89,9 +97,40 @@ void *router_core_thread(void *arg)
             qd_log(core->log, QD_LOG_INFO, "Core module enabled: %s", module->name);
         } else
             qd_log(core->log, QD_LOG_INFO, "Core module present but disabled: %s", module->name);
-            
+
         module = DEQ_NEXT(module);
     }
+}
+
+
+void qdr_modules_finalize(qdr_core_t *core)
+{
+    //
+    // Finalize registered modules
+    //
+    qdrc_module_t *module = DEQ_TAIL(registered_modules);
+    while (module) {
+        if (module->enabled) {
+            qd_log(core->log, QD_LOG_INFO, "Finalizing core module: %s", module->name);
+            module->on_final(module->context);
+        }
+        module = DEQ_PREV(module);
+    }
+
+}
+
+
+void *router_core_thread(void *arg)
+{
+    qdr_core_t        *core = (qdr_core_t*) arg;
+    qdr_action_list_t  action_list;
+    qdr_action_t      *action;
+
+    qdr_forwarder_setup_CT(core);
+    qdr_route_table_setup_CT(core);
+    qdr_agent_setup_CT(core);
+
+    qdr_modules_init(core);
 
     qd_log(core->log, QD_LOG_INFO, "Router Core thread running. %s/%s", core->router_area, core->router_id);
     while (core->running) {
@@ -130,18 +169,15 @@ void *router_core_thread(void *arg)
         // Activate all connections that were flagged for activation during the above processing
         //
         qdr_activate_connections_CT(core);
-    }
 
-    //
-    // Finalize registered modules
-    //
-    module = DEQ_TAIL(registered_modules);
-    while (module) {
-        if (module->enabled) {
-            qd_log(core->log, QD_LOG_INFO, "Finalizing core module: %s", module->name);
-            module->on_final(module->context);
+        //
+        // Schedule the cleanup of deliveries freed during this core-thread pass
+        //
+        if (DEQ_SIZE(core->delivery_cleanup_list) > 0) {
+            qdr_general_work_t *work = qdr_general_work(qdr_do_message_to_addr_free);
+            DEQ_MOVE(core->delivery_cleanup_list, work->delivery_cleanup_list);
+            qdr_post_general_work_CT(core, work);
         }
-        module = DEQ_PREV(module);
     }
 
     qd_log(core->log, QD_LOG_INFO, "Router Core thread exited");
