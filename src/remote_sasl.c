@@ -109,6 +109,8 @@ typedef struct
     char* username;
     permissions_t permissions;
     pn_sasl_outcome_t outcome;
+
+    sys_mutex_t *lock;
 } qdr_sasl_relay_t;
 
 static void copy_bytes(const pn_bytes_t* from, qdr_owned_bytes_t* to)
@@ -131,6 +133,7 @@ static qdr_sasl_relay_t* new_qdr_sasl_relay_t(const char* address, const char* s
     }
     instance->proactor = proactor;
     init_permissions(&instance->permissions);
+    instance->lock = sys_mutex();
     return instance;
 }
 
@@ -146,6 +149,7 @@ static void delete_qdr_sasl_relay_t(qdr_sasl_relay_t* instance)
     if (instance->username) free(instance->username);
     free_buffer(&(instance->permissions.targets));
     free_buffer(&(instance->permissions.sources));
+    sys_mutex_free(instance->lock);
     free(instance);
 }
 
@@ -232,21 +236,73 @@ static bool remote_sasl_init_client(pn_transport_t* transport)
     }
 }
 
+
+static void connection_wake(pn_connection_t* conn)
+{
+    qd_connection_t *ctx = pn_connection_get_context(conn);
+    if (ctx) {
+        ctx->wake(ctx);
+    } else {
+        pn_connection_wake(conn);
+    }
+}
+
+static bool notify_upstream(qdr_sasl_relay_t* impl, uint8_t state)
+{
+    if (!impl->upstream_released) {
+        impl->upstream_state = state;
+        connection_wake(impl->upstream);
+        return true;
+    } else {
+        return false;
+    }
+}
+
+static bool notify_downstream(qdr_sasl_relay_t* impl, uint8_t state)
+{
+    if (!impl->downstream_released && impl->downstream) {
+        impl->downstream_state = state;
+        connection_wake(impl->downstream);
+        return true;
+    } else {
+        return false;
+    }
+}
+
+static bool delete_on_downstream_freed(qdr_sasl_relay_t* impl)
+{
+    bool result;
+    sys_mutex_lock(impl->lock);
+    impl->downstream_released = true;
+    result = impl->upstream_released;
+    sys_mutex_unlock(impl->lock);
+    return result;
+}
+
+static bool delete_on_upstream_freed(qdr_sasl_relay_t* impl)
+{
+    bool result;
+    sys_mutex_lock(impl->lock);
+    impl->upstream_released = true;
+    result = impl->downstream_released || impl->downstream == 0;
+    sys_mutex_unlock(impl->lock);
+    return result;
+}
+
+static bool can_delete(pn_transport_t *transport, qdr_sasl_relay_t* impl)
+{
+    if (pnx_sasl_is_client(transport)) {
+        return delete_on_downstream_freed(impl);
+    } else {
+        return delete_on_upstream_freed(impl);
+    }
+}
+
 static void remote_sasl_free(pn_transport_t *transport)
 {
     qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
-    if (impl) {
-        if (pnx_sasl_is_client(transport)) {
-            impl->downstream_released = true;
-            if (impl->upstream_released) {
-                delete_qdr_sasl_relay_t(impl);
-            }
-        } else {
-            impl->upstream_released = true;
-            if (impl->downstream_released || impl->downstream == 0) {
-                delete_qdr_sasl_relay_t(impl);
-            }
-        }
+    if (impl && can_delete(transport, impl)) {
+        delete_qdr_sasl_relay_t(impl);
     }
 }
 
@@ -305,38 +361,6 @@ static void remote_sasl_prepare(pn_transport_t *transport)
             pnx_sasl_set_desired_state(transport, SASL_POSTED_OUTCOME);
         }
         impl->upstream_state = 0;
-    }
-}
-
-static void connection_wake(pn_connection_t* conn)
-{
-    qd_connection_t *ctx = pn_connection_get_context(conn);
-    if (ctx) {
-        ctx->wake(ctx);
-    } else {
-        pn_connection_wake(conn);
-    }
-}
-
-static bool notify_upstream(qdr_sasl_relay_t* impl, uint8_t state)
-{
-    if (!impl->upstream_released) {
-        impl->upstream_state = state;
-        connection_wake(impl->upstream);
-        return true;
-    } else {
-        return false;
-    }
-}
-
-static bool notify_downstream(qdr_sasl_relay_t* impl, uint8_t state)
-{
-    if (!impl->downstream_released && impl->downstream) {
-        impl->downstream_state = state;
-        connection_wake(impl->downstream);
-        return true;
-    } else {
-        return false;
     }
 }
 
@@ -667,6 +691,10 @@ void qdr_handle_authentication_service_connection_event(pn_event_t *e)
     } else if (pn_event_type(e) == PN_CONNECTION_REMOTE_CLOSE) {
         qd_log(auth_service_log, QD_LOG_DEBUG, "authentication service closed connection");
         pn_connection_close(conn);
+        pn_transport_close_head(transport);
+    } else if (pn_event_type(e) == PN_TRANSPORT_HEAD_CLOSED) {
+        pn_transport_close_tail(transport);
+    } else if (pn_event_type(e) == PN_TRANSPORT_TAIL_CLOSED) {
         pn_transport_close_head(transport);
     } else if (pn_event_type(e) == PN_TRANSPORT_CLOSED) {
         qd_log(auth_service_log, QD_LOG_DEBUG, "disconnected from authentication service");

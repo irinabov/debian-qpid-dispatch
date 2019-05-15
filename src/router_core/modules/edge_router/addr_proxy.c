@@ -115,7 +115,8 @@ static void set_waypoint_capability(qdr_terminus_t *term, char phase_char, qd_di
     char cap[16];
     char suffix[3];
 
-    strcpy(cap, QD_CAPABILITY_WAYPOINT_DEFAULT);
+    strncpy(cap, QD_CAPABILITY_WAYPOINT_DEFAULT, 12);
+    //strcpy(cap, QD_CAPABILITY_WAYPOINT_DEFAULT);
     suffix[0] = '.';
     suffix[1] = '0' + ordinal;
     suffix[2] = '\0';
@@ -160,7 +161,7 @@ static void del_inlink(qcm_edge_addr_proxy_t *ap, qdr_address_t *addr)
 
 static void add_outlink(qcm_edge_addr_proxy_t *ap, const char *key, qdr_address_t *addr)
 {
-    if (addr->edge_outlink == 0) {
+    if (addr->edge_outlink == 0 && DEQ_SIZE(addr->subscriptions) == 0) {
         //
         // Note that this link must not be bound to the address at this time.  That will
         // happen later when the interior tells us that there are upstream destinations

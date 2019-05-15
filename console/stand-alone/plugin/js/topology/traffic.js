@@ -44,19 +44,22 @@ export class Traffic {
     converter,
     radius,
     topology,
-    type,
+    types,
     prefix
   ) {
     $scope.addressColors = {};
     this.QDRService = QDRService;
-    this.type = type; // moving dots or colored path
     this.prefix = prefix; // url prefix used in svg url()s
+    this.types = [];
+    this.viss = [];
     this.topology = topology; // contains the list of router nodes
     this.$scope = $scope;
     this.$timeout = $timeout;
     // internal variables
     this.interval = null; // setInterval handle
-    this.setAnimationType(type, converter, radius);
+    types.forEach(function (t) {
+      this.addAnimationType(t, converter, radius);
+    }.bind(this));
   }
   // stop updating the traffic data
   stop() {
@@ -67,26 +70,37 @@ export class Traffic {
   }
   // start updating the traffic data
   start() {
+    this.stop();
     this.doUpdate();
     this.interval = setInterval(this.doUpdate.bind(this), transitionDuration);
   }
-  // remove any animations that are in progress
-  remove() {
-    if (this.vis) this.vis.remove();
+  // remove animations that are in progress
+  remove(type) {
+    let all = !(type);
+    let i = this.viss.length - 1;
+    while (i >= 0) {
+      if (all || this.viss[i].type === type) {
+        this.viss[i].remove();
+        this.viss.splice(i, 1);
+      }
+      i--;
+    }
+    if (this.viss.length === 0) {
+      this.stop();
+    }
   }
-  // called when one of the address checkboxes is toggled
-  setAnimationType(type, converter, radius) {
-    this.stop();
-    this.remove();
-    this.type = type;
-    this.vis =
-      type === "dots" ?
+  // called when one of the address checkboxes is toggled on
+  addAnimationType(type, converter, radius) {
+    if (!this.viss.some(v => v.type === type)) {
+      this.viss.push(type === "dots" ?
         new Dots(this, converter, radius) :
-        new Congestion(this);
+        new Congestion(this));
+    }
+    this.start();
   }
   // called periodically to refresh the traffic flow
   doUpdate() {
-    this.vis.doUpdate();
+    this.viss.forEach(v => v.doUpdate());
   }
 }
 
@@ -118,6 +132,8 @@ class TrafficAnimation {
 class Congestion extends TrafficAnimation {
   constructor(traffic) {
     super(traffic);
+    this.type = "congestion";
+    this.stopped = false;
     this.init_markerDef();
   }
   init_markerDef() {
@@ -146,6 +162,7 @@ class Congestion extends TrafficAnimation {
     return null;
   }
   doUpdate() {
+    this.stopped = false;
     let self = this;
     this.traffic.QDRService.management.topology.ensureAllEntities(
       [{
@@ -155,6 +172,9 @@ class Congestion extends TrafficAnimation {
         entity: "connection"
       }],
       function () {
+        // animation was stopped between the ensureAllEntities request and the response
+        if (self.stopped)
+          return;
         let links = {};
         let nodeInfo = self.traffic.QDRService.management.topology.nodeInfo();
         const nodes = self.traffic.topology.nodes.nodes;
@@ -289,6 +309,7 @@ class Congestion extends TrafficAnimation {
     return color(Math.max(0, Math.min(3, v)));
   }
   remove() {
+    this.stopped = true;
     d3.select("#SVG_ID")
       .selectAll("path.traffic")
       .classed("traffic", false);
@@ -304,6 +325,7 @@ class Congestion extends TrafficAnimation {
 class Dots extends TrafficAnimation {
   constructor(traffic, converter, radius) {
     super(traffic);
+    this.type = "dots";
     this.excludedAddresses = localStorage[CHORDFILTERKEY] ?
       JSON.parse(localStorage[CHORDFILTERKEY]) :
       [];
@@ -400,6 +422,9 @@ class Dots extends TrafficAnimation {
         attrs: ["id", "nextHop"]
       }],
       function () {
+        // if we were stopped between the request and response, just exit
+        if (self.stopped)
+          return;
         // get the ingressHistogram data for all routers
         self.chordData.getMatrix().then(self.render.bind(self), function (e) {
           console.log("Could not get message histogram" + e);

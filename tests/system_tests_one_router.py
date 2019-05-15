@@ -24,11 +24,13 @@ from __future__ import print_function
 
 import unittest2 as unittest
 from proton import Condition, Message, Delivery, Url, symbol, Timeout
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, DIR, Process
 from proton.handlers import MessagingHandler, TransactionHandler
 from proton.reactor import Container, AtMostOnce, AtLeastOnce, DynamicNodeProperties, LinkOption, ApplicationEvent, EventInjector
 from proton.utils import BlockingConnection, SyncRequestResponse
 from qpid_dispatch.management.client import Node
+import os, json
+from subprocess import PIPE, STDOUT
 
 CONNECTION_PROPERTIES_UNICODE_STRING = {u'connection': u'properties', u'int_property': 6451}
 CONNECTION_PROPERTIES_SYMBOL = dict()
@@ -59,9 +61,12 @@ class OneRouterTest(TestCase):
         """Start a router and a messenger"""
         super(OneRouterTest, cls).setUpClass()
         name = "test-router"
+        policy_config_path = os.path.join(DIR, 'one-router-policy')
         OneRouterTest.listen_port = cls.tester.get_port()
         config = Qdrouterd.Config([
             ('router', {'mode': 'standalone', 'id': 'QDR', 'allowUnsettledMulticast': 'yes'}),
+            ('policy', {'policyDir': policy_config_path,
+                        'enableVhostPolicy': 'true'}),
 
             # Setting the stripAnnotations to 'no' so that the existing tests will work.
             # Setting stripAnnotations to no will not strip the annotations and any tests that were already in this file
@@ -90,6 +95,18 @@ class OneRouterTest(TestCase):
         cls.out_strip_addr  = cls.router.addresses[3]
         cls.in_strip_addr   = cls.router.addresses[4]
 
+    def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
+        p = self.popen(
+            ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address, '--indent=-1', '--timeout', str(TIMEOUT)],
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
+            universal_newlines=True)
+        out = p.communicate(input)[0]
+        try:
+            p.teardown()
+        except Exception as e:
+            raise Exception(out if out else str(e))
+        return out
+
 
     def test_01_listen_error(self):
         # Make sure a router exits if a initial listener fails, doesn't hang.
@@ -115,7 +132,9 @@ class OneRouterTest(TestCase):
         test.run ( )
         self.assertEqual ( None, test.error )
 
-
+    # DISPATCH-1277. This test will fail with a policy but without the fix in policy_local.py
+    # In other words, if the max-frame-size was 2147483647 and not 16384, this
+    # test would fail.
     def test_04_disposition_returns_to_closed_connection ( self ) :
         addr = self.address + '/closest/' + str(OneRouterTest.closest_count)
         OneRouterTest.closest_count += 1
@@ -437,6 +456,41 @@ class OneRouterTest(TestCase):
         test.run()
         self.assertEqual(None, test.error)
 
+    def test_44_delete_connection_fail(self):
+        """
+        This test creates a blocking connection and tries to update the adminStatus on that connection to "deleted".
+        Since the policy associated with this router set allowAdminStatusUpdate as false,
+        the update operation will not be permitted.
+        """
+
+        # Create a connection with some properties so we can easily identify the connection
+        connection = BlockingConnection(self.address,
+                                        properties=CONNECTION_PROPERTIES_UNICODE_STRING)
+        query_command = 'QUERY --type=connection'
+        outputs = json.loads(self.run_qdmanage(query_command))
+        identity = None
+        passed = False
+
+        for output in outputs:
+            if output.get('properties'):
+                conn_properties = output['properties']
+                # Find the connection that has our properties - CONNECTION_PROPERTIES_UNICODE_STRING
+                # Delete that connection and run another qdmanage to see
+                # if the connection is gone.
+                if conn_properties.get('int_property'):
+                    identity = output.get("identity")
+                    if identity:
+                        update_command = 'UPDATE --type=connection adminStatus=deleted --id=' + identity
+                        try:
+                            outputs = json.loads(self.run_qdmanage(update_command))
+                        except Exception as e:
+                            if "Forbidden" in str(e):
+                                passed = True
+
+        # The test has passed since we were not allowed to delete a connection
+        # because we do not have the policy permission to do so.
+        self.assertTrue(passed)
+
 
 class Entity(object):
     def __init__(self, status_code, status_description, attrs):
@@ -671,7 +725,6 @@ class ManagementNotImplemented(MessagingHandler):
         self.receiver = None
         self.sent_count = 0
         self.error = None
-        self.num_messages = 0
 
     def timeout(self):
         self.error = "No response received for management request"
@@ -688,15 +741,15 @@ class ManagementNotImplemented(MessagingHandler):
         self.sender = event.container.create_sender(self.conn)
         self.receiver = event.container.create_receiver(self.conn, None, dynamic=True)
 
-    def on_sendable(self, event):
-        if self.num_messages < 1:
+    def on_link_opened(self, event):
+        if event.receiver == self.receiver:
             request = Message()
             request.address = "amqp:/_local/$management"
-            request.reply_to = self.receiver.remote_source.address
-            request.properties = {u'type':u'org.amqp.management', u'name':u'self', u'operation':u'NOT-IMPL'}
-
-            event.sender.send(request)
-            self.num_messages += 1
+            request.reply_to = event.receiver.remote_source.address
+            request.properties = {u'type': u'org.amqp.management',
+                                  u'name': u'self',
+                                  u'operation': u'NOT-IMPL'}
+            self.sender.send(request)
 
     def run(self):
         Container(self).run()
@@ -719,7 +772,6 @@ class ManagementGetOperationsTest(MessagingHandler):
         self.receiver = None
         self.sent_count = 0
         self.error = None
-        self.num_messages = 0
 
     def timeout(self):
         self.error = "No response received for management request"
@@ -736,15 +788,13 @@ class ManagementGetOperationsTest(MessagingHandler):
         self.sender = event.container.create_sender(self.conn)
         self.receiver = event.container.create_receiver(self.conn, None, dynamic=True)
 
-    def on_sendable(self, event):
-        if self.num_messages < 1:
+    def on_link_opened(self, event):
+        if self.receiver == event.receiver:
             request = Message()
             request.address = "amqp:/_local/$management"
             request.reply_to = self.receiver.remote_source.address
             request.properties = {u'type':u'org.amqp.management', u'name':u'self', u'operation':u'GET-OPERATIONS'}
-
-            event.sender.send(request)
-            self.num_messages += 1
+            self.sender.send(request)
 
     def run(self):
         Container(self).run()
@@ -774,7 +824,6 @@ class ManagementTest(MessagingHandler):
         self.sent_count = 0
         self.msg_not_sent = True
         self.error = None
-        self.num_messages = 0
         self.response1 = False
         self.response2 = False
 
@@ -791,24 +840,21 @@ class ManagementTest(MessagingHandler):
         self.sender = event.container.create_sender(self.conn)
         self.receiver = event.container.create_receiver(self.conn, None, dynamic=True)
 
-    def on_sendable(self, event):
-        if self.num_messages < 2:
+    def on_link_opened(self, event):
+        if event.receiver == self.receiver:
             request = Message()
             request.address = "amqp:/$management"
             request.reply_to = self.receiver.remote_source.address
             request.correlation_id = "C1"
             request.properties = {u'type': u'org.amqp.management', u'name': u'self', u'operation': u'GET-MGMT-NODES'}
-
-            event.sender.send(request)
-            self.num_messages += 1
+            self.sender.send(request)
 
             request = Message()
             request.address = "amqp:/_topo/0/QDR.B/$management"
             request.correlation_id = "C2"
             request.reply_to = self.receiver.remote_source.address
             request.properties = {u'type': u'org.amqp.management', u'name': u'self', u'operation': u'GET-MGMT-NODES'}
-            event.sender.send(request)
-            self.num_messages += 1
+            self.sender.send(request)
 
     def on_message(self, event):
         if event.receiver == self.receiver:
@@ -992,7 +1038,6 @@ class PreSettled ( MessagingHandler ) :
     def on_start ( self, event ):
         self.send_conn = event.container.connect ( self.addr )
         self.recv_conn = event.container.connect ( self.addr )
-
         self.sender   = event.container.create_sender   ( self.send_conn, self.addr )
         self.receiver = event.container.create_receiver ( self.send_conn, self.addr )
         self.receiver.flow ( self.n_messages )

@@ -49,7 +49,7 @@ qdr_delivery_t *qdr_link_deliver(qdr_link_t *link, qd_message_t *msg, qd_iterato
     qdr_delivery_t *dlv    = new_qdr_delivery_t();
 
     ZERO(dlv);
-    dlv->link           = link;
+    set_safe_ptr_qdr_link_t(link, &dlv->link_sp);
     dlv->msg            = msg;
     dlv->to_addr        = 0;
     dlv->origin         = ingress;
@@ -78,7 +78,7 @@ qdr_delivery_t *qdr_link_deliver_to(qdr_link_t *link, qd_message_t *msg,
     qdr_delivery_t *dlv    = new_qdr_delivery_t();
 
     ZERO(dlv);
-    dlv->link           = link;
+    set_safe_ptr_qdr_link_t(link, &dlv->link_sp);
     dlv->msg            = msg;
     dlv->to_addr        = addr;
     dlv->origin         = ingress;
@@ -110,7 +110,7 @@ qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *
     qdr_delivery_t *dlv    = new_qdr_delivery_t();
 
     ZERO(dlv);
-    dlv->link         = link;
+    set_safe_ptr_qdr_link_t(link, &dlv->link_sp);
     dlv->msg          = msg;
     dlv->settled      = settled;
     dlv->presettled   = settled;
@@ -130,7 +130,7 @@ qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *
 }
 
 
-qdr_delivery_t *qdr_deliver_continue(qdr_delivery_t *in_dlv)
+qdr_delivery_t *qdr_deliver_continue(qdr_core_t *core, qdr_delivery_t *in_dlv)
 {
     qdr_action_t   *action = qdr_action(qdr_deliver_continue_CT, "deliver_continue");
     action->args.connection.delivery = in_dlv;
@@ -140,7 +140,7 @@ qdr_delivery_t *qdr_deliver_continue(qdr_delivery_t *in_dlv)
 
     // This incref is for the action reference
     qdr_delivery_incref(in_dlv, "qdr_deliver_continue - add to action list");
-    qdr_action_enqueue(in_dlv->link->core, action);
+    qdr_action_enqueue(core, action);
     return in_dlv;
 }
 
@@ -163,11 +163,21 @@ int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit)
         while (credit > 0) {
             sys_mutex_lock(conn->work_lock);
             dlv = DEQ_HEAD(link->undelivered);
-            sys_mutex_unlock(conn->work_lock);
             if (dlv) {
-                settled = dlv->settled;
-                uint64_t new_disp = core->deliver_handler(core->user_context, link, dlv, settled);
-                sys_mutex_lock(conn->work_lock);
+                uint64_t new_disp = 0;
+                // DISPATCH-1302 race hack fix: There is a race between the CORE thread
+                // and the outbound (this) thread over settlement. It occurs when the CORE
+                // thread is trying to propagate settlement to a peer (this delivery)
+                // while this thread is in core->deliver_handler.  This can result in the
+                // CORE thread NOT pushing the peer delivery change since it is not yet off of
+                // the undelivered list, while this thread does not settle because it missed
+                // the settled flag update.
+                do {
+                    settled = dlv->settled;
+                    sys_mutex_unlock(conn->work_lock);
+                    new_disp = core->deliver_handler(core->user_context, link, dlv, settled);
+                    sys_mutex_lock(conn->work_lock);
+                } while (settled != dlv->settled);  // oops missed the settlement
                 send_complete = qdr_delivery_send_complete(dlv);
                 if (send_complete) {
                     //
@@ -179,13 +189,16 @@ int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit)
                     credit--;
                     link->credit_to_core--;
                     link->total_deliveries++;
-                    offer = DEQ_SIZE(link->undelivered);
 
+                    // DISPATCH-1153:
+                    // If the undelivered list is cleared the link may have detached.  Stop processing.
+                    offer = DEQ_SIZE(link->undelivered);
                     if (offer == 0) {
                         sys_mutex_unlock(conn->work_lock);
                         return num_deliveries_completed;
                     }
 
+                    assert(dlv == DEQ_HEAD(link->undelivered));
                     DEQ_REMOVE_HEAD(link->undelivered);
                     dlv->link_work = 0;
 
@@ -223,8 +236,10 @@ int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit)
                 if (new_disp)
                     qdr_delivery_update_disposition(((qd_router_t *)core->user_context)->router_core,
                                                     dlv, new_disp, true, 0, 0, false);
-            } else
+            } else {
+                sys_mutex_unlock(conn->work_lock);
                 break;
+            }
         }
 
         if (offer != -1)
@@ -322,7 +337,7 @@ void *qdr_delivery_get_context(qdr_delivery_t *delivery)
 
 qdr_link_t *qdr_delivery_link(const qdr_delivery_t *delivery)
 {
-    return delivery ? delivery->link : 0;
+    return delivery ? safe_deref_qdr_link_t(delivery->link_sp) : 0;
 }
 
 
@@ -376,8 +391,9 @@ void qdr_delivery_incref(qdr_delivery_t *delivery, const char *label)
     uint32_t rc = sys_atomic_inc(&delivery->ref_count);
     assert(rc > 0 || !delivery->ref_counted);
     delivery->ref_counted = true;
-    if (delivery->link)
-        qd_log(delivery->link->core->log, QD_LOG_DEBUG,
+    qdr_link_t *link = qdr_delivery_link(delivery);
+    if (link)
+        qd_log(link->core->log, QD_LOG_DEBUG,
                "Delivery incref:    dlv:%lx rc:%"PRIu32" %s", (long) delivery, rc + 1, label);
 }
 
@@ -394,12 +410,6 @@ bool qdr_delivery_is_aborted(const qdr_delivery_t *delivery)
     return qd_message_aborted(delivery->msg);
 }
 
-void qdr_delivery_add_num_closed_receivers(qdr_delivery_t *delivery)
-{
-    assert(delivery);
-    qd_message_add_num_closed_receivers(delivery->msg);
-}
-
 
 void qdr_delivery_decref(qdr_core_t *core, qdr_delivery_t *delivery, const char *label)
 {
@@ -414,6 +424,7 @@ void qdr_delivery_decref(qdr_core_t *core, qdr_delivery_t *delivery, const char 
         //
         qdr_action_t *action = qdr_action(qdr_delete_delivery_CT, "delete_delivery");
         action->args.delivery.delivery = delivery;
+        action->label = label;
         qdr_action_enqueue(core, action);
     }
 }
@@ -505,7 +516,7 @@ bool qdr_delivery_settled_CT(qdr_core_t *core, qdr_delivery_t *dlv)
     // Remove a delivery from its unsettled list.  Side effects include issuing
     // replacement credit and visiting the link-quiescence algorithm
     //
-    qdr_link_t       *link  = dlv->link;
+    qdr_link_t       *link  = qdr_delivery_link(dlv);
     qdr_connection_t *conn  = link ? link->conn : 0;
     bool              moved = false;
 
@@ -549,50 +560,26 @@ bool qdr_delivery_settled_CT(qdr_core_t *core, qdr_delivery_t *dlv)
     return moved;
 }
 
-
-static void qdr_do_message_to_addr_free(qdr_core_t *core, qdr_general_work_t *work)
+void qdr_increment_delivery_counters_CT(qdr_core_t *core, qdr_delivery_t *delivery)
 {
-    if (work->msg)
-        qd_message_free(work->msg);
-    if (work->on_message_context)
-        qd_iterator_free((qd_iterator_t *)work->on_message_context);
-}
-
-
-static void qdr_delete_delivery_internal_CT(qdr_core_t *core, qdr_delivery_t *delivery)
-{
-    assert(sys_atomic_get(&delivery->ref_count) == 0);
-    qdr_link_t *link = delivery->link;
-
-    if (delivery->msg || delivery->to_addr) {
-        qdr_general_work_t *work = qdr_general_work(qdr_do_message_to_addr_free);
-        work->msg                = delivery->msg;
-        work->on_message_context = delivery->to_addr;
-        qdr_post_general_work_CT(core, work);
-    }
-
-    if (delivery->tracking_addr) {
-        delivery->tracking_addr->outstanding_deliveries[delivery->tracking_addr_bit]--;
-        delivery->tracking_addr->tracked_deliveries--;
-
-        if (delivery->tracking_addr->tracked_deliveries == 0)
-            qdr_check_addr_CT(core, delivery->tracking_addr);
-
-        delivery->tracking_addr = 0;
-    }
-
+    qdr_link_t *link = qdr_delivery_link(delivery);
     if (link) {
+        bool do_rate = false;
+
         if (delivery->presettled) {
+            do_rate = delivery->disposition != PN_RELEASED;
             link->presettled_deliveries++;
             if (link->link_direction ==  QD_INCOMING && link->link_type == QD_LINK_ENDPOINT)
                 core->presettled_deliveries++;
         }
         else if (delivery->disposition == PN_ACCEPTED) {
+            do_rate = true;
             link->accepted_deliveries++;
             if (link->link_direction ==  QD_INCOMING)
                 core->accepted_deliveries++;
         }
         else if (delivery->disposition == PN_REJECTED) {
+            do_rate = true;
             link->rejected_deliveries++;
             if (link->link_direction ==  QD_INCOMING)
                 core->rejected_deliveries++;
@@ -608,8 +595,65 @@ static void qdr_delete_delivery_internal_CT(qdr_core_t *core, qdr_delivery_t *de
                 core->modified_deliveries++;
         }
 
+        uint32_t delay = core->uptime_ticks - delivery->ingress_time;
+        if (delay > 10) {
+            link->deliveries_delayed_10sec++;
+            if (link->link_direction ==  QD_INCOMING)
+                core->deliveries_delayed_10sec++;
+        } else if (delay > 1) {
+            link->deliveries_delayed_1sec++;
+            if (link->link_direction ==  QD_INCOMING)
+                core->deliveries_delayed_1sec++;
+        }
+
         if (qd_bitmask_valid_bit_value(delivery->ingress_index) && link->ingress_histogram)
-            link->ingress_histogram[delivery->ingress_index]++;    }
+            link->ingress_histogram[delivery->ingress_index]++;
+
+        //
+        // Compute the settlement rate
+        //
+        if (do_rate) {
+            uint32_t delta_time = core->uptime_ticks - link->core_ticks;
+            if (delta_time > 0) {
+                if (delta_time > QDR_LINK_RATE_DEPTH)
+                    delta_time = QDR_LINK_RATE_DEPTH;
+                for (uint8_t delta_slots = 0; delta_slots < delta_time; delta_slots++) {
+                    link->rate_cursor = (link->rate_cursor + 1) % QDR_LINK_RATE_DEPTH;
+                    link->settled_deliveries[link->rate_cursor] = 0;
+                }
+                link->core_ticks = core->uptime_ticks;
+            }
+            link->settled_deliveries[link->rate_cursor]++;
+        }
+    }
+}
+
+
+static void qdr_delete_delivery_internal_CT(qdr_core_t *core, qdr_delivery_t *delivery)
+{
+    assert(sys_atomic_get(&delivery->ref_count) == 0);
+
+    if (delivery->msg || delivery->to_addr) {
+        qdr_delivery_cleanup_t *cleanup = new_qdr_delivery_cleanup_t();
+
+        DEQ_ITEM_INIT(cleanup);
+        cleanup->msg  = delivery->msg;
+        cleanup->iter = delivery->to_addr;
+
+        DEQ_INSERT_TAIL(core->delivery_cleanup_list, cleanup);
+    }
+
+    if (delivery->tracking_addr) {
+        delivery->tracking_addr->outstanding_deliveries[delivery->tracking_addr_bit]--;
+        delivery->tracking_addr->tracked_deliveries--;
+
+        if (delivery->tracking_addr->tracked_deliveries == 0)
+            qdr_check_addr_CT(core, delivery->tracking_addr);
+
+        delivery->tracking_addr = 0;
+    }
+
+    qdr_increment_delivery_counters_CT(core, delivery);
 
     //
     // Free all the peer qdr_delivery_ref_t references
@@ -838,6 +882,10 @@ static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discar
                 activate = true;
             }
             sys_mutex_unlock(link->conn->work_lock);
+        } else if (link->link_direction == QD_INCOMING) {
+            if (drain) {
+                link->credit_pending = link->capacity;
+            }
         }
     }
 
@@ -868,7 +916,12 @@ static long qdr_addr_path_count_CT(qdr_address_t *addr)
 
 static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery_t *dlv, qdr_address_t *addr, bool more)
 {
-    if (dlv->link->link_type == QD_LINK_ENDPOINT)
+    qdr_link_t *dlv_link = qdr_delivery_link(dlv);
+
+    if (!dlv_link)
+        return;
+
+    if (dlv_link->link_type == QD_LINK_ENDPOINT)
         core->deliveries_ingress++;
 
     if (addr && addr == link->owning_addr && qdr_addr_path_count_CT(addr) == 0) {
@@ -883,7 +936,7 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
         if (dlv->settled) {
             // Increment the presettled_dropped_deliveries on the in_link
             link->dropped_presettled_deliveries++;
-            if (dlv->link->link_type == QD_LINK_ENDPOINT)
+            if (dlv_link->link_type == QD_LINK_ENDPOINT)
                 core->dropped_presettled_deliveries++;
 
             //
@@ -1015,7 +1068,15 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
 
     qdr_delivery_t *dlv  = action->args.connection.delivery;
     bool            more = action->args.connection.more;
-    qdr_link_t     *link = dlv->link;
+    qdr_link_t     *link = qdr_delivery_link(dlv);
+
+    if (!link)
+        return;
+
+    //
+    // Record the ingress time so we can track the age of this delivery.
+    //
+    dlv->ingress_time = core->uptime_ticks;
 
     //
     // If the link is an edge link, mark this delivery as via-edge
@@ -1151,6 +1212,9 @@ static void qdr_update_delivery_CT(qdr_core_t *core, qdr_action_t *action, bool 
     qdr_error_t    *error      = action->args.delivery.error;
     bool error_unassigned      = true;
 
+    qdr_link_t *dlv_link  = qdr_delivery_link(dlv);
+    qdr_link_t *peer_link = qdr_delivery_link(peer);
+
     //
     // Logic:
     //
@@ -1176,7 +1240,7 @@ static void qdr_update_delivery_CT(qdr_core_t *core, qdr_action_t *action, bool 
     if (settled) {
         if (peer) {
             peer->settled = true;
-            if (peer->link) {
+            if (peer_link) {
                 peer_moved = qdr_delivery_settled_CT(core, peer);
                 if (peer_moved)
                     push = true;
@@ -1184,15 +1248,15 @@ static void qdr_update_delivery_CT(qdr_core_t *core, qdr_action_t *action, bool 
             qdr_delivery_unlink_peers_CT(core, dlv, peer);
         }
 
-        if (dlv->link)
+        if (dlv_link)
             dlv_moved = qdr_delivery_settled_CT(core, dlv);
     }
 
     //
     // If the delivery's link has a core endpoint, notify the endpoint of the update
     //
-    if (dlv->link && dlv->link->core_endpoint)
-        qdrc_endpoint_do_update_CT(core, dlv->link->core_endpoint, dlv, settled);
+    if (dlv_link && dlv_link->core_endpoint)
+        qdrc_endpoint_do_update_CT(core, dlv_link->core_endpoint, dlv, settled);
 
     if (push)
         qdr_delivery_push_CT(core, peer);
@@ -1224,29 +1288,30 @@ static void qdr_delete_delivery_CT(qdr_core_t *core, qdr_action_t *action, bool 
 void qdr_deliver_continue_peers_CT(qdr_core_t *core, qdr_delivery_t *in_dlv)
 {
     qdr_delivery_t *peer = qdr_delivery_first_peer_CT(in_dlv);
+
     while (peer) {
-        qdr_link_work_t *work = peer->link_work;
+        qdr_link_work_t *work      = peer->link_work;
+        qdr_link_t      *peer_link = qdr_delivery_link(peer);
+
         //
         // Determines if the peer connection can be activated.
         // For a large message, the peer delivery's link_work MUST be at the head of the peer link's work list. This link work is only removed
         // after the streaming message has been sent.
         //
-        if (work) {
-            sys_mutex_lock(peer->link->conn->work_lock);
-            if (work->processing || work == DEQ_HEAD(peer->link->work_list)) {
+        if (!!work && !!peer_link) {
+            sys_mutex_lock(peer_link->conn->work_lock);
+            if (work->processing || work == DEQ_HEAD(peer_link->work_list)) {
                 // Adding this work at priority 0.
-                qdr_add_link_ref(peer->link->conn->links_with_work, peer->link, QDR_LINK_LIST_CLASS_WORK);
-                sys_mutex_unlock(peer->link->conn->work_lock);
+                qdr_add_link_ref(peer_link->conn->links_with_work, peer_link, QDR_LINK_LIST_CLASS_WORK);
+                sys_mutex_unlock(peer_link->conn->work_lock);
 
                 //
                 // Activate the outgoing connection for later processing.
                 //
-                qdr_connection_activate_CT(core, peer->link->conn);
+                qdr_connection_activate_CT(core, peer_link->conn);
             }
-            else {
-                sys_mutex_unlock(peer->link->conn->work_lock);
-
-            }
+            else
+                sys_mutex_unlock(peer_link->conn->work_lock);
         }
 
         peer = qdr_delivery_next_peer_CT(in_dlv);
@@ -1261,11 +1326,12 @@ static void qdr_deliver_continue_CT(qdr_core_t *core, qdr_action_t *action, bool
 
     qdr_delivery_t *in_dlv  = action->args.connection.delivery;
     bool more = action->args.connection.more;
+    qdr_link_t *link = qdr_delivery_link(in_dlv);
 
     //
     // If it is already in the undelivered list, don't try to deliver this again.
     //
-    if (in_dlv->where != QDR_DELIVERY_IN_UNDELIVERED) {
+    if (!!link && in_dlv->where != QDR_DELIVERY_IN_UNDELIVERED) {
         qdr_deliver_continue_peers_CT(core, in_dlv);
 
         qd_message_t *msg = qdr_delivery_message(in_dlv);
@@ -1278,7 +1344,7 @@ static void qdr_deliver_continue_CT(qdr_core_t *core, qdr_action_t *action, bool
             qdr_subscription_t *sub = DEQ_HEAD(in_dlv->subscriptions);
             while (sub) {
                 DEQ_REMOVE_HEAD(in_dlv->subscriptions);
-                qdr_forward_on_message_CT(core, sub, in_dlv->link, in_dlv->msg);
+                qdr_forward_on_message_CT(core, sub, link, in_dlv->msg);
                 sub = DEQ_HEAD(in_dlv->subscriptions);
             }
 
@@ -1315,7 +1381,7 @@ static void qdr_deliver_continue_CT(qdr_core_t *core, qdr_action_t *action, bool
 
                 // Remove the delivery from the settled list and decref the in_dlv.
                 in_dlv->where = QDR_DELIVERY_NOWHERE;
-                DEQ_REMOVE(in_dlv->link->settled, in_dlv);
+                DEQ_REMOVE(link->settled, in_dlv);
                 qdr_delivery_decref_CT(core, in_dlv, "qdr_deliver_continue_CT - remove from settled list");
             }
         }
@@ -1420,10 +1486,10 @@ void qdr_addr_start_inlinks_CT(qdr_core_t *core, qdr_address_t *addr)
 
 void qdr_delivery_push_CT(qdr_core_t *core, qdr_delivery_t *dlv)
 {
-    if (!dlv || !dlv->link)
+    qdr_link_t *link = qdr_delivery_link(dlv);
+    if (!link)
         return;
 
-    qdr_link_t *link = dlv->link;
     bool activate = false;
 
     sys_mutex_lock(link->conn->work_lock);

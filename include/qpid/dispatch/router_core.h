@@ -188,6 +188,7 @@ qdr_connection_t *qdr_connection_opened(qdr_core_t            *core,
                                         bool                   strip_annotations_in,
                                         bool                   strip_annotations_out,
                                         bool                   policy_allow_dynamic_link_routes,
+                                        bool                   policy_allow_admin_status_update,
                                         int                    link_capacity,
                                         const char            *vhost,
                                         qdr_connection_info_t *connection_info,
@@ -284,6 +285,19 @@ qdr_terminus_t *qdr_terminus(pn_terminus_t *pn);
  * @param terminus The pointer returned by qdr_terminus()
  */
 void qdr_terminus_free(qdr_terminus_t *terminus);
+
+/**
+ * qdr_terminus_format
+ *
+ * Write a human-readable representation of the terminus content to the string
+ * in 'output'.
+ *
+ * @param terminus The pointer returned by qdr_terminus()
+ * @param output The string buffer where the result shall be written
+ * @param size Input: the number of bytes availabie in output for writing.  Output: the
+ *             number of bytes remaining after the operation.
+ */
+void qdr_terminus_format(qdr_terminus_t *terminus, char *output, size_t *size);
 
 /**
  * qdr_terminus_copy
@@ -646,7 +660,7 @@ qdr_delivery_t *qdr_link_deliver_to(qdr_link_t *link, qd_message_t *msg,
 qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *msg, bool settled,
                                                 const uint8_t *tag, int tag_length,
                                                 uint64_t disposition, pn_data_t* disposition_state);
-qdr_delivery_t *qdr_deliver_continue(qdr_delivery_t *delivery);
+qdr_delivery_t *qdr_deliver_continue(qdr_core_t *core, qdr_delivery_t *delivery);
 
 int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit);
 
@@ -664,6 +678,7 @@ typedef void (*qdr_link_drain_t)         (void *context, qdr_link_t *link, bool 
 typedef int  (*qdr_link_push_t)          (void *context, qdr_link_t *link, int limit);
 typedef uint64_t (*qdr_link_deliver_t)   (void *context, qdr_link_t *link, qdr_delivery_t *delivery, bool settled);
 typedef void (*qdr_delivery_update_t)    (void *context, qdr_delivery_t *dlv, uint64_t disp, bool settled);
+typedef void (*qdr_connection_close_t)   (void *context, qdr_connection_t *conn, qdr_error_t *error);
 
 void qdr_connection_handlers(qdr_core_t             *core,
                              void                      *context,
@@ -677,7 +692,8 @@ void qdr_connection_handlers(qdr_core_t             *core,
                              qdr_link_drain_t           drain,
                              qdr_link_push_t            push,
                              qdr_link_deliver_t         deliver,
-                             qdr_delivery_update_t      delivery_update);
+                             qdr_delivery_update_t      delivery_update,
+                             qdr_connection_close_t     conn_close);
 
 /**
  ******************************************************************************
@@ -836,5 +852,29 @@ qdr_connection_info_t *qdr_connection_info(bool             is_encrypted,
                                            pn_data_t       *connection_properties,
                                            int              ssl_ssf,
                                            bool             ssl);
+
+
+typedef struct {
+    size_t connections;
+    size_t links;
+    size_t addrs;
+    size_t routers;
+    size_t link_routes;
+    size_t auto_links;
+    size_t presettled_deliveries;
+    size_t dropped_presettled_deliveries;
+    size_t accepted_deliveries;
+    size_t rejected_deliveries;
+    size_t released_deliveries;
+    size_t modified_deliveries;
+    size_t deliveries_ingress;
+    size_t deliveries_egress;
+    size_t deliveries_transit;
+    size_t deliveries_ingress_route_container;
+    size_t deliveries_egress_route_container;
+}  qdr_global_stats_t;
+ALLOC_DECLARE(qdr_global_stats_t);
+typedef void (*qdr_global_stats_handler_t) (void *context);
+void qdr_request_global_stats(qdr_core_t *core, qdr_global_stats_t *stats, qdr_global_stats_handler_t callback, void *context);
 
 #endif

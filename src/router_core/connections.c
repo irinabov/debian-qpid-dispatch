@@ -23,6 +23,7 @@
 #include <qpid/dispatch/amqp.h>
 #include <stdio.h>
 #include <strings.h>
+#include <inttypes.h>
 #include "router_core_private.h"
 #include "core_link_endpoint.h"
 
@@ -33,7 +34,9 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
 static void qdr_link_inbound_second_attach_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_link_detach_sent_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
+static void qdr_link_processing_complete_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_link_detach_sent(qdr_link_t *link);
+static void qdr_link_processing_complete(qdr_core_t *core, qdr_link_t *link);
 
 ALLOC_DEFINE(qdr_connection_t);
 ALLOC_DEFINE(qdr_connection_work_t);
@@ -72,6 +75,7 @@ qdr_connection_t *qdr_connection_opened(qdr_core_t            *core,
                                         bool                   strip_annotations_in,
                                         bool                   strip_annotations_out,
                                         bool                   policy_allow_dynamic_link_routes,
+                                        bool                   policy_allow_admin_status_update,
                                         int                    link_capacity,
                                         const char            *vhost,
                                         qdr_connection_info_t *connection_info,
@@ -92,8 +96,11 @@ qdr_connection_t *qdr_connection_opened(qdr_core_t            *core,
     conn->strip_annotations_in  = strip_annotations_in;
     conn->strip_annotations_out = strip_annotations_out;
     conn->policy_allow_dynamic_link_routes = policy_allow_dynamic_link_routes;
+    conn->policy_allow_admin_status_update = policy_allow_admin_status_update;
     conn->link_capacity         = link_capacity;
     conn->mask_bit              = -1;
+    conn->admin_status          = QDR_CONN_ADMIN_ENABLED;
+    conn->oper_status           = QDR_CONN_OPER_UP;
     DEQ_INIT(conn->links);
     DEQ_INIT(conn->work_list);
     conn->connection_info->role = conn->role;
@@ -222,6 +229,11 @@ int qdr_connection_process(qdr_connection_t *conn)
 
     int event_count = 0;
 
+    if (conn->closed) {
+        core->conn_close_handler(core->user_context, conn, conn->error);
+        return 0;
+    }
+
     sys_mutex_lock(conn->work_lock);
     DEQ_MOVE(conn->work_list, work_list);
     for (int priority = 0; priority <= QDR_MAX_PRIORITY; ++ priority) {
@@ -234,6 +246,7 @@ int qdr_connection_process(qdr_connection_t *conn)
         ref = DEQ_HEAD(links_with_work[priority]);
         while (ref) {
             move_link_ref(ref->link, QDR_LINK_LIST_CLASS_WORK, QDR_LINK_LIST_CLASS_LOCAL);
+            ref->link->processing = true;
             ref = DEQ_NEXT(ref);
         }
     }
@@ -254,111 +267,119 @@ int qdr_connection_process(qdr_connection_t *conn)
             break;
         }
 
-        qdr_terminus_free(work->source);
-        qdr_terminus_free(work->target);
-        free_qdr_connection_work_t(work);
-
+        qdr_connection_work_free_CT(work);
         work = DEQ_HEAD(work_list);
     }
 
     // Process the links_with_work array from highest to lowest priority.
     for (int priority = QDR_MAX_PRIORITY; priority >= 0; -- priority) {
-        do {
+        ref = DEQ_HEAD(links_with_work[priority]);
+        while (ref) {
             qdr_link_work_t *link_work;
             detach_sent = false;
+            link = ref->link;
 
-            ref = DEQ_HEAD(links_with_work[priority]);
-            if (ref) {
-                link = ref->link;
-                qdr_del_link_ref(links_with_work + priority, ref->link, QDR_LINK_LIST_CLASS_LOCAL);
-
-                //
-                // The work lock must be used to protect accesses to the link's work_list and
-                // link_work->processing.
-                //
-                sys_mutex_lock(conn->work_lock);
-                link_work = DEQ_HEAD(link->work_list);
-                if (link_work) {
-                    DEQ_REMOVE_HEAD(link->work_list);
-                    link_work->processing = true;
-                }
-                sys_mutex_unlock(conn->work_lock);
-            } else
-                link = 0;
-
-            if (link) {
-                //
-                // Handle disposition/settlement updates
-                //
-                qdr_delivery_ref_list_t updated_deliveries;
-                sys_mutex_lock(conn->work_lock);
-                DEQ_MOVE(link->updated_deliveries, updated_deliveries);
-                sys_mutex_unlock(conn->work_lock);
-
-                qdr_delivery_ref_t *dref = DEQ_HEAD(updated_deliveries);
-                while (dref) {
-                    core->delivery_update_handler(core->user_context, dref->dlv, dref->dlv->disposition, dref->dlv->settled);
-                    qdr_delivery_decref(core, dref->dlv, "qdr_connection_process - remove from updated list");
-                    qdr_del_delivery_ref(&updated_deliveries, dref);
-                    dref = DEQ_HEAD(updated_deliveries);
-                    event_count++;
-                }
-
-                while (link_work) {
-                    switch (link_work->work_type) {
-                    case QDR_LINK_WORK_DELIVERY :
-                        {
-                            int count = core->push_handler(core->user_context, link, link_work->value);
-                            assert(count <= link_work->value);
-                            link_work->value -= count;
-                            break;
-                        }
-
-                    case QDR_LINK_WORK_FLOW :
-                        if (link_work->value > 0)
-                            core->flow_handler(core->user_context, link, link_work->value);
-                        if      (link_work->drain_action == QDR_LINK_WORK_DRAIN_ACTION_SET)
-                            core->drain_handler(core->user_context, link, true);
-                        else if (link_work->drain_action == QDR_LINK_WORK_DRAIN_ACTION_CLEAR)
-                            core->drain_handler(core->user_context, link, false);
-                        else if (link_work->drain_action == QDR_LINK_WORK_DRAIN_ACTION_DRAINED)
-                            core->drained_handler(core->user_context, link);
-                        break;
-
-                    case QDR_LINK_WORK_FIRST_DETACH :
-                    case QDR_LINK_WORK_SECOND_DETACH :
-                        core->detach_handler(core->user_context, link, link_work->error,
-                                             link_work->work_type == QDR_LINK_WORK_FIRST_DETACH,
-                                             link_work->close_link);
-                        detach_sent = true;
-                        break;
-                    }
-
-                    sys_mutex_lock(conn->work_lock);
-                    if (link_work->work_type == QDR_LINK_WORK_DELIVERY && link_work->value > 0 && !link->detach_received) {
-                        DEQ_INSERT_HEAD(link->work_list, link_work);
-                        link_work->processing = false;
-                        link_work = 0; // Halt work processing
-                    } else {
-                        qdr_error_free(link_work->error);
-                        free_qdr_link_work_t(link_work);
-                        link_work = DEQ_HEAD(link->work_list);
-                        if (link_work) {
-                            DEQ_REMOVE_HEAD(link->work_list);
-                            link_work->processing = true;
-                        }
-                    }
-                    sys_mutex_unlock(conn->work_lock);
-                    event_count++;
-                }
-
-                if (detach_sent) {
-                    // let the core thread know so it can clean up
-                    qdr_link_detach_sent(link);
-                }
+            //
+            // The work lock must be used to protect accesses to the link's work_list and
+            // link_work->processing.
+            //
+            sys_mutex_lock(conn->work_lock);
+            link_work = DEQ_HEAD(link->work_list);
+            if (link_work) {
+                DEQ_REMOVE_HEAD(link->work_list);
+                link_work->processing = true;
             }
-        } while (detach_sent || link);
+            sys_mutex_unlock(conn->work_lock);
+
+            //
+            // Handle disposition/settlement updates
+            //
+            qdr_delivery_ref_list_t updated_deliveries;
+            sys_mutex_lock(conn->work_lock);
+            DEQ_MOVE(link->updated_deliveries, updated_deliveries);
+            sys_mutex_unlock(conn->work_lock);
+
+            qdr_delivery_ref_t *dref = DEQ_HEAD(updated_deliveries);
+            while (dref) {
+                core->delivery_update_handler(core->user_context, dref->dlv, dref->dlv->disposition, dref->dlv->settled);
+                qdr_delivery_decref(core, dref->dlv, "qdr_connection_process - remove from updated list");
+                qdr_del_delivery_ref(&updated_deliveries, dref);
+                dref = DEQ_HEAD(updated_deliveries);
+                event_count++;
+            }
+
+            while (link_work) {
+                switch (link_work->work_type) {
+                case QDR_LINK_WORK_DELIVERY :
+                    {
+                        int count = core->push_handler(core->user_context, link, link_work->value);
+                        assert(count <= link_work->value);
+                        link_work->value -= count;
+                        break;
+                    }
+
+                case QDR_LINK_WORK_FLOW :
+                    if (link_work->value > 0)
+                        core->flow_handler(core->user_context, link, link_work->value);
+                    if      (link_work->drain_action == QDR_LINK_WORK_DRAIN_ACTION_SET)
+                        core->drain_handler(core->user_context, link, true);
+                    else if (link_work->drain_action == QDR_LINK_WORK_DRAIN_ACTION_CLEAR)
+                        core->drain_handler(core->user_context, link, false);
+                    else if (link_work->drain_action == QDR_LINK_WORK_DRAIN_ACTION_DRAINED)
+                        core->drained_handler(core->user_context, link);
+                    break;
+
+                case QDR_LINK_WORK_FIRST_DETACH :
+                case QDR_LINK_WORK_SECOND_DETACH :
+                    core->detach_handler(core->user_context, link, link_work->error,
+                                         link_work->work_type == QDR_LINK_WORK_FIRST_DETACH,
+                                         link_work->close_link);
+                    detach_sent = true;
+                    break;
+                }
+
+                sys_mutex_lock(conn->work_lock);
+                if (link_work->work_type == QDR_LINK_WORK_DELIVERY && link_work->value > 0 && !link->detach_received) {
+                    DEQ_INSERT_HEAD(link->work_list, link_work);
+                    link_work->processing = false;
+                    link_work = 0; // Halt work processing
+                } else {
+                    qdr_error_free(link_work->error);
+                    free_qdr_link_work_t(link_work);
+                    link_work = DEQ_HEAD(link->work_list);
+                    if (link_work) {
+                        DEQ_REMOVE_HEAD(link->work_list);
+                        link_work->processing = true;
+                    }
+                }
+                sys_mutex_unlock(conn->work_lock);
+                event_count++;
+            }
+
+            if (detach_sent) {
+                // let the core thread know so it can clean up
+                qdr_link_detach_sent(link);
+            }
+
+            ref = DEQ_NEXT(ref);
+        }
     }
+
+    sys_mutex_lock(conn->work_lock);
+    for (int priority = QDR_MAX_PRIORITY; priority >= 0; -- priority) {
+        ref = DEQ_HEAD(links_with_work[priority]);
+        while (ref) {
+            qdr_link_t *link = ref->link;
+
+            link->processing = false;
+            if (link->ready_to_free)
+                qdr_link_processing_complete(core, link);
+
+            qdr_del_link_ref(links_with_work + priority, ref->link, QDR_LINK_LIST_CLASS_LOCAL);
+            ref = DEQ_HEAD(links_with_work[priority]);
+        }
+    }
+    sys_mutex_unlock(conn->work_lock);
 
     return event_count;
 }
@@ -478,6 +499,7 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
     link->credit_pending = conn->link_capacity;
     link->admin_enabled  = true;
     link->oper_status    = QDR_LINK_OPER_DOWN;
+    link->core_ticks     = conn->core->uptime_ticks;
     link->terminus_survives_disconnect = qdr_terminus_survives_disconnect(local_terminus);
 
     link->strip_annotations_in  = conn->strip_annotations_in;
@@ -541,6 +563,16 @@ static void qdr_link_detach_sent(qdr_link_t *link)
 }
 
 
+static void qdr_link_processing_complete(qdr_core_t *core, qdr_link_t *link)
+{
+    qdr_action_t *action = qdr_action(qdr_link_processing_complete_CT, "link_processing_complete");
+
+    action->args.connection.link = link;
+    qdr_action_enqueue(core, action);
+}
+
+
+
 void qdr_connection_handlers(qdr_core_t                *core,
                              void                      *context,
                              qdr_connection_activate_t  activate,
@@ -553,7 +585,8 @@ void qdr_connection_handlers(qdr_core_t                *core,
                              qdr_link_drain_t           drain,
                              qdr_link_push_t            push,
                              qdr_link_deliver_t         deliver,
-                             qdr_delivery_update_t      delivery_update)
+                             qdr_delivery_update_t      delivery_update,
+                             qdr_connection_close_t     conn_close)
 {
     core->user_context            = context;
     core->first_attach_handler    = first_attach;
@@ -566,6 +599,7 @@ void qdr_connection_handlers(qdr_core_t                *core,
     core->push_handler            = push;
     core->deliver_handler         = deliver;
     core->delivery_update_handler = delivery_update;
+    core->conn_close_handler      = conn_close;
 }
 
 
@@ -669,6 +703,11 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
     qdr_delivery_ref_t *ref = DEQ_HEAD(updated_deliveries);
     while (ref) {
         //
+        // Updates global and link level delivery counters like presettled_deliveries, accepted_deliveries, released_deliveries etc
+        //
+        qdr_increment_delivery_counters_CT(core, ref->dlv);
+        qd_nullify_safe_ptr(&ref->dlv->link_sp);
+        //
         // Now our reference
         //
         qdr_delivery_decref_CT(core, ref->dlv, "qdr_link_cleanup_deliveries_CT - remove from updated list");
@@ -704,9 +743,11 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
             peer = qdr_delivery_next_peer_CT(dlv);
         }
 
-        if (dlv->link->link_direction == QD_OUTGOING) {
-            qdr_delivery_add_num_closed_receivers(dlv);
-        }
+        //
+        // Updates global and link level delivery counters like presettled_deliveries, accepted_deliveries, released_deliveries etc
+        //
+        qdr_increment_delivery_counters_CT(core, dlv);
+        qd_nullify_safe_ptr(&dlv->link_sp);
 
         //
         // Now the undelivered-list reference
@@ -747,6 +788,12 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
         }
 
         //
+        // Updates global and link level delivery counters like presettled_deliveries, accepted_deliveries, released_deliveries etc
+        //
+        qdr_increment_delivery_counters_CT(core, dlv);
+        qd_nullify_safe_ptr(&dlv->link_sp);
+
+        //
         // Now the unsettled-list reference
         //
         qdr_delivery_decref_CT(core, dlv, "qdr_link_cleanup_deliveries_CT - remove from unsettled list");
@@ -772,6 +819,12 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
             peer = next_peer;
         }
 
+        //
+        // Updates global and link level delivery counters like presettled_deliveries, accepted_deliveries, released_deliveries etc
+        //
+        qdr_increment_delivery_counters_CT(core, dlv);
+        qd_nullify_safe_ptr(&dlv->link_sp);
+
         // This decref is for the removing the delivery from the settled list
         qdr_delivery_decref_CT(core, dlv, "qdr_link_cleanup_deliveries_CT - remove from settled list");
         dlv = DEQ_HEAD(settled);
@@ -796,7 +849,7 @@ static void qdr_link_abort_undelivered_CT(qdr_core_t *core, qdr_link_t *link)
 }
 
 
-static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link)
+static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link, const char *log_text)
 {
     //
     // Remove the link from the master list of links
@@ -855,12 +908,21 @@ static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_li
     qdr_link_cleanup_deliveries_CT(core, conn, link);
 
     //
-    // Remove the reference to this link in the connection's reference lists
+    // Remove all references to this link in the connection's and owning
+    // address reference lists
     //
     sys_mutex_lock(conn->work_lock);
     qdr_del_link_ref(&conn->links, link, QDR_LINK_LIST_CLASS_CONNECTION);
     qdr_del_link_ref(conn->links_with_work + link->priority, link, QDR_LINK_LIST_CLASS_WORK);
     sys_mutex_unlock(conn->work_lock);
+
+    if (link->ref[QDR_LINK_LIST_CLASS_ADDRESS]) {
+        assert(link->owning_addr);
+        qdr_del_link_ref((link->link_direction == QD_OUTGOING)
+                         ? &link->owning_addr->rlinks
+                         : &link->owning_addr->inlinks,
+                         link,  QDR_LINK_LIST_CLASS_ADDRESS);
+    }
 
     //
     // Free the link's name and terminus_addr
@@ -871,7 +933,34 @@ static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_li
     free(link->ingress_histogram);
     free(link->insert_prefix);
     free(link->strip_prefix);
-    link->name = 0;
+
+    //
+    // Log the link closure
+    //
+    qd_log(core->log, QD_LOG_INFO, "[C%"PRIu64"][L%"PRIu64"] %s: del=%"PRIu64" presett=%"PRIu64" psdrop=%"PRIu64
+           " acc=%"PRIu64" rej=%"PRIu64" rel=%"PRIu64" mod=%"PRIu64" delay1=%"PRIu64" delay10=%"PRIu64,
+           conn->identity, link->identity, log_text, link->total_deliveries, link->presettled_deliveries,
+           link->dropped_presettled_deliveries, link->accepted_deliveries, link->rejected_deliveries,
+           link->released_deliveries, link->modified_deliveries, link->deliveries_delayed_1sec,
+           link->deliveries_delayed_10sec);
+
+    free_qdr_link_t(link);
+}
+
+
+static void qdr_link_cleanup_protected_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link, const char *label)
+{
+    bool do_cleanup = false;
+
+    sys_mutex_lock(conn->work_lock);
+    if (link->processing)
+        link->ready_to_free = true;
+    else
+        do_cleanup = true;
+    sys_mutex_unlock(conn->work_lock);
+
+    if (do_cleanup)
+        qdr_link_cleanup_CT(core, conn, link, label);
 }
 
 
@@ -902,9 +991,10 @@ qdr_link_t *qdr_create_link_CT(qdr_core_t       *core,
     qdr_generate_link_name("qdlink", link->name, QD_DISCRIMINATOR_SIZE + 8);
     link->admin_enabled  = true;
     link->oper_status    = QDR_LINK_OPER_DOWN;
-    link->insert_prefix = 0;
-    link->strip_prefix = 0;
-    link->attach_count = 1;
+    link->insert_prefix  = 0;
+    link->strip_prefix   = 0;
+    link->attach_count   = 1;
+    link->core_ticks     = core->uptime_ticks;
 
     link->strip_annotations_in  = conn->strip_annotations_in;
     link->strip_annotations_out = conn->strip_annotations_out;
@@ -1155,6 +1245,7 @@ void qdr_connection_free(qdr_connection_t *conn)
 {
     sys_mutex_free(conn->work_lock);
     free(conn->tenant_space);
+    qdr_error_free(conn->error);
     qdr_connection_info_free(conn->connection_info);
     free_qdr_connection_t(conn);
 }
@@ -1166,7 +1257,6 @@ static void qdr_connection_closed_CT(qdr_core_t *core, qdr_action_t *action, boo
         return;
 
     qdr_connection_t *conn = action->args.connection.conn;
-
 
     //
     // Deactivate routes associated with this connection
@@ -1207,8 +1297,7 @@ static void qdr_connection_closed_CT(qdr_core_t *core, qdr_action_t *action, boo
         //
         // Clean up the link and all its associated state.
         //
-        qdr_link_cleanup_CT(core, conn, link); // link_cleanup disconnects and frees the ref.
-        free_qdr_link_t(link);
+        qdr_link_cleanup_CT(core, conn, link, "Link closed due to connection loss"); // link_cleanup disconnects and frees the ref.
         link_ref = DEQ_HEAD(conn->links);
     }
 
@@ -1218,9 +1307,7 @@ static void qdr_connection_closed_CT(qdr_core_t *core, qdr_action_t *action, boo
     qdr_connection_work_t *work = DEQ_HEAD(conn->work_list);
     while (work) {
         DEQ_REMOVE_HEAD(conn->work_list);
-        qdr_terminus_free(work->source);
-        qdr_terminus_free(work->target);
-        free_qdr_connection_work_t(work);
+        qdr_connection_work_free_CT(work);
         work = DEQ_HEAD(conn->work_list);
     }
 
@@ -1233,6 +1320,8 @@ static void qdr_connection_closed_CT(qdr_core_t *core, qdr_action_t *action, boo
     }
 
     qdrc_event_conn_raise(core, QDRC_EVENT_CONN_CLOSED, conn);
+
+    qd_log(core->log, QD_LOG_INFO, "[C%"PRIu64"] Connection Closed", conn->identity);
 
     DEQ_REMOVE(core->open_connections, conn);
     qdr_connection_free(conn);
@@ -1256,6 +1345,7 @@ static void qdr_detach_link_control_CT(qdr_core_t *core, qdr_connection_t *conn,
 {
     if (conn->role == QDR_ROLE_INTER_ROUTER) {
         qdr_del_link_ref(&core->hello_addr->rlinks, link, QDR_LINK_LIST_CLASS_ADDRESS);
+        link->owning_addr = 0;
         core->control_links_by_mask_bit[conn->mask_bit] = 0;
         qdr_post_link_lost_CT(core, conn->mask_bit);
     }
@@ -1348,6 +1438,7 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
         qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_FORBIDDEN, true);
         qdr_terminus_free(source);
         qdr_terminus_free(target);
+        qd_log(core->log, QD_LOG_INFO, "[C%"PRIu64"] Router attach forbidden on non-inter-router connection", conn->identity);
         return;
     }
 
@@ -1361,7 +1452,25 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
         qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_WRONG_ROLE, true);
         qdr_terminus_free(source);
         qdr_terminus_free(target);
+        qd_log(core->log, QD_LOG_INFO, "[C%"PRIu64"] Endpoint attach forbidden on inter-router connection", conn->identity);
         return;
+    }
+
+    char   source_str[1000];
+    char   target_str[1000];
+    size_t source_len = 1000;
+    size_t target_len = 1000;
+
+    source_str[0] = '\0';
+    target_str[0] = '\0';
+
+    //
+    // Grab the formatted terminus strings before we schedule any IO-thread processing that
+    // might get ahead of us and free the terminus objects before we issue the log.
+    //
+    if (qd_log_enabled(core->log, QD_LOG_INFO)) {
+        qdr_terminus_format(source, source_str, &source_len);
+        qdr_terminus_format(target, target_str, &target_len);
     }
 
     if (dir == QD_INCOMING) {
@@ -1385,6 +1494,7 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
                     qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_NO_ROUTE_TO_DESTINATION, true);
                     qdr_terminus_free(source);
                     qdr_terminus_free(target);
+                    qd_log(core->log, QD_LOG_INFO, "[C%"PRIu64"] Endpoint attach failed - no address lookup handler", conn->identity);
                     return;
                 }
             }
@@ -1412,6 +1522,7 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
                 qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_NO_ROUTE_TO_DESTINATION, true);
                 qdr_terminus_free(source);
                 qdr_terminus_free(target);
+                    qd_log(core->log, QD_LOG_INFO, "[C%"PRIu64"] Endpoint attach failed - no address lookup handler", conn->identity);
                 return;
             }
             break;
@@ -1433,6 +1544,9 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
             break;
         }
     }
+
+    qd_log(core->log, QD_LOG_INFO, "[C%"PRIu64"][L%"PRIu64"] Link attached: dir=%s source=%s target=%s",
+           conn->identity, link->identity, dir == QD_INCOMING ? "in" : "out", source_str, target_str);
 }
 
 
@@ -1562,7 +1676,7 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
     ++link->detach_count;
 
     if (link->core_endpoint) {
-        qdrc_endpoint_do_detach_CT(core, link->core_endpoint, error);
+        qdrc_endpoint_do_detach_CT(core, link->core_endpoint, error, dt);
         return;
 
     } else {
@@ -1588,10 +1702,8 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
             //
             // If the link is completely detached, release its resources
             //
-            if (link->detach_send_done) {
-                qdr_link_cleanup_CT(core, conn, link);
-                free_qdr_link_t(link);
-            }
+            if (link->detach_send_done)
+                qdr_link_cleanup_protected_CT(core, conn, link, "Link detached");
 
             return;
         }
@@ -1683,13 +1795,12 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
             qdr_link_outbound_detach_CT(core, link, 0, QDR_CONDITION_NONE, dt == QD_CLOSED);
         } else {
             // no detach can be sent out because the connection was lost
-            qdr_link_cleanup_CT(core, conn, link);
-            free_qdr_link_t(link);
+            qdr_link_cleanup_protected_CT(core, conn, link, "Link lost");
         }
     } else if (link->detach_send_done) {  // detach count indicates detach has been scheduled
         // I/O thread is finished sending detach, ok to free link now
-        qdr_link_cleanup_CT(core, conn, link);
-        free_qdr_link_t(link);
+
+        qdr_link_cleanup_protected_CT(core, conn, link, "Link detached");
     }
 
     //
@@ -1715,11 +1826,19 @@ static void qdr_link_detach_sent_CT(qdr_core_t *core, qdr_action_t *action, bool
 
     if (link) {
         link->detach_send_done = true;
-        if (link->conn && link->detach_received) {
-            // link is fully detached
-            qdr_link_cleanup_CT(core, link->conn, link);
-            free_qdr_link_t(link);
-        }
+        if (link->conn && link->detach_received)
+            qdr_link_cleanup_protected_CT(core, link->conn, link, "Link detached");
+    }
+}
+
+
+static void qdr_link_processing_complete_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
+{
+    if (!discard) {
+        qdr_link_t *link = action->args.connection.link;
+
+        if (link)
+            qdr_link_cleanup_CT(core, link->conn, link, "Link cleanup deferred after IO processing");
     }
 }
 

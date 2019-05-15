@@ -17,7 +17,13 @@
 ## under the License.
 ##
 
-# Set default build type. Must come before project() which sets default to ""
+cmake_minimum_required(VERSION 2.8.12)
+project(qpid-dispatch C)
+
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
+set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+
+# Set default build type. Must use FORCE because project() sets default to ""
 if (NOT CMAKE_BUILD_TYPE)
   set (CMAKE_BUILD_TYPE RelWithDebInfo CACHE string
     "Build type: Debug, Release, RelWithDebInfo, MinSizeRel or Coverage (default RelWithDebInfo)" FORCE)
@@ -27,23 +33,31 @@ if (CMAKE_BUILD_TYPE MATCHES "Deb|Cover")
 endif (CMAKE_BUILD_TYPE MATCHES "Deb|Cover")
 message(STATUS "Build type is \"${CMAKE_BUILD_TYPE}\"${has_debug_symbols}")
 
-project(qpid-dispatch C)
-
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
-
 # Build time switch to turn off memory pooling.
 option(USE_MEMORY_POOL "Use per-thread memory pools" ON)
 option(QD_MEMORY_STATS "Track memory pool usage statistics" ON)
 
 file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION.txt" QPID_DISPATCH_VERSION)
 
-cmake_minimum_required(VERSION 2.6.2)
 include(CheckLibraryExists)
 include(CheckSymbolExists)
 include(CheckFunctionExists)
 include(CheckIncludeFiles)
-include(FindPythonInterp)
-include(FindPythonLibs)
+
+##
+## Find dependencies
+##
+find_library(rt_lib rt)
+
+find_package(PythonInterp REQUIRED)
+find_package(PythonLibs REQUIRED)
+find_package(Threads REQUIRED)
+find_package(Proton 0.23 REQUIRED COMPONENTS Core Proactor)
+message(STATUS "Found Proton: ${Proton_LIBRARIES} (found version \"${Proton_VERSION}\")" )
+
+## Optional dependencies
+find_package(LibWebSockets)
+option(USE_LIBWEBSOCKETS "Use libwebsockets for WebSocket support" ${LIBWEBSOCKETS_FOUND})
 
 
 if (PYTHON_VERSION_MAJOR STREQUAL 3)
@@ -65,10 +79,6 @@ else(UNITTEST2_MISSING)
   include (CTest)
 endif(UNITTEST2_MISSING)
 
-
-if (NOT PYTHONLIBS_FOUND)
-     message(FATAL_ERROR "Python Development Libraries are needed.")
-endif (NOT PYTHONLIBS_FOUND)
 
 set (SO_VERSION_MAJOR 2)
 set (SO_VERSION_MINOR 0)
@@ -94,7 +104,7 @@ set(QPID_DISPATCH_HOME_INSTALLED ${CMAKE_INSTALL_PREFIX}/${QPID_DISPATCH_HOME})
 
 set(CONSOLE_BASE_INSTALL_DIR "share/qpid-dispatch/console")
 set(CONSOLE_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/${CONSOLE_BASE_INSTALL_DIR}")
-set(CONSOLE_STAND_ALONE_INSTALL_DIR "${CONSOLE_INSTALL_DIR}/stand-alone")
+set(CONSOLE_STAND_ALONE_INSTALL_DIR "${CONSOLE_INSTALL_DIR}")
 
 set(RUN ${PYTHON_EXECUTABLE} ${CMAKE_BINARY_DIR}/run.py)
 
@@ -115,54 +125,9 @@ if (NOT COMMAND add_compile_options)
   endmacro (add_compile_options)
 endif (NOT COMMAND add_compile_options)
 
-##
-## Find dependencies
-##
-find_library(pthread_lib pthread)
-find_library(dl_lib dl)
-find_library(rt_lib rt)
+# Set up runtime checks (valgrind, sanitizers etc.)
+include(cmake/RuntimeChecks.cmake)
 
-find_package(Proton 0.23 REQUIRED)
-
-message(STATUS "Found Proton: ${Proton_LIBRARIES} (found version \"${Proton_VERSION}\")" )
-
-## Optional dependencies
-include(FindLibWebSockets)
-option(USE_LIBWEBSOCKETS "Use libwebsockets for WebSocket support" ${LIBWEBSOCKETS_FOUND})
-
-##
-## Find Valgrind
-##
-find_program(VALGRIND_EXECUTABLE valgrind DOC "Location of the valgrind program")
-mark_as_advanced(VALGRIND_EXECUTABLE)
-find_package_handle_standard_args(VALGRIND DEFAULT_MSG VALGRIND_EXECUTABLE)
-option(USE_VALGRIND "Use valgrind when running tests" OFF)
-option(VALGRIND_XML "Write valgrind output as XML" OFF)
-
-if (USE_VALGRIND)
-  if (CMAKE_BUILD_TYPE MATCHES "Coverage")
-    message(WARNING "Building for coverage analysis; disabling valgrind run-time error detection")
-  else ()
-    set(TEST_RUNNER "${VALGRIND_EXECUTABLE} --quiet --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite --error-exitcode=42 --suppressions=${CMAKE_SOURCE_DIR}/tests/valgrind.supp")
-    if (VALGRIND_XML)
-      set(TEST_RUNNER "${TEST_RUNNER} --xml=yes --xml-file=valgrind-%p.xml")
-    endif()
-  endif ()
-endif()
-
-option(USE_SANITIZERS "Compile with sanitizers (ASan, UBSan, TSan); incompatible with Valgrind" OFF)
-if (USE_SANITIZERS)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize=leak -fsanitize=undefined")
-  add_compile_options(-g)
-  add_compile_options(-fno-omit-frame-pointer)
-endif (USE_SANITIZERS)
-
-option(USE_TSAN "Compile with ThreadSanitizer (TSan); incompatible with Valgrind" OFF)
-if (USE_TSAN)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=thread")
-  add_compile_options(-g)
-  add_compile_options(-fno-omit-frame-pointer)
-endif (USE_TSAN)
 
 ##
 ## Include directories used by all sub-directories.
@@ -184,7 +149,6 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
     add_compile_options(-Wpedantic)
  endif(HAS_PEDANTIC_FLAG)
  add_compile_options(-std=gnu99)
- add_compile_options(-pthread)
  if (CMAKE_BUILD_TYPE MATCHES "Coverage")
    set (CMAKE_C_FLAGS_COVERAGE "-g -O0 --coverage")
    set (CMAKE_EXE_LINKER_FLAGS_COVERAGE "--coverage")
@@ -203,7 +167,6 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
 else (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
  add_compile_options(-xc99)
  add_compile_options(-errwarn=%all)
- add_compile_options(-lpthread)
 endif (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
 
 if (CMAKE_C_COMPILER_ID MATCHES "Clang")
@@ -251,6 +214,8 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_handle_failover.py
 execute_process(COMMAND ${RUN} --sh OUTPUT_FILE config.sh)
 
 if (NOT UNITTEST2_MISSING)
+  file(GLOB SCRAPER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tools/scraper/*.py)
+  file(COPY ${SCRAPER_SRC} DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/tests/scraper/)
   add_subdirectory(tests)
 endif(NOT UNITTEST2_MISSING)
 add_subdirectory(python)

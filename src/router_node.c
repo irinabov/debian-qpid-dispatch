@@ -292,7 +292,7 @@ static void log_link_message(qd_connection_t *conn, pn_link_t *pn_link, qd_messa
         const char *src = pn_terminus_get_address(pn_link_source(pn_link));
         const char *tgt = pn_terminus_get_address(pn_link_target(pn_link));
         qd_log(qd_message_log_source(), QD_LOG_TRACE,
-               "[%"PRIu64"]: %s %s on link '%s' (%s -> %s)",
+               "[C%"PRIu64"]: %s %s on link '%s' (%s -> %s)",
                qd_connection_connection_id(conn),
                pn_link_is_sender(pn_link) ? "Sent" : "Received",
                msg_str,
@@ -375,15 +375,7 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
             // We should not continue processing the message after it has been discarded
             //
             if (!qd_message_is_discard(msg)) {
-                qdr_deliver_continue(delivery);
-
-                //
-                // Settle the proton delivery only if all the data has been received.
-                //
-                if (pn_delivery_settled(pnd) && receive_complete) {
-                    qdr_node_disconnect_deliveries(router->router_core, link, delivery, pnd);
-                    pn_delivery_settle(pnd);
-                }
+                qdr_deliver_continue(router->router_core, delivery);
             }
         }
         else {
@@ -460,13 +452,7 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
         // We should not continue processing the message after it has been discarded
         //
         if (!qd_message_is_discard(msg)) {
-            qdr_deliver_continue(delivery);
-            if (receive_complete) {
-                if (pn_delivery_settled(pnd)) {
-                    qdr_node_disconnect_deliveries(router->router_core, link, delivery, pnd);
-                    pn_delivery_settle(pnd);
-                }
-            }
+            qdr_deliver_continue(router->router_core, delivery);
         }
 
         return next_delivery;
@@ -513,6 +499,7 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
         pn_delivery_update(pnd, PN_RELEASED);
         pn_delivery_settle(pnd);
         qd_message_free(msg);
+        qd_bitmask_free(link_exclusions);
         return next_delivery;
     }
 
@@ -549,11 +536,23 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
         }
 
         if (addr_iter) {
-            qd_iterator_reset_view(addr_iter, ITER_VIEW_ADDRESS_HASH);
-            if (phase > 0)
-                qd_iterator_annotate_phase(addr_iter, '0' + (char) phase);
-            delivery = qdr_link_deliver_to(rlink, msg, ingress_iter, addr_iter, pn_delivery_settled(pnd),
-                                           link_exclusions, ingress_index);
+            if (!conn->policy_settings || qd_policy_approve_message_target(addr_iter, conn)) {
+                qd_iterator_reset_view(addr_iter, ITER_VIEW_ADDRESS_HASH);
+                if (phase > 0)
+                    qd_iterator_annotate_phase(addr_iter, '0' + (char) phase);
+                delivery = qdr_link_deliver_to(rlink, msg, ingress_iter, addr_iter, pn_delivery_settled(pnd),
+                                               link_exclusions, ingress_index);
+            } else {
+                //reject
+                qd_log(router->log_source, QD_LOG_DEBUG, "Message rejected due to policy violation on target. User:%s", conn->user_id);
+                pn_link_flow(pn_link, 1);
+                pn_delivery_update(pnd, PN_REJECTED);
+                pn_delivery_settle(pnd);
+                qd_message_free(msg);
+                qd_iterator_free(addr_iter);
+                qd_bitmask_free(link_exclusions);
+                return next_delivery;
+            }
         }
     } else {
         //
@@ -589,26 +588,14 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
         delivery = qdr_link_deliver(rlink, msg, ingress_iter, pn_delivery_settled(pnd), link_exclusions, ingress_index);
     }
 
-
-
     if (delivery) {
-        //
-        // Settle the proton delivery only if all the data has arrived
-        //
-        if (pn_delivery_settled(pnd)) {
-            if (receive_complete) {
-                pn_delivery_settle(pnd);
-                qdr_delivery_decref(router->router_core, delivery, "release protection of return from deliver");
-                return next_delivery;
-            }
-        }
-
         qdr_node_connect_deliveries(link, delivery, pnd);
         qdr_delivery_decref(router->router_core, delivery, "release protection of return from deliver");
     } else {
         //
         // If there is no delivery, the message is now and will always be unroutable because there is no address.
         //
+        qd_bitmask_free(link_exclusions);
         qd_message_set_discard(msg, true);
         pn_link_flow(pn_link, 1);
         pn_delivery_update(pnd, PN_REJECTED);
@@ -623,16 +610,23 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
 /**
  * Deferred callback for inbound delivery handler
  */
-static void deferred_AMQP_rx_handler(void *context, bool discard) {
+static void deferred_AMQP_rx_handler(void *context, bool discard)
+{
+    qd_link_t_sp *safe_qdl = (qd_link_t_sp*) context;
+
     if (!discard) {
-        qd_link_t     *qdl = (qd_link_t*)context;
-        qd_router_t   *qdr = (qd_router_t *)qd_link_get_node_context(qdl);
-        assert(qdr != 0);
-        while (true) {
-            if (! AMQP_rx_handler(qdr, qdl))
-                break;
+        qd_link_t *qdl = safe_deref_qd_link_t(*safe_qdl);
+        if (!!qdl) {
+            qd_router_t *qdr = (qd_router_t*) qd_link_get_node_context(qdl);
+            assert(qdr != 0);
+            while (true) {
+                if (!AMQP_rx_handler(qdr, qdl))
+                    break;
+            }
         }
     }
+
+    free(safe_qdl);
 }
 
 
@@ -770,20 +764,20 @@ static int AMQP_link_detach_handler(void* context, qd_link_t *link, qd_detach_ty
     if (!link)
         return 0;
 
-    pn_link_t      *pn_link      = qd_link_pn(link);
-
+    pn_link_t *pn_link = qd_link_pn(link);
     if (!pn_link)
         return 0;
 
-    pn_delivery_t  *pnd          = pn_link_current(pn_link);
-
+    pn_delivery_t *pnd = pn_link_current(pn_link);
     if (pnd) {
         qd_message_t *msg = qd_get_message_context(pnd);
         if (msg) {
             if (!qd_message_receive_complete(msg)) {
                 qd_link_set_q2_limit_unbounded(link, true);
                 qd_message_Q2_holdoff_disable(msg);
-                deferred_AMQP_rx_handler((void *)link, false);
+                qd_link_t_sp *safe_ptr = NEW(qd_link_t_sp);
+                set_safe_ptr_qd_link_t(link, safe_ptr);
+                deferred_AMQP_rx_handler(safe_ptr, false);
             }
         }
 
@@ -1134,15 +1128,18 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
     }
 
 
-    qdr_connection_info_t *connection_info = qdr_connection_info(tport && pn_transport_is_encrypted(tport),
-                                                                 tport && pn_transport_is_authenticated(tport),
+    bool encrypted     = tport && pn_transport_is_encrypted(tport);
+    bool authenticated = tport && pn_transport_is_authenticated(tport);
+
+    qdr_connection_info_t *connection_info = qdr_connection_info(encrypted,
+                                                                 authenticated,
                                                                  conn->opened,
-                                                                 (char *)mech,
+                                                                 (char*) mech,
                                                                  conn->connector ? QD_OUTGOING : QD_INCOMING,
                                                                  host,
                                                                  proto,
                                                                  cipher,
-                                                                 (char *)user,
+                                                                 (char*) user,
                                                                  container,
                                                                  props,
                                                                  ssl_ssf,
@@ -1153,10 +1150,21 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
                           conn->strip_annotations_in,
                           conn->strip_annotations_out,
                           conn->policy_settings ? conn->policy_settings->allowDynamicLinkRoutes : true,
+                          conn->policy_settings ? conn->policy_settings->allowAdminStatusUpdate : true,
                           link_capacity,
                           vhost,
                           connection_info,
                           bind_connection_context, conn);
+
+    char   props_str[1000];
+    size_t props_len = 1000;
+
+    pn_data_format(props, props_str, &props_len);
+
+    qd_log(router->log_source, QD_LOG_INFO, "[C%"PRIu64"] Connection Opened: dir=%s host=%s vhost=%s encrypted=%s"
+           " auth=%s user=%s container_id=%s props=%s",
+           connection_id, inbound ? "in" : "out", host, vhost ? vhost : "", encrypted ? proto : "no",
+           authenticated ? mech : "no", (char*) user, container, props_str);
 }
 
 static int AMQP_inbound_opened_handler(void *type_context, qd_connection_t *conn, void *context)
@@ -1328,6 +1336,27 @@ static void CORE_link_second_attach(void *context, qdr_link_t *link, qdr_terminu
     pn_link_open(qd_link_pn(qlink));
 }
 
+static void CORE_close_connection(void *context, qdr_connection_t *qdr_conn, qdr_error_t *error)
+{
+    if (qdr_conn) {
+        qd_connection_t *qd_conn = qdr_connection_get_context(qdr_conn);
+        if (qd_conn) {
+            pn_connection_t *pn_conn = qd_connection_pn(qd_conn);
+            if (pn_conn) {
+                //
+                // Go down to the transport and close the head and tail.  This will
+                // drop the socket to the peer without providing any error indication.
+                // Due to issues in Proton that cause different behaviors in different
+                // bindings depending on whether there is a connection:forced error,
+                // this has been deemed the best way to force the peer to reconnect.
+                //
+                pn_transport_t *tport = pn_connection_transport(pn_conn);
+                pn_transport_close_head(tport);
+                pn_transport_close_tail(tport);
+            }
+        }
+    }
+}
 
 static void CORE_link_detach(void *context, qdr_link_t *link, qdr_error_t *error, bool first, bool close)
 {
@@ -1494,17 +1523,16 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
         //
         // If the remote send settle mode is set to 'settled', we should settle the delivery on behalf of the receiver.
         //
-        if (!settled && !remote_snd_settled) {
-            if (qdr_delivery_get_context(dlv) == 0)
-                qdr_node_connect_deliveries(qlink, dlv, pdlv);
-        }
+        if (qdr_delivery_get_context(dlv) == 0)
+            qdr_node_connect_deliveries(qlink, dlv, pdlv);
 
         qdr_delivery_set_tag_sent(dlv, true);
+    } else {
+        pdlv = qdr_node_delivery_pn_from_qdr(dlv);
     }
 
-    if (!pdlv) {
-        pdlv = pn_link_current(plink);
-    }
+    if (!pdlv)
+        return 0;
 
     bool restart_rx = false;
     bool q3_stalled = false;
@@ -1521,7 +1549,9 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
         if (qdl_in) {
             qd_connection_t *qdc_in = qd_link_connection(qdl_in);
             if (qdc_in) {
-                qd_connection_invoke_deferred(qdc_in, deferred_AMQP_rx_handler, qdl_in);
+                qd_link_t_sp *safe_ptr = NEW(qd_link_t_sp);
+                set_safe_ptr_qd_link_t(qdl_in, safe_ptr);
+                qd_connection_invoke_deferred(qdc_in, deferred_AMQP_rx_handler, safe_ptr);
             }
         }
     }
@@ -1533,9 +1563,8 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
             // Aborted messages must be settled locally
             // Settling does not produce any disposition to message sender.
             if (pdlv) {
-                if (qdr_delivery_get_context(dlv) != 0)
-                    qdr_node_disconnect_deliveries(router->router_core, qlink, dlv, pdlv);
                 pn_link_advance(plink);
+                qdr_node_disconnect_deliveries(router->router_core, qlink, dlv, pdlv);
                 pn_delivery_settle(pdlv);
             }
         } else {
@@ -1549,8 +1578,10 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
             pn_link_advance(plink);
 
             if (settled || remote_snd_settled) {
-                if (pdlv)
+                if (pdlv) {
+                    qdr_node_disconnect_deliveries(router->router_core, qlink, dlv, pdlv);
                     pn_delivery_settle(pdlv);
+                }
             }
         }
         log_link_message(qconn, plink, msg_out);
@@ -1644,7 +1675,9 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
                 qdr_delivery_set_disposition(dlv, disp);
                 qd_message_set_discard(msg, true);
                 qd_message_Q2_holdoff_disable(msg);
-                qd_connection_invoke_deferred(qd_conn, deferred_AMQP_rx_handler, link);
+                qd_link_t_sp *safe_ptr = NEW(qd_link_t_sp);
+                set_safe_ptr_qd_link_t(link, safe_ptr);
+                qd_connection_invoke_deferred(qd_conn, deferred_AMQP_rx_handler, safe_ptr);
             }
         }
     }
@@ -1667,7 +1700,8 @@ void qd_router_setup_late(qd_dispatch_t *qd)
                             CORE_link_drain,
                             CORE_link_push,
                             CORE_link_deliver,
-                            CORE_delivery_update);
+                            CORE_delivery_update,
+                            CORE_close_connection);
 
     qd_router_python_setup(qd->router);
     qd_timer_schedule(qd->router->timer, 1000);
