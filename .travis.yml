@@ -24,7 +24,7 @@ language: c
 cache: ccache
 env:
   - PROTON_VERSION=master BUILD_TYPE=Coverage
-  - PROTON_VERSION=0.28.0 BUILD_TYPE=RelWithDebInfo
+  - PROTON_VERSION=0.26.0 BUILD_TYPE=RelWithDebInfo
 
 addons:
   apt:
