@@ -26,7 +26,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.apache.qpid</groupId>
     <artifactId>qpid-dispatch</artifactId>
-    <version>1.5.0</version>
+    <version>1.7.0</version>
     <name>QpidDispatch</name>
     <inceptionYear>2018</inceptionYear>
     <url>https://qpid.apache.org</url>   
@@ -97,6 +97,7 @@
                       <exclude>**/valgrind.supp</exclude>
                       <exclude>**/*.json.in</exclude>
                       <exclude>**/*.json</exclude>
+                      <exclude>**/*.svg</exclude>
                       <exclude>**/rhea-min.js</exclude>
                       <exclude>**/VERSION.txt</exclude>
                       <exclude>**/v3_ca.ext</exclude>

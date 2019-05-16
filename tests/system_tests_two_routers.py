@@ -23,20 +23,20 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 from time import sleep
-import json
+import json, os
 import unittest2 as unittest
 import logging
 from threading import Timer
 from subprocess import PIPE, STDOUT
 from proton import Message, Timeout, Delivery
-from system_test import TestCase, Process, Qdrouterd, main_module, TIMEOUT
+from system_test import TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR
 from system_test import AsyncTestReceiver
 
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, AtLeastOnce
 from proton.utils import BlockingConnection
 from qpid_dispatch.management.client import Node
-
+CONNECTION_PROPERTIES_UNICODE_STRING = {u'connection': u'properties', u'int_property': 6451}
 
 class TwoRouterTest(TestCase):
 
@@ -48,13 +48,13 @@ class TwoRouterTest(TestCase):
         super(TwoRouterTest, cls).setUpClass()
 
         def router(name, client_server, connection):
+            policy_config_path = os.path.join(DIR, 'two-router-policy')
 
             config = [
                 # Use the deprecated attributes helloInterval, raInterval, raIntervalFlux, remoteLsMaxAge
                 # The routers should still start successfully after using these deprecated entities.
                 ('router', {'remoteLsMaxAge': 60, 'helloInterval': 1, 'raInterval': 30, 'raIntervalFlux': 4,
                             'mode': 'interior', 'id': 'QDR.%s'%name, 'allowUnsettledMulticast': 'yes'}),
-
                 ('listener', {'port': cls.tester.get_port(), 'stripAnnotations': 'no', 'linkCapacity': 500}),
 
                 ('listener', {'port': cls.tester.get_port(), 'stripAnnotations': 'no'}),
@@ -99,6 +99,21 @@ class TwoRouterTest(TestCase):
 
         cls.routers[0].wait_router_connected('QDR.B')
         cls.routers[1].wait_router_connected('QDR.A')
+
+    def address(self):
+        return self.routers[0].addresses[0]
+
+    def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
+        p = self.popen(
+            ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address(), '--indent=-1', '--timeout', str(TIMEOUT)],
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
+            universal_newlines=True)
+        out = p.communicate(input)[0]
+        try:
+            p.teardown()
+        except Exception as e:
+            raise Exception(out if out else str(e))
+        return out
 
     def test_01_pre_settled(self):
         test = DeliveriesInTransit(self.routers[0].addresses[0], self.routers[1].addresses[0])
@@ -262,6 +277,188 @@ class TwoRouterTest(TestCase):
         test.run()
         self.assertEqual(None, test.error)
 
+    def test_18_single_char_dest_test(self):
+        test = SingleCharacterDestinationTest(self.routers[0].addresses[0], self.routers[1].addresses[0])
+        test.run()
+        self.assertEqual(None, test.error)
+
+    def test_19_delete_inter_router_connection(self):
+        """
+        This test tries to delete an inter-router connection but is
+        prevented from doing so.
+        """
+        query_command = 'QUERY --type=connection'
+        outputs = json.loads(self.run_qdmanage(query_command))
+        identity = None
+        passed = False
+
+        for output in outputs:
+            if "inter-router" == output['role']:
+                identity = output['identity']
+                if identity:
+                    update_command = 'UPDATE --type=connection adminStatus=deleted --id=' + identity
+                    try:
+                        json.loads(self.run_qdmanage(update_command))
+                    except Exception as e:
+                        if "Forbidden" in str(e):
+                            passed = True
+
+        # The test has passed since we were forbidden from deleting
+        # inter-router connections even though we are allowed to update the adminStatus field.
+        self.assertTrue(passed)
+
+    def test_20_delete_connection(self):
+        """
+        This test creates a blocking connection and tries to delete that connection.
+        Since  there is no policy associated with this router, the default for allowAdminStatusUpdate is true,
+        the delete operation will be permitted.
+        """
+
+        # Create a connection with some properties so we can easily identify the connection
+        connection = BlockingConnection(self.address(),
+                                        properties=CONNECTION_PROPERTIES_UNICODE_STRING)
+        query_command = 'QUERY --type=connection'
+        outputs = json.loads(self.run_qdmanage(query_command))
+        identity = None
+        passed = False
+
+        print ()
+
+        for output in outputs:
+            if output.get('properties'):
+                conn_properties = output['properties']
+                # Find the connection that has our properties - CONNECTION_PROPERTIES_UNICODE_STRING
+                # Delete that connection and run another qdmanage to see
+                # if the connection is gone.
+                if conn_properties.get('int_property'):
+                    identity = output.get("identity")
+                    if identity:
+                        update_command = 'UPDATE --type=connection adminStatus=deleted --id=' + identity
+                        try:
+                            self.run_qdmanage(update_command)
+                            query_command = 'QUERY --type=connection'
+                            outputs = json.loads(
+                                self.run_qdmanage(query_command))
+                            no_properties = True
+                            for output in outputs:
+                                if output.get('properties'):
+                                    no_properties = False
+                                    conn_properties = output['properties']
+                                    if conn_properties.get('int_property'):
+                                        passed = False
+                                        break
+                                    else:
+                                        passed = True
+                            if no_properties:
+                                passed = True
+                        except Exception as e:
+                            passed = False
+
+        # The test has passed since we were allowed to delete a connection
+        # because we have the policy permission to do so.
+        self.assertTrue(passed)
+
+    def test_21_delete_connection_with_receiver(self):
+        test = DeleteConnectionWithReceiver(self.routers[0].addresses[0])
+        self.assertEqual(test.error, None)
+        test.run()
+
+class DeleteConnectionWithReceiver(MessagingHandler):
+    def __init__(self, address):
+        super(DeleteConnectionWithReceiver, self).__init__()
+        self.address = address
+        self.mgmt_receiver = None
+        self.mgmt_receiver_1 = None
+        self.mgmt_receiver_2 = None
+        self.conn_to_kill = None
+        self.mgmt_conn = None
+        self.mgmt_sender = None
+        self.success = False
+        self.error = None
+
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+
+        # Create a receiver connection with some properties so it
+        # can be easily identified.
+        self.conn_to_kill = event.container.connect(self.address, properties=CONNECTION_PROPERTIES_UNICODE_STRING)
+        self.receiver_to_kill = event.container.create_receiver(self.conn_to_kill, "hello_world")
+        self.mgmt_conn = event.container.connect(self.address)
+        self.mgmt_sender = event.container.create_sender(self.mgmt_conn)
+        self.mgmt_receiver = event.container.create_receiver(self.mgmt_conn, None, dynamic=True)
+        self.mgmt_receiver_1 = event.container.create_receiver(self.mgmt_conn,
+                                                             None,
+                                                             dynamic=True)
+        self.mgmt_receiver_2 = event.container.create_receiver(self.mgmt_conn,
+                                                             None,
+                                                             dynamic=True)
+    def timeout(self):
+        self.error = "Timeout Expired: sent=%d, received=%d" % (self.n_sent, self.n_received)
+        self.mgmt_conn.close()
+
+    def bail(self, error):
+        self.error = error
+        self.timer.cancel()
+        self.mgmt_conn.close()
+        self.conn_to_kill.close()
+
+    def on_link_opened(self, event):
+        if event.receiver == self.mgmt_receiver:
+            request = Message()
+            request.address = "amqp:/_local/$management"
+            request.properties = {
+                u'type': u'org.apache.qpid.dispatch.connection',
+                u'operation': u'QUERY'}
+            request.reply_to = self.mgmt_receiver.remote_source.address
+            self.mgmt_sender.send(request)
+
+    def on_message(self, event):
+        if event.receiver == self.mgmt_receiver:
+            attribute_names = event.message.body['attributeNames']
+            property_index = attribute_names .index('properties')
+            identity_index = attribute_names .index('identity')
+
+            for result in event.message.body['results']:
+                if result[property_index]:
+                    properties = result[property_index]
+                    if properties.get('int_property'):
+                        identity = result[identity_index]
+                        if identity:
+                            request = Message()
+                            request.address = "amqp:/_local/$management"
+                            request.properties = {
+                                u'identity': identity,
+                                u'type': u'org.apache.qpid.dispatch.connection',
+                                u'operation': u'UPDATE'
+                            }
+                            request.body = {
+                                u'adminStatus':  u'deleted'}
+                            request.reply_to = self.mgmt_receiver_1.remote_source.address
+                            self.mgmt_sender.send(request)
+        elif event.receiver == self.mgmt_receiver_1:
+            if event.message.properties['statusDescription'] == 'OK' and event.message.body['adminStatus'] == 'deleted':
+                request = Message()
+                request.address = "amqp:/_local/$management"
+                request.properties = {u'type': u'org.apache.qpid.dispatch.connection',
+                                      u'operation': u'QUERY'}
+                request.reply_to = self.mgmt_receiver_2.remote_source.address
+                self.mgmt_sender.send(request)
+
+        elif event.receiver == self.mgmt_receiver_2:
+            attribute_names = event.message.body['attributeNames']
+            property_index = attribute_names .index('properties')
+            identity_index = attribute_names .index('identity')
+
+            for result in event.message.body['results']:
+                if result[property_index]:
+                    properties = result[property_index]
+                    if properties and properties.get('int_property'):
+                        self.bail("Connection not deleted")
+            self.bail(None)
+
+    def run(self):
+        Container(self).run()
 
 class Timeout(object):
     def __init__(self, parent):
@@ -269,6 +466,55 @@ class Timeout(object):
 
     def on_timer_task(self, event):
         self.parent.timeout()
+
+
+class SingleCharacterDestinationTest(MessagingHandler):
+    def __init__(self, address1, address2):
+        super(SingleCharacterDestinationTest, self).__init__()
+        self.address1 = address1
+        self.address2 = address2
+        self.dest = "x"
+        self.error = None
+        self.conn1 = None
+        self.conn2 = None
+        self.count = 1
+        self.n_sent = 0
+        self.timer = None
+        self.sender = None
+        self.receiver = None
+        self.n_received = 0
+        self.body = "xyz"
+
+    def check_if_done(self):
+        if self.n_received == self.count:
+            self.timer.cancel()
+            self.conn1.close()
+            self.conn2.close()
+
+    def timeout(self):
+        self.error = "Timeout Expired: sent=%d, received=%d" % (self.n_sent, self.n_received)
+        self.conn1.close()
+        self.conn2.close()
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.conn1 = event.container.connect(self.address1)
+        self.conn2 = event.container.connect(self.address2)
+        self.sender = event.container.create_sender(self.conn1, self.dest)
+        self.receiver = event.container.create_receiver(self.conn2, self.dest)
+
+    def on_sendable(self, event):
+        if self.n_sent < self.count:
+            msg = Message(body=self.body)
+            event.sender.send(msg)
+            self.n_sent += 1
+
+    def on_message(self, event):
+        self.n_received += 1
+        self.check_if_done()
+
+    def run(self):
+        Container(self).run()
 
 
 class LargeMessageStreamTest(MessagingHandler):
@@ -557,7 +803,6 @@ class ManagementTest(MessagingHandler):
         self.sent_count = 0
         self.msg_not_sent = True
         self.error = None
-        self.num_messages = 0
         self.response1 = False
         self.response2 = False
 
@@ -573,23 +818,21 @@ class ManagementTest(MessagingHandler):
         self.sender = event.container.create_sender(self.conn)
         self.receiver = event.container.create_receiver(self.conn, None, dynamic=True)
 
-    def on_sendable(self, event):
-        if self.num_messages < 2:
+    def on_link_opened(self, event):
+        if event.receiver == self.receiver:
             request = Message()
             request.correlation_id = "C1"
             request.address = "amqp:/_local/$management"
             request.properties = {u'type': u'org.amqp.management', u'name': u'self', u'operation': u'GET-MGMT-NODES'}
             request.reply_to = self.receiver.remote_source.address
-            event.sender.send(request)
-            self.num_messages += 1
+            self.sender.send(request)
 
             request = Message()
             request.address = "amqp:/_topo/0/QDR.B/$management"
             request.correlation_id = "C2"
             request.reply_to = self.receiver.remote_source.address
             request.properties = {u'type': u'org.amqp.management', u'name': u'self', u'operation': u'GET-MGMT-NODES'}
-            event.sender.send(request)
-            self.num_messages += 1
+            self.sender.send(request)
 
     def on_message(self, event):
         if event.receiver == self.receiver:

@@ -365,12 +365,6 @@ static qd_error_t listener_setup_ssl(qd_connection_t *ctx, const qd_server_confi
         pn_ssl_domain_free(domain);
         return qd_error(QD_ERROR_RUNTIME, "Cannot set SSL credentials");
     }
-    if (!config->ssl_required) {
-        if (pn_ssl_domain_allow_unsecured_client(domain)) {
-            pn_ssl_domain_free(domain);
-            return qd_error(QD_ERROR_RUNTIME, "Cannot allow unsecured client");
-        }
-    }
 
     // for peer authentication:
     if (config->ssl_trusted_certificate_db) {
@@ -410,6 +404,11 @@ static qd_error_t listener_setup_ssl(qd_connection_t *ctx, const qd_server_confi
     if (!ctx->ssl || pn_ssl_init(ctx->ssl, domain, 0)) {
         pn_ssl_domain_free(domain);
         return qd_error(QD_ERROR_RUNTIME, "Cannot initialize SSL");
+    }
+
+    // By default adding ssl to a transport forces encryption to be required, so if it's not set that here
+    if (!config->ssl_required) {
+        pn_transport_require_encryption(tport, false);
     }
 
     pn_ssl_domain_free(domain);
@@ -690,7 +689,7 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
         pn_sasl_set_allow_insecure_mechs(sasl, config->allowInsecureAuthentication);
         sys_mutex_unlock(ctx->server->lock);
 
-        qd_log(ctx->server->log_source, QD_LOG_INFO, "[%"PRIu64"]: Accepted connection to %s from %s",
+        qd_log(ctx->server->log_source, QD_LOG_INFO, "[C%"PRIu64"] Accepted connection to %s from %s",
                ctx->connection_id, name, ctx->rhost_port);
     } else if (ctx->connector) { /* Establishing an outgoing connection */
         config = &ctx->connector->config;
@@ -962,14 +961,14 @@ static bool handle(qd_server_t *qd_server, pn_event_t *e, pn_connection_t *pn_co
                 qd_increment_conn_index(ctx);
                 const qd_server_config_t *config = &ctx->connector->config;
                 if (condition  && pn_condition_is_set(condition)) {
-                    qd_log(qd_server->log_source, QD_LOG_INFO, "[%"PRIu64"]: Connection to %s failed: %s %s", ctx->connection_id, config->host_port,
+                    qd_log(qd_server->log_source, QD_LOG_INFO, "[C%"PRIu64"] Connection to %s failed: %s %s", ctx->connection_id, config->host_port,
                            pn_condition_get_name(condition), pn_condition_get_description(condition));
                 } else {
-                    qd_log(qd_server->log_source, QD_LOG_INFO, "[%"PRIu64"]: Connection to %s failed", ctx->connection_id, config->host_port);
+                    qd_log(qd_server->log_source, QD_LOG_INFO, "[C%"PRIu64"] Connection to %s failed", ctx->connection_id, config->host_port);
                 }
             } else if (ctx && ctx->listener) { /* Incoming connection */
                 if (condition && pn_condition_is_set(condition)) {
-                    qd_log(ctx->server->log_source, QD_LOG_INFO, "[%"PRIu64"]: Connection from %s (to %s) failed: %s %s",
+                    qd_log(ctx->server->log_source, QD_LOG_INFO, "[C%"PRIu64"] Connection from %s (to %s) failed: %s %s",
                            ctx->connection_id, ctx->rhost_port, ctx->listener->config.host_port, pn_condition_get_name(condition),
                            pn_condition_get_description(condition));
                 }
@@ -1459,6 +1458,12 @@ qd_connector_t *qd_server_connector(qd_server_t *server)
 }
 
 
+const char *qd_connector_policy_vhost(qd_connector_t* ct)
+{
+    return ct->policy_vhost;
+}
+
+
 bool qd_connector_connect(qd_connector_t *ct)
 {
     sys_mutex_lock(ct->lock);
@@ -1495,6 +1500,7 @@ bool qd_connector_decref(qd_connector_t* ct)
             item = DEQ_HEAD(ct->conn_info_list);
         }
         sys_mutex_free(ct->lock);
+        if (ct->policy_vhost) free(ct->policy_vhost);
         free_qd_connector_t(ct);
         return true;
     }

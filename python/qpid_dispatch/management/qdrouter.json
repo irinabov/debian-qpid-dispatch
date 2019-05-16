@@ -554,6 +554,16 @@
                     "description":"Number of deliveries whose delivery state was set to MODIFIED by the router. These deliveries were modified but not processed.",
                     "graph": true
                 },
+                "deliveriesDelayed1Sec": {
+                    "type": "integer",
+                    "graph": true,
+                    "description": "The total number of settled deliveries that were held in the router for 1 to 10 seconds."
+                },
+                "deliveriesDelayed10Sec": {
+                    "type": "integer",
+                    "graph": true,
+                    "description": "The total number of settled deliveries that were held in the router for more than 10 seconds."
+                },
                 "deliveriesIngress": {
                     "type": "integer",
                     "description":"Number of deliveries that were sent to it by a sender that is directly attached to the router.",
@@ -828,6 +838,24 @@
                     "deprecationName": "failoverList",
                     "description": "A comma-separated list of failover urls to be supplied to connected clients.  Form: [(amqp|amqps|ws|wss)://]host_or_ip[:port]"
                 },
+                "healthz": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Provide a simple HTTP based liveness test (using path /healthz). Assumes listener is enabled for http.",
+                    "create": true
+                },
+                "metrics": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Export metrics in prometheus text format for the router (using path /metrics). Assumes listener is enabled for http.",
+                    "create": true
+                },
+                "websockets": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "For an http enabled listener, determines whether websockets access is enabled (true by default).",
+                    "create": true
+                },
                 "http": {
                     "type": "boolean",
                     "default": false,
@@ -836,7 +864,7 @@
                 },
                 "httpRootDir": {
                     "type": "path",
-                    "description": "Serve HTTP files from this directory, defaults to the installed stand-alone console directory",
+                    "description": "Absolute path to a directory from which to serve static HTML files. For example, /usr/share/qpid-dispatch/console.",
                     "deprecationName": "httpRoot",
                     "create": true
                 },
@@ -845,6 +873,12 @@
                     "default": "none",
                     "description": "A comma separated list that indicates which components of the message should be logged. Defaults to 'none' (log nothing). If you want all properties and application properties of the message logged use 'all'. Specific components of the message can be logged by indicating the components via a comma separated list. The components are message-id, user-id, to, subject, reply-to, correlation-id, content-type, content-encoding, absolute-expiry-time, creation-time, group-id, group-sequence, reply-to-group-id, app-properties. The application-data part of the bare message will not be logged. No spaces are allowed",
                     "deprecationName": "logMessage",
+                    "create": true
+                },
+                "policyVhost": {
+                    "type": "string",
+                    "required": false,
+                    "description": "A listener may optionally define a virtual host to index to a specific policy to restrict the remote container to access only specific resources. This attribute defines the name of the policy vhost for this listener.  If multi-tenancy is enabled for the listener, this vhost will override the peer-supplied vhost for the purposes of identifying the desired policy settings for the connections.",
                     "create": true
                 }
             }
@@ -980,7 +1014,13 @@
                     "deprecationName": "failoverList",
                     "create": false
                     
-                }            
+                },
+                "policyVhost": {
+                    "type": "string",
+                    "required": false,
+                    "description": "A connector may optionally define a policy to restrict the remote container to access only specific resources. This attribute defines the name of the policy vhost for this connector. Within the vhost the connector will use the vhost policy settings from user group '$connector'. If the vhost policy is absent or if the user group '$connector' within that policy is absent then the connector will fail to start.  In policy specified via connector attribute 'policyVhost' the following vhostUserGroupSettings attributes are unused:  'users', 'remoteHosts', 'maxFrameSize', 'maxSessionWindow', 'maxSessions'.",
+                    "create": true
+                }
             }
         },
 
@@ -1436,6 +1476,21 @@
                     "graph": true,
                     "description": "The total number of modified deliveries."
                 },
+                "deliveriesDelayed1Sec": {
+                    "type": "integer",
+                    "graph": true,
+                    "description": "The total number of settled deliveries that were held in the router for 1 to 10 seconds."
+                },
+                "deliveriesDelayed10Sec": {
+                    "type": "integer",
+                    "graph": true,
+                    "description": "The total number of settled deliveries that were held in the router for more than 10 seconds."
+                },
+                "settleRate": {
+                    "type": "integer",
+                    "graph": true,
+                    "description": "The average rate (over five seconds) of settlement in deliveries-per-second.  This is included for egress links only."
+                },
                 "ingressHistogram": {
                     "type": "list",
                     "description": "For outgoing links on connections with 'normal' role.  This histogram shows the number of settled deliveries on the link that ingressed the network at each interior router node."
@@ -1588,6 +1643,15 @@
             "description": "Connections to the router's container.",
             "extends": "operationalEntity",
             "attributes": {
+                "adminStatus": {
+                    "type": ["enabled", "deleted"],
+                    "default": "enabled",
+                    "description": "This field is set to enabled when the connection is up and running. Setting this field to deleted will terminate the connection and all links and sessions contained in the connection. Inter-router connections cannot be terminated by setting the adminStatus to deleted.",
+                    "update": true
+                },
+                "operStatus": {
+                    "type": ["up", "closing"]
+                },            
                 "container": {
                     "description": "The container for this connection",
                     "type": "string"
@@ -1882,6 +1946,13 @@
                     "required": false,
                     "create": true
                 },
+                "allowAdminStatusUpdate": {
+                    "type": "boolean",
+                    "description": "Whether this connection is allowed to update the admin status of other connections. Note: Inter-router connections cannot be deleted at any time.",
+                    "default": true,
+                    "required": false,
+                    "create": true
+                },                
                 "sources": {
                     "type": "string",
                     "description": "A list of source addresses from which users in this group may receive messages. To specify multiple addresses, separate the addresses with either a comma or a space. If you do not specify any addresses, users in this group are not allowed to receive messages from any addresses. You can use the substitution token '${user}' to specify an address that contains a user's authenticated user name. You can use an asterisk ('*') wildcard to match one or more characters in an address. However, this wildcard is only recognized if it is the last character in the address name. You may specify attributes 'sources' or 'sourcePattern' but not both at the same time.",

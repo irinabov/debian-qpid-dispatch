@@ -72,6 +72,7 @@ class PolicyKeys(object):
     KW_ALLOW_USERID_PROXY        = "allowUserIdProxy"
     KW_ALLOW_WAYPOINT_LINKS      = "allowWaypointLinks"
     KW_ALLOW_DYNAMIC_LINK_ROUTES = "allowDynamicLinkRoutes"
+    KW_ALLOW_ADMIN_STATUS_UPDATE = "allowAdminStatusUpdate"
     KW_SOURCES                   = "sources"
     KW_TARGETS                   = "targets"
     KW_SOURCE_PATTERN            = "sourcePattern"
@@ -147,6 +148,7 @@ class PolicyCompiler(object):
         PolicyKeys.KW_ALLOW_USERID_PROXY,
         PolicyKeys.KW_ALLOW_WAYPOINT_LINKS,
         PolicyKeys.KW_ALLOW_DYNAMIC_LINK_ROUTES,
+        PolicyKeys.KW_ALLOW_ADMIN_STATUS_UPDATE,
         PolicyKeys.KW_SOURCES,
         PolicyKeys.KW_TARGETS,
         PolicyKeys.KW_SOURCE_PATTERN,
@@ -238,7 +240,8 @@ class PolicyCompiler(object):
         # rulesets may not come through standard config so make nice defaults
         policy_out[PolicyKeys.KW_USERS] = ''
         policy_out[PolicyKeys.KW_REMOTE_HOSTS] = ''
-        policy_out[PolicyKeys.KW_MAX_FRAME_SIZE] = 2147483647
+        # DISPATCH-1277 - KW_MAX_FRAME_SIZE must be defaulted to 16384 not 2147483647
+        policy_out[PolicyKeys.KW_MAX_FRAME_SIZE] = 16384
         policy_out[PolicyKeys.KW_MAX_MESSAGE_SIZE] = 0
         policy_out[PolicyKeys.KW_MAX_SESSION_WINDOW] = 2147483647
         policy_out[PolicyKeys.KW_MAX_SESSIONS] = 65536
@@ -249,6 +252,7 @@ class PolicyCompiler(object):
         policy_out[PolicyKeys.KW_ALLOW_USERID_PROXY] = False
         policy_out[PolicyKeys.KW_ALLOW_WAYPOINT_LINKS] = True
         policy_out[PolicyKeys.KW_ALLOW_DYNAMIC_LINK_ROUTES] = True
+        policy_out[PolicyKeys.KW_ALLOW_ADMIN_STATUS_UPDATE] = True
         policy_out[PolicyKeys.KW_SOURCES] = ''
         policy_out[PolicyKeys.KW_TARGETS] = ''
         policy_out[PolicyKeys.KW_SOURCE_PATTERN] = ''
@@ -286,7 +290,8 @@ class PolicyCompiler(object):
                          PolicyKeys.KW_ALLOW_DYNAMIC_SRC,
                          PolicyKeys.KW_ALLOW_USERID_PROXY,
                          PolicyKeys.KW_ALLOW_WAYPOINT_LINKS,
-                         PolicyKeys.KW_ALLOW_DYNAMIC_LINK_ROUTES
+                         PolicyKeys.KW_ALLOW_DYNAMIC_LINK_ROUTES,
+                         PolicyKeys.KW_ALLOW_ADMIN_STATUS_UPDATE
                          ]:
                 if isinstance(val, (PY_STRING_TYPE, PY_TEXT_TYPE)) and val.lower() in ['true', 'false']:
                     val = True if val == 'true' else False
@@ -598,6 +603,7 @@ class PolicyLocal(object):
         candidate = {}
         name = attributes[PolicyKeys.KW_VHOST_NAME]
         result = self._policy_compiler.compile_access_ruleset(name, attributes, candidate, warnings, diag)
+
         if not result:
             raise PolicyError("Policy '%s' is invalid: %s" % (name, diag[0]))
         if len(warnings) > 0:
@@ -801,6 +807,7 @@ class PolicyLocal(object):
                 return False
 
             upolicy.update(ruleset[PolicyKeys.KW_GROUPS][groupname])
+
             upolicy[PolicyKeys.KW_CSTATS] = self.statsdb[vhost].get_cstats()
             return True
         except Exception as e:

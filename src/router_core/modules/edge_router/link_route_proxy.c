@@ -46,6 +46,7 @@ struct link_route_proxy_t {
     link_route_proxy_state_t  proxy_state;
     qd_direction_t            direction;
 };
+ALLOC_DECLARE(link_route_proxy_t);
 ALLOC_DEFINE(link_route_proxy_t);
 DEQ_DECLARE(link_route_proxy_t, link_route_proxy_list_t);
 
@@ -368,7 +369,8 @@ static void _link_route_deleted_CT(qdr_core_t *core, qdr_address_t *addr)
             lrp->proxy_state = QDR_LINK_ROUTE_PROXY_CANCELLED;
             break;
         default:
-            assert(false);
+            // close in process (connection dropped while link closing)
+            break;
         }
     }
 }
