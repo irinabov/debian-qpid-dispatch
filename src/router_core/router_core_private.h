@@ -366,13 +366,6 @@ struct qdr_router_ref_t {
 
 DEQ_DECLARE(qdr_router_ref_t, qdr_router_ref_list_t);
 
-typedef enum {
-    QDR_DELIVERY_NOWHERE = 0,
-    QDR_DELIVERY_IN_UNDELIVERED,
-    QDR_DELIVERY_IN_UNSETTLED,
-    QDR_DELIVERY_IN_SETTLED
-} qdr_delivery_where_t;
-
 typedef struct qdr_delivery_ref_t {
     DEQ_LINKS(struct qdr_delivery_ref_t);
     qdr_delivery_t *dlv;
@@ -391,41 +384,7 @@ struct qdr_subscription_t {
 
 DEQ_DECLARE(qdr_subscription_t, qdr_subscription_list_t);
 
-
-struct qdr_delivery_t {
-    DEQ_LINKS(qdr_delivery_t);
-    void                   *context;
-    sys_atomic_t            ref_count;
-    bool                    ref_counted;   /// Used to protect against ref count going 1 -> 0 -> 1
-    qdr_link_t_sp           link_sp;       /// Safe pointer to the link
-    qdr_delivery_t         *peer;          /// Use this peer if the delivery has one and only one peer.
-    qdr_delivery_ref_t     *next_peer_ref;
-    qd_message_t           *msg;
-    qd_iterator_t          *to_addr;
-    qd_iterator_t          *origin;
-    uint64_t                disposition;
-    uint32_t                ingress_time;
-    pn_data_t              *extension_state;
-    qdr_error_t            *error;
-    bool                    settled;
-    bool                    presettled;
-    qdr_delivery_where_t    where;
-    uint8_t                 tag[32];
-    int                     tag_length;
-    qd_bitmask_t           *link_exclusion;
-    qdr_address_t          *tracking_addr;
-    int                     tracking_addr_bit;
-    int                     ingress_index;
-    qdr_link_work_t        *link_work;         ///< Delivery work item for this delivery
-    qdr_subscription_list_t subscriptions;
-    qdr_delivery_ref_list_t peers;             /// Use this list if there if the delivery has more than one peer.
-    bool                    multicast;         /// True if this delivery is targeted for a multicast address.
-    bool                    via_edge;          /// True if this delivery arrived via an edge-connection.
-};
-
-ALLOC_DECLARE(qdr_delivery_t);
 DEQ_DECLARE(qdr_delivery_t, qdr_delivery_list_t);
-
 
 void qdr_add_delivery_ref_CT(qdr_delivery_ref_list_t *list, qdr_delivery_t *dlv);
 void qdr_del_delivery_ref(qdr_delivery_ref_list_t *list, qdr_delivery_ref_t *ref);
@@ -485,6 +444,7 @@ struct qdr_link_t {
     bool                     edge;              ///< True if this link is in an edge-connection
     bool                     processing;        ///< True if an IO thread is currently handling this link
     bool                     ready_to_free;     ///< True if the core thread wanted to clean up the link but it was processing
+    bool                     fallback;          ///< True if this link is attached to a fallback destination for an address
     char                    *strip_prefix;
     char                    *insert_prefix;
     bool                     terminus_survives_disconnect;
@@ -552,6 +512,12 @@ struct qdr_address_t {
     uint64_t                   cost_epoch;
 
     //
+    // State for tracking fallback destinations for undeliverable deliveries
+    //
+    qdr_address_t *fallback;     ///< Pointer to this address's fallback destination
+    qdr_address_t *fallback_for; ///< Pointer to the address that this is a fallback for
+
+    //
     // State for "closest" treatment
     //
     qd_bitmask_t *closest_remotes;
@@ -582,6 +548,7 @@ struct qdr_address_t {
     uint64_t deliveries_from_container;
     uint64_t deliveries_egress_route_container;
     uint64_t deliveries_ingress_route_container;
+    uint64_t deliveries_redirected;
 
     ///@}
 
@@ -598,6 +565,7 @@ void qdr_core_bind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_li
 void qdr_core_unbind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_link_t *link);
 void qdr_core_bind_address_conn_CT(qdr_core_t *core, qdr_address_t *addr, qdr_connection_t *conn);
 void qdr_core_unbind_address_conn_CT(qdr_core_t *core, qdr_address_t *addr, qdr_connection_t *conn);
+void qdr_setup_fallback_address_CT(qdr_core_t *core, qdr_address_t *addr);
 
 struct qdr_address_config_t {
     DEQ_LINKS(qdr_address_config_t);
@@ -605,6 +573,7 @@ struct qdr_address_config_t {
     uint64_t                identity;
     uint32_t                ref_count;
     char                   *pattern;
+    bool                    fallback;
     bool                    is_prefix;
     qd_address_treatment_t  treatment;
     int                     in_phase;
@@ -719,6 +688,7 @@ void qdr_core_delete_auto_link (qdr_core_t *core,  qdr_auto_link_t *al);
 
 // Core timer related field/data structures
 typedef void (*qdr_timer_cb_t)(qdr_core_t *core, void* context);
+typedef qdr_address_t * (*qdr_edge_conn_addr_t) (void *context);
 
 typedef struct qdr_core_timer_t {
     DEQ_LINKS(struct qdr_core_timer_t);
@@ -757,6 +727,7 @@ struct qdr_auto_link_t {
     qdr_auto_link_state_t  state;
     qdr_core_timer_t      *retry_timer; // If the auto link attach fails or gets disconnected, this timer retries the attach.
     char                  *last_error;
+    bool                   fallback;   // True iff this auto-link attaches to a fallback destination for an address.
 };
 
 DEQ_DECLARE(qdr_auto_link_t, qdr_auto_link_list_t);
@@ -878,19 +849,23 @@ struct qdr_core_t {
     qdr_delivery_cleanup_list_t  delivery_cleanup_list;  ///< List of delivery cleanup items to be processed in an IO thread
 
     // Overall delivery counters
-    uint64_t  presettled_deliveries;
-    uint64_t  dropped_presettled_deliveries;
-    uint64_t  accepted_deliveries;
-    uint64_t  rejected_deliveries;
-    uint64_t  released_deliveries;
-    uint64_t  modified_deliveries;
-    uint64_t  deliveries_ingress;
-    uint64_t  deliveries_egress;
-    uint64_t  deliveries_transit;
-    uint64_t  deliveries_egress_route_container;
-    uint64_t  deliveries_ingress_route_container;
-    uint64_t  deliveries_delayed_1sec;
-    uint64_t  deliveries_delayed_10sec;
+    uint64_t presettled_deliveries;
+    uint64_t dropped_presettled_deliveries;
+    uint64_t accepted_deliveries;
+    uint64_t rejected_deliveries;
+    uint64_t released_deliveries;
+    uint64_t modified_deliveries;
+    uint64_t deliveries_ingress;
+    uint64_t deliveries_egress;
+    uint64_t deliveries_transit;
+    uint64_t deliveries_egress_route_container;
+    uint64_t deliveries_ingress_route_container;
+    uint64_t deliveries_delayed_1sec;
+    uint64_t deliveries_delayed_10sec;
+    uint64_t deliveries_redirected;
+
+    qdr_edge_conn_addr_t          edge_conn_addr;
+    void                         *edge_context;
 };
 
 struct qdr_terminus_t {
@@ -927,45 +902,8 @@ void qdr_addr_start_inlinks_CT(qdr_core_t *core, qdr_address_t *addr);
  */
 bool qdr_address_is_mobile_CT(qdr_address_t *addr);
 
-void qdr_delivery_push_CT(qdr_core_t *core, qdr_delivery_t *dlv);
-void qdr_delivery_release_CT(qdr_core_t *core, qdr_delivery_t *delivery);
-void qdr_delivery_failed_CT(qdr_core_t *core, qdr_delivery_t *delivery);
-bool qdr_delivery_settled_CT(qdr_core_t *core, qdr_delivery_t *delivery);
-void qdr_delivery_decref_CT(qdr_core_t *core, qdr_delivery_t *delivery, const char *label);
 void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_link_t *link, qd_message_t *msg);
 void qdr_in_process_send_to_CT(qdr_core_t *core, qd_iterator_t *address, qd_message_t *msg, bool exclude_inprocess, bool control);
-/**
- * Links the in_dlv to the out_dlv and increments ref counts of both deliveries
- */
-void qdr_delivery_link_peers_CT(qdr_delivery_t *in_dlv, qdr_delivery_t *out_dlv);
-
-/**
- * Zeroes out peer references from both peers and decrefs ref counts.
- */
-void qdr_delivery_unlink_peers_CT(qdr_core_t *core, qdr_delivery_t *dlv, qdr_delivery_t *peer);
-
-/**
- *
- */
-void qdr_deliver_continue_peers_CT(qdr_core_t *core, qdr_delivery_t *in_dlv);
-
-/**
- * Returns the first peer of the delivery.
- * @see qdr_delivery_next_peer_CT
- */
-qdr_delivery_t *qdr_delivery_first_peer_CT(qdr_delivery_t *dlv);
-
-/**
- * Returns the next peer of the passed in delivery.
- */
-qdr_delivery_t *qdr_delivery_next_peer_CT(qdr_delivery_t *dlv);
-
-
-/**
- * Updates global and link level delivery counters like presettled_deliveries, accepted_deliveries, released_deliveries etc.
-*/
-void qdr_increment_delivery_counters_CT(qdr_core_t *core, qdr_delivery_t *delivery);
-
 void qdr_agent_enqueue_response_CT(qdr_core_t *core, qdr_query_t *query);
 
 void qdr_post_mobile_added_CT(qdr_core_t *core, const char *address_hash, qd_address_treatment_t treatment);

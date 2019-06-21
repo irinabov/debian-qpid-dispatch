@@ -86,6 +86,8 @@ export class OverviewController {
       if (!gridApi.selection)
         return;
       gridApi.selection.on.rowSelectionChanged($scope, function (row) {
+        if (row.cancelEvent)
+          return;
         let treeKey = row.grid.options.treeKey;
         if (treeKey && row.entity[treeKey]) {
           let key = row.entity[treeKey];
@@ -797,6 +799,11 @@ export class OverviewController {
           field: 'authentication',
           displayName: 'authentication'
         },
+        {
+          field: 'Close',
+          width: '4%',
+          cellTemplate: '<div ng-if="row.entity.role === \'normal\'"><button class="btn btn-danger" ng-click="grid.appScope.killConnection(row, $event)">Close</button></div>'
+        }
       ],
       enablePaging: true,
       showFooter: $scope.totalConnections > 50,
@@ -812,6 +819,55 @@ export class OverviewController {
       enableRowHeaderSelection: false,
       noUnselect: true
     };
+    $scope.isNormalConnection = function (connection) {
+      return connection.data.fields.role === 'normal';
+    };
+    $scope.killConnection = function (row, event) {
+      row.cancelEvent = true;
+      killDialog(row);
+      event.preventDefault();
+      return false;
+    };
+    $scope.killAConnection = function (connection) {
+      killDialog({ entity: connection.data.fields });
+    };
+    function killDialog(row) {
+      let d = $uibModal.open({
+        animation: true,
+        templateUrl: 'confirmKill.html',
+        controller: 'QDR.OverviewKillController',
+        resolve: {
+          entity: row.entity
+        }
+      });
+      d.result.then(function (confirmed) {
+        row.cancelEvent = false;
+        if (confirmed) {
+          console.log(`confirmed close of ${row.entity.name}`);
+          QDRService.management.connection.sendMethod(
+            row.entity.routerId,
+            "connection",
+            { adminStatus: 'deleted', identity: row.entity.identity },
+            "UPDATE",
+            { adminStatus: 'deleted' }
+          ).then(results => {
+            let statusCode = results.context.message.application_properties.statusCode;
+            if (statusCode < 200 || statusCode >= 300) {
+              QDRCore.notification('error', results.context.message.application_properties.statusDescription);
+              QDRLog.error(`Error when closing ${row.entity.name}: ${results.context.message.application_properties.statusDescription}`);
+            } else {
+              QDRCore.notification('success', `Manually closed ${row.entity.name}`);
+              QDRLog.info(`Manually closed ${row.entity.name}`);
+            }
+            updateExpanded();
+          });
+        }
+        else
+          console.log(`cancelled close order for ${row.entity.name}`);
+      }, function () {
+        QDRLog.debug(`cancelled close of ${row.entity.name}`);
+      });
+    }
     // get info for a all connections
     var allConnectionInfo = function (connection, callback) {
       getAllConnectionFields([updateConnectionGrid, updateConnectionTree, function () { callback(null); }]);

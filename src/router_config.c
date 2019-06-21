@@ -75,10 +75,11 @@ qd_error_t qd_router_configure_address(qd_router_t *router, qd_entity_t *entity)
             break;
         }
 
-        bool  waypoint  = qd_entity_opt_bool(entity, "waypoint", false);
-        long  in_phase  = qd_entity_opt_long(entity, "ingressPhase", -1);
-        long  out_phase = qd_entity_opt_long(entity, "egressPhase", -1);
-        long  priority  = qd_entity_opt_long(entity, "priority",    -1);
+        bool waypoint  = qd_entity_opt_bool(entity, "waypoint", false);
+        long in_phase  = qd_entity_opt_long(entity, "ingressPhase", -1);
+        long out_phase = qd_entity_opt_long(entity, "egressPhase", -1);
+        long priority  = qd_entity_opt_long(entity, "priority",    -1);
+        bool fallback  = qd_entity_opt_bool(entity, "enableFallback", false);
 
         //
         // Formulate this configuration create it through the core management API.
@@ -112,6 +113,8 @@ qd_error_t qd_router_configure_address(qd_router_t *router, qd_entity_t *entity)
         qd_compose_insert_string(body, "priority");
         qd_compose_insert_long(body, priority);
 
+        qd_compose_insert_string(body, "fallback");
+        qd_compose_insert_bool(body, fallback);
 
         if (in_phase >= 0) {
             qd_compose_insert_string(body, "ingressPhase");
@@ -256,13 +259,14 @@ qd_error_t qd_router_configure_auto_link(qd_router_t *router, qd_entity_t *entit
     char *ext_addr  = 0;
 
     do {
-        name      = qd_entity_opt_string(entity, "name", 0);         QD_ERROR_BREAK();
-        addr      = qd_entity_get_string(entity, "addr");            QD_ERROR_BREAK();
-        dir       = qd_entity_get_string(entity, "direction");       QD_ERROR_BREAK();
-        container = qd_entity_opt_string(entity, "containerId", 0);  QD_ERROR_BREAK();
-        c_name    = qd_entity_opt_string(entity, "connection", 0);   QD_ERROR_BREAK();
-        ext_addr  = qd_entity_opt_string(entity, "externalAddr", 0); QD_ERROR_BREAK();
-        long  phase     = qd_entity_opt_long(entity, "phase", -1);   QD_ERROR_BREAK();
+        name      = qd_entity_opt_string(entity, "name", 0);            QD_ERROR_BREAK();
+        addr      = qd_entity_get_string(entity, "address");            QD_ERROR_BREAK();
+        dir       = qd_entity_get_string(entity, "direction");          QD_ERROR_BREAK();
+        container = qd_entity_opt_string(entity, "containerId", 0);     QD_ERROR_BREAK();
+        c_name    = qd_entity_opt_string(entity, "connection", 0);      QD_ERROR_BREAK();
+        ext_addr  = qd_entity_opt_string(entity, "externalAddress", 0); QD_ERROR_BREAK();
+        long phase    = qd_entity_opt_long(entity, "phase", -1);       QD_ERROR_BREAK();
+        bool fallback = qd_entity_opt_bool(entity, "fallback", false); QD_ERROR_BREAK();
 
         //
         // Formulate this configuration as a route and create it through the core management API.
@@ -276,7 +280,7 @@ qd_error_t qd_router_configure_auto_link(qd_router_t *router, qd_entity_t *entit
         }
 
         if (addr) {
-            qd_compose_insert_string(body, "addr");
+            qd_compose_insert_string(body, "address");
             qd_compose_insert_string(body, addr);
         }
 
@@ -301,9 +305,12 @@ qd_error_t qd_router_configure_auto_link(qd_router_t *router, qd_entity_t *entit
         }
 
         if (ext_addr) {
-            qd_compose_insert_string(body, "externalAddr");
+            qd_compose_insert_string(body, "externalAddress");
             qd_compose_insert_string(body, ext_addr);
         }
+
+        qd_compose_insert_string(body, "fallback");
+        qd_compose_insert_bool(body, fallback);
 
         qd_compose_end_map(body);
 

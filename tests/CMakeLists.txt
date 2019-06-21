@@ -35,10 +35,8 @@ set(unit_test_SOURCES
     core_timer_test.c
     parse_tree_tests.c
     proton_utils_tests.c
+    alloc_test.c
     )
-if (USE_MEMORY_POOL)
-  list(APPEND unit_test_SOURCES alloc_test.c)
-endif()
 
 add_executable(unit_tests ${unit_test_SOURCES})
 target_link_libraries(unit_tests qpid-dispatch)
@@ -128,6 +126,7 @@ foreach(py_test_module
     system_tests_address_lookup
     system_tests_multi_phase
     system_tests_multicast
+    system_tests_fallback_dest
     )
 
   add_test(${py_test_module} ${TEST_WRAP} unit2 -v ${py_test_module})
