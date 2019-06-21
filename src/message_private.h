@@ -110,7 +110,7 @@ typedef struct {
     qd_parsed_field_t   *ma_pf_trace;
     int                  ma_int_phase;
     uint32_t             fanout;                         // The number of receivers for this message, including in-process subscribers.
-    qd_link_t           *input_link;                     // message received on this link
+    qd_link_t_sp         input_link_sp;                  // message received on this link
 
     bool                 ma_parsed;                      // have parsed annotations in incoming message
     bool                 discard;                        // Should this message be discarded?
@@ -146,8 +146,6 @@ ALLOC_DECLARE(qd_message_content_t);
 
 /** Initialize logging */
 void qd_message_initialize();
-
-qd_iterator_pointer_t qd_message_cursor(qd_message_pvt_t *msg);
 
 #define QDR_N_PRIORITIES     10
 #define QDR_MAX_PRIORITY     (QDR_N_PRIORITIES - 1)

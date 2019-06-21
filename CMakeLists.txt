@@ -22,10 +22,11 @@ project(qpid-dispatch C)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 # Set default build type. Must use FORCE because project() sets default to ""
 if (NOT CMAKE_BUILD_TYPE)
-  set (CMAKE_BUILD_TYPE RelWithDebInfo CACHE string
+  set (CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
     "Build type: Debug, Release, RelWithDebInfo, MinSizeRel or Coverage (default RelWithDebInfo)" FORCE)
 endif(NOT CMAKE_BUILD_TYPE)
 if (CMAKE_BUILD_TYPE MATCHES "Deb|Cover")
@@ -33,8 +34,6 @@ if (CMAKE_BUILD_TYPE MATCHES "Deb|Cover")
 endif (CMAKE_BUILD_TYPE MATCHES "Deb|Cover")
 message(STATUS "Build type is \"${CMAKE_BUILD_TYPE}\"${has_debug_symbols}")
 
-# Build time switch to turn off memory pooling.
-option(USE_MEMORY_POOL "Use per-thread memory pools" ON)
 option(QD_MEMORY_STATS "Track memory pool usage statistics" ON)
 
 file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION.txt" QPID_DISPATCH_VERSION)
