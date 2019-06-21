@@ -17,9 +17,7 @@ specific language governing permissions and limitations
 under the License.
 */
 
-import {
-  utils
-} from "../amqp/utilities.js";
+import { utils } from "../amqp/utilities.js";
 
 class Link {
   constructor(source, target, dir, cls, uid) {
@@ -31,13 +29,15 @@ class Link {
     this.uid = uid;
   }
   markerId(end) {
-    let selhigh = this.highlighted ?
-      "highlighted" :
-      (this.selected ?
-        "selected" :
-        "");
+    let selhigh = this.highlighted
+      ? "highlighted"
+      : this.selected
+      ? "selected"
+      : "";
     if (selhigh === "" && (!this.left && !this.right)) selhigh = "unknown";
-    return `-${selhigh}-${end === "end" ? this.target.radius() : this.source.radius()}`;
+    return `-${selhigh}-${
+      end === "end" ? this.target.radius() : this.source.radius()
+    }`;
   }
 }
 
@@ -73,7 +73,7 @@ export class Links {
     }
     //this.logger.debug("creating new link (" + (links.length) + ") between " + nodes[_source].name + " and " + nodes[_target].name);
     if (
-      this.links.some(function (l) {
+      this.links.some(function(l) {
         return l.uid === uid;
       })
     )
@@ -92,7 +92,9 @@ export class Links {
   }
 
   getPosition(name, nodes, source, client, height, localStorage) {
-    let position = localStorage[name] ? JSON.parse(localStorage[name]) : undefined;
+    let position = localStorage[name]
+      ? JSON.parse(localStorage[name])
+      : undefined;
     if (typeof position == "undefined") {
       position = {
         x: Math.round(
@@ -108,6 +110,14 @@ export class Links {
     if (position.y > height) {
       position.y = Math.round(
         nodes.get(source).y + 40 + Math.cos(client / (Math.PI * 2.0))
+      );
+    }
+    if (position.x === null || position.y === null) {
+      position.x = Math.round(
+        nodes.get(source).x + 40 * Math.sin(client / (Math.PI * 2.0))
+      );
+      position.y = Math.round(
+        nodes.get(source).y + 40 * Math.cos(client / (Math.PI * 2.0))
       );
     }
     position.fixed = position.fixed ? true : false;
@@ -136,6 +146,13 @@ export class Links {
           onode.connection.results[c]
         );
 
+        // we need a unique connection.container
+        if (connection.container === "") {
+          connection.container = connection.name
+            .replace("/", "")
+            .replace(":", "-");
+          //utils.uuidv4();
+        }
         // this is a connection to another interior router
         if (connection.role === "inter-router") {
           const target = getContainerIndex(connection.container, nodeInfo);
@@ -161,10 +178,11 @@ export class Links {
     // create map of type:id:dir to [containers]
     for (let container in connectionsPerContainer) {
       let key = getKey(connectionsPerContainer[container]);
-      if (!unique[key]) unique[key] = {
-        c: [],
-        nodes: []
-      };
+      if (!unique[key])
+        unique[key] = {
+          c: [],
+          nodes: []
+        };
       unique[key].c.push(container);
     }
     for (let key in unique) {
@@ -185,7 +203,6 @@ export class Links {
           height,
           localStorage
         );
-
         let node = nodes.getOrCreateNode(
           nodeIds[container.source],
           name,
@@ -203,7 +220,9 @@ export class Links {
         node.user = container.connection.user;
         node.isEncrypted = container.connection.isEncrypted;
         node.connectionId = container.connection.identity;
-        node.uuid = `${containerId}-${node.routerId}-${node.nodeType}-${node.cdir}`;
+        node.uuid = `${containerId}-${node.routerId}-${node.nodeType}-${
+          node.cdir
+        }`;
         // in case a created node (or group) is connected to multiple
         // routers, we need to remember all the routers for traffic animations
         for (let c = 1; c < connections.length; c++) {
@@ -248,7 +267,7 @@ export class Links {
   }
 }
 
-var getContainerIndex = function (_id, nodeInfo) {
+var getContainerIndex = function(_id, nodeInfo) {
   let nodeIndex = 0;
   for (let id in nodeInfo) {
     if (utils.nameFromId(id) === _id) return nodeIndex;
@@ -257,7 +276,7 @@ var getContainerIndex = function (_id, nodeInfo) {
   return -1;
 };
 
-var getLinkDir = function (connection, onode) {
+var getLinkDir = function(connection, onode) {
   let links = onode["router.link"];
   if (!links) {
     return "unknown";
@@ -267,12 +286,12 @@ var getLinkDir = function (connection, onode) {
   let typeIndex = links.attributeNames.indexOf("linkType");
   let connectionIdIndex = links.attributeNames.indexOf("connectionId");
   let dirIndex = links.attributeNames.indexOf("linkDir");
-  links.results.forEach(function (linkResult) {
+  links.results.forEach(function(linkResult) {
     if (
       linkResult[typeIndex] === "endpoint" &&
       linkResult[connectionIdIndex] === connection.identity
     )
-      if (linkResult[dirIndex] === "in")++inCount;
+      if (linkResult[dirIndex] === "in") ++inCount;
       else ++outCount;
   });
   if (inCount > 0 && outCount > 0) return "both";
@@ -280,8 +299,8 @@ var getLinkDir = function (connection, onode) {
   if (outCount > 0) return "out";
   return "unknown";
 };
-var getKey = function (containers) {
-  let parts = [];
+var getKey = function(containers) {
+  let parts = {};
   let connection = containers[0].connection;
   let d = {
     nodeType: connection.role,
@@ -294,7 +313,7 @@ var getKey = function (containers) {
   else if (connection.role === "edge") connectionType = "edge";
   for (let c = 0; c < containers.length; c++) {
     let container = containers[c];
-    parts.push(`${container.source}-${container.linksDir}`);
+    parts[`${container.source}-${container.linksDir}`] = true;
   }
-  return `${connectionType}:${parts.join(":")}`;
+  return `${connectionType}:${Object.keys(parts).join(":")}`;
 };
