@@ -1082,7 +1082,7 @@ svg {
   }
   
   circle.node.fixed {
-      stroke-dasharray: 10,2;
+      /* stroke-dasharray: 10,2; */
   }
   text {
     /*font: 12px sans-serif;*/
@@ -2105,6 +2105,7 @@ svg {
   .masthead-icons {
     position: absolute;
     right: 1em;
+    top: 0;
     color: white;
     padding-top: 5px;
     font-size: large;
