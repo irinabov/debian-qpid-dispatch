@@ -60,10 +60,12 @@ def parse_args(argv):
     parser.add_option("-v", "--verbose", help="Show maximum detail",        action="store_true", dest="verbose")
     parser.add_option("--log", help="Show recent log entries", action="store_const", const="log", dest="show")
 
-    # This limit can be used to limit the number of output rows and can be used in conjunction with options
+    # This limit can be used to limit the number of output rows and
+    # can be used in conjunction with options
     # like -c, -l, -a, --autolinks, --linkroutes and --log.
-    # By default, the limit is set to 100 rows.
-    parser.add_option("--limit", help="Limit number of output rows", type="int", default=100)
+    # By default, the limit is not set, which means the limit is unlimited.
+
+    parser.add_option("--limit", help="Limit number of output rows", type="int", default=None)
 
     opts, args = parser.parse_args(args=argv)
 
@@ -324,6 +326,7 @@ class BusManager(Node):
             try:
                 rows.append(('Deliveries Delayed > 1sec', router.deliveriesDelayed1Sec))
                 rows.append(('Deliveries Delayed > 10sec', router.deliveriesDelayed10Sec))
+                rows.append(('Deliveries to Fallback', router.deliveriesRedirectedToFallback))
             except:
                 pass
             rows.append(('Ingress Count', router.deliveriesIngress))
@@ -490,7 +493,7 @@ class BusManager(Node):
 
         rows = []
         cols = ('distribution', 'inProcess', 'subscriberCount', 'remoteCount',
-                'containerCount', 'deliveriesIngress', 'deliveriesEgress',
+                'containerCount', 'deliveriesIngress', 'deliveriesEgress', 'deliveriesRedirectedToFallback',
                 'deliveriesTransit', 'deliveriesToContainer', 'deliveriesFromContainer', 'name', 'priority')
 
         objects = self.query('org.apache.qpid.dispatch.router.address', cols, limit=self.opts.limit)
@@ -512,6 +515,7 @@ class BusManager(Node):
         heads.append(Header("in", Header.COMMAS))
         heads.append(Header("out", Header.COMMAS))
         heads.append(Header("thru", Header.COMMAS))
+        heads.append(Header("fallback", Header.COMMAS))
         if self.opts.verbose:
             heads.append(Header("to-proc", Header.COMMAS))
             heads.append(Header("from-proc", Header.COMMAS))
@@ -531,6 +535,10 @@ class BusManager(Node):
             row.append(addr.deliveriesIngress)
             row.append(addr.deliveriesEgress)
             row.append(addr.deliveriesTransit)
+            try:
+                row.append(addr.deliveriesRedirectedToFallback)
+            except:
+                row.append("-")
             if self.opts.verbose:
                 row.append(addr.deliveriesToContainer)
                 row.append(addr.deliveriesFromContainer)
@@ -551,16 +559,16 @@ class BusManager(Node):
         heads.append(Header("status"))
         heads.append(Header("lastErr"))
         rows = []
-        cols = ('addr', 'direction', 'phase', 'externalAddr', 'linkRef', 'operStatus', 'lastError')
+        cols = ('address', 'direction', 'phase', 'externalAddress', 'linkRef', 'operStatus', 'lastError')
 
         objects = self.query('org.apache.qpid.dispatch.router.config.autoLink', cols, limit=self.opts.limit)
 
         for al in objects:
             row = []
-            row.append(al.addr)
+            row.append(al.address)
             row.append(al.direction)
             row.append(al.phase)
-            row.append(al.externalAddr)
+            row.append(al.externalAddress)
             row.append(al.linkRef)
             row.append(al.operStatus)
             row.append(al.lastError)

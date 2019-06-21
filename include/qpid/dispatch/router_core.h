@@ -174,6 +174,7 @@ typedef void (*qdr_connection_bind_context_t) (qdr_connection_t *context, void* 
  * @param strip_annotations_in True if configured to remove annotations on inbound messages.
  * @param strip_annotations_out True if configured to remove annotations on outbound messages.
  * @param policy_allow_dynamic_link_routes True if this connection is allowed by policy to create link route destinations.
+ * @param policy_allow_admin_status_update True if this connection is allowed to modify admin_status on other connections.
  * @param link_capacity The capacity, in deliveries, for links in this connection.
  * @param vhost If non-null, this is the vhost of the connection to be used for multi-tenancy.
  * @return Pointer to a connection object that can be used to refer to this connection over its lifetime.
@@ -221,6 +222,15 @@ void qdr_connection_set_context(qdr_connection_t *conn, void *context);
  * Retrieve the stored void pointer from the connection object.
  */
 void *qdr_connection_get_context(const qdr_connection_t *conn);
+
+
+/**
+ * qdr_connection_role
+ *
+ * Retrieve the role of the connection object.
+ */
+qdr_connection_role_t qdr_connection_role(const qdr_connection_t *conn);
+
 
 /**
  * qdr_connection_get_tenant_space
@@ -660,8 +670,6 @@ qdr_delivery_t *qdr_link_deliver_to(qdr_link_t *link, qd_message_t *msg,
 qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *msg, bool settled,
                                                 const uint8_t *tag, int tag_length,
                                                 uint64_t disposition, pn_data_t* disposition_state);
-qdr_delivery_t *qdr_deliver_continue(qdr_core_t *core, qdr_delivery_t *delivery);
-
 int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit);
 
 void qdr_link_flow(qdr_core_t *core, qdr_link_t *link, int credit, bool drain_mode);
@@ -694,34 +702,6 @@ void qdr_connection_handlers(qdr_core_t             *core,
                              qdr_link_deliver_t         deliver,
                              qdr_delivery_update_t      delivery_update,
                              qdr_connection_close_t     conn_close);
-
-/**
- ******************************************************************************
- * Delivery functions
- ******************************************************************************
- */
-void qdr_delivery_update_disposition(qdr_core_t *core, qdr_delivery_t *delivery, uint64_t disp,
-                                     bool settled, qdr_error_t *error, pn_data_t *ext_state, bool ref_given);
-
-void qdr_delivery_set_context(qdr_delivery_t *delivery, void *context);
-void *qdr_delivery_get_context(qdr_delivery_t *delivery);
-qdr_link_t *qdr_delivery_link(const qdr_delivery_t *delivery);
-void qdr_delivery_incref(qdr_delivery_t *delivery, const char *label);
-void qdr_delivery_decref(qdr_core_t *core, qdr_delivery_t *delivery, const char *label);
-void qdr_delivery_tag(const qdr_delivery_t *delivery, const char **tag, int *length);
-qd_message_t *qdr_delivery_message(const qdr_delivery_t *delivery);
-qdr_error_t *qdr_delivery_error(const qdr_delivery_t *delivery);
-bool qdr_delivery_presettled(const qdr_delivery_t *delivery);
-void qdr_delivery_write_extension_state(qdr_delivery_t *dlv, pn_delivery_t* pdlv, bool update_disposition);
-bool qdr_delivery_send_complete(const qdr_delivery_t *delivery);
-bool qdr_delivery_tag_sent(const qdr_delivery_t *delivery);
-void qdr_delivery_set_tag_sent(const qdr_delivery_t *delivery, bool tag_sent);
-bool qdr_delivery_receive_complete(const qdr_delivery_t *delivery);
-void qdr_delivery_set_disposition(qdr_delivery_t *delivery, uint64_t disposition);
-uint64_t qdr_delivery_disposition(const qdr_delivery_t *delivery);
-void qdr_delivery_set_aborted(const qdr_delivery_t *delivery, bool aborted);
-bool qdr_delivery_is_aborted(const qdr_delivery_t *delivery);
-void qdr_delivery_add_num_closed_receivers(qdr_delivery_t *delivery);
 
 /**
  ******************************************************************************
@@ -872,6 +852,9 @@ typedef struct {
     size_t deliveries_transit;
     size_t deliveries_ingress_route_container;
     size_t deliveries_egress_route_container;
+    size_t deliveries_delayed_1sec;
+    size_t deliveries_delayed_10sec;
+    size_t deliveries_redirected_to_fallback;
 }  qdr_global_stats_t;
 ALLOC_DECLARE(qdr_global_stats_t);
 typedef void (*qdr_global_stats_handler_t) (void *context);

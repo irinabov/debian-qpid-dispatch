@@ -55,9 +55,7 @@ under the License.
                 <span class="icon-bar"></span>
                 <span class="icon-bar"></span>
             </button>
-             <a class="navbar-brand" href="/">
-                 <span class="logo">Apache Qpid Dispatch Console</span>
-             </a>
+            <span class="logo"><img src="img/console_logo.png" /></span>
             <div class="masthead-icons">
                 <div class="about" ng-controller="QDR.AboutController" title="About this console">
                     <span class="fa fa-question-circle-o" ng-click="open()"></span>
@@ -127,6 +125,18 @@ under the License.
         })
     </script>
 
+    <script type="text/ng-template" id="confirmKill.html">
+        <div class="modal-header">
+            <h3 class="modal-title">Confirm close of {{name}}</h3>
+        </div>
+        <div class="modal-body">
+            Are you sure you want to close this connection?
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-danger" type="button" ng-click="ok()">Close</button>
+            <button class="btn btn-secondary" type="button" ng-click="cancel()">Cancel</button>
+        </div>
+    </script>
 </body>
 
 </html>
