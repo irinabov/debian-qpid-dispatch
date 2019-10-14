@@ -730,22 +730,26 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
     qdr_delivery_t *peer;
     while (dlv) {
         DEQ_REMOVE_HEAD(undelivered);
+
+        // expect: an inbound undelivered multicast should
+        // have no peers (has not been forwarded yet)
+        assert(dlv->multicast
+               ? qdr_delivery_peer_count_CT(dlv) == 0
+               : true);
+
         peer = qdr_delivery_first_peer_CT(dlv);
         while (peer) {
             if (peer->multicast) {
                 //
-                // If the address of the delivery is a multicast address and if there are no receivers for this address, the peer delivery must be released.
+                // dlv is outgoing mcast - tell its incoming peer that it has
+                // been released and settled.  This will unlink these peers.
                 //
-                // If the address of the delivery is a multicast address and there is at least one other receiver for the address, dont do anything
-                //
-                if (DEQ_SIZE(peer->peers) == 1 || peer->peer)  {
-                    qdr_delivery_release_CT(core, peer);
-                }
+                qdr_delivery_mcast_outbound_update_CT(core, peer, dlv, PN_RELEASED, true);
             }
             else {
                 qdr_delivery_release_CT(core, peer);
+                qdr_delivery_unlink_peers_CT(core, dlv, peer);
             }
-            qdr_delivery_unlink_peers_CT(core, dlv, peer);
             peer = qdr_delivery_next_peer_CT(dlv);
         }
 
@@ -785,12 +789,29 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
             qdr_deliver_continue_peers_CT(core, dlv);
         }
 
-        peer = qdr_delivery_first_peer_CT(dlv);
-        while (peer) {
-            if (link->link_direction == QD_OUTGOING)
-                qdr_delivery_failed_CT(core, peer);
-            qdr_delivery_unlink_peers_CT(core, dlv, peer);
-            peer = qdr_delivery_next_peer_CT(dlv);
+        if (dlv->multicast) {
+            //
+            // forward settlement
+            //
+            qdr_delivery_mcast_inbound_update_CT(core, dlv,
+                                                 PN_MODIFIED,
+                                                 true);  // true == settled
+        } else {
+            peer = qdr_delivery_first_peer_CT(dlv);
+            while (peer) {
+                if (peer->multicast) {
+                    //
+                    // peer is incoming multicast and dlv is one of its corresponding
+                    // outgoing deliveries.  This will unlink these peers.
+                    //
+                    qdr_delivery_mcast_outbound_update_CT(core, peer, dlv, PN_MODIFIED, true);
+                } else {
+                    if (link->link_direction == QD_OUTGOING)
+                        qdr_delivery_failed_CT(core, peer);
+                    qdr_delivery_unlink_peers_CT(core, dlv, peer);
+                }
+                peer = qdr_delivery_next_peer_CT(dlv);
+            }
         }
 
         //
@@ -1017,6 +1038,22 @@ qdr_link_t *qdr_create_link_CT(qdr_core_t       *core,
     work->source    = source;
     work->target    = target;
 
+    char   source_str[1000];
+    char   target_str[1000];
+    size_t source_len = 1000;
+    size_t target_len = 1000;
+
+    source_str[0] = '\0';
+    target_str[0] = '\0';
+
+    if (qd_log_enabled(core->log, QD_LOG_INFO)) {
+        qdr_terminus_format(source, source_str, &source_len);
+        qdr_terminus_format(target, target_str, &target_len);
+    }
+
+    qd_log(core->log, QD_LOG_INFO, "[C%"PRIu64"][L%"PRIu64"] Link attached: dir=%s source=%s target=%s",
+               conn->identity, link->identity, dir == QD_INCOMING ? "in" : "out", source_str, target_str);
+
     qdr_connection_enqueue_work_CT(core, conn, work);
     return link;
 }
@@ -1173,7 +1210,15 @@ void qdr_check_addr_CT(qdr_core_t *core, qdr_address_t *addr)
         && addr->tracked_deliveries == 0
         && addr->core_endpoint == 0
         && addr->fallback_for == 0) {
+        qdr_address_t *fallback = addr->fallback;
         qdr_core_remove_address(core, addr);
+
+        //
+        // If the address being removed had a fallback address, check to see if that
+        // address should now also be removed.
+        //
+        if (!!fallback)
+            qdr_check_addr_CT(core, fallback);
     }
 }
 

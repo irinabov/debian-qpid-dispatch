@@ -50,16 +50,6 @@
 
 typedef struct qd_message_t qd_message_t;
 
-DEQ_DECLARE(qd_message_t, qd_message_list_t);
-
-/** Message representation.
- *@internal
- */
-struct qd_message_t {
-    DEQ_LINKS(qd_message_t);
-    // Private members not listed here.
-};
-
 /** Amount of message to be parsed.  */
 typedef enum {
     QD_DEPTH_NONE,
@@ -242,8 +232,17 @@ void qd_message_send(qd_message_t *msg, qd_link_t *link, bool strip_outbound_ann
 /**
  * Check that the message is well-formed up to a certain depth.  Any part of the message that is
  * beyond the specified depth is not checked for validity.
+ *
+ * Note: some message sections are optional - QD_MESSAGE_OK is returned if the
+ * optional section is not present, as that is valid.
  */
-int qd_message_check(qd_message_t *msg, qd_message_depth_t depth);
+typedef enum {
+    QD_MESSAGE_DEPTH_INVALID,     // corrupt or malformed message detected
+    QD_MESSAGE_DEPTH_OK,          // valid up to depth, including 'depth' if not optional
+    QD_MESSAGE_DEPTH_INCOMPLETE   // have not received up to 'depth', or partial depth
+} qd_message_depth_status_t;
+
+qd_message_depth_status_t qd_message_check_depth(const qd_message_t *msg, qd_message_depth_t depth);
 
 /**
  * Return an iterator for the requested message field.  If the field is not in the message,
