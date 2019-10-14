@@ -33,7 +33,7 @@ include::modules/installing-router.adoc[leveloffset=+1]
 include::modules/viewing-default-router-configuration-file.adoc[leveloffset=+1]
 
 // Starting the router
-include::modules/starting-router.adoc[leveloffset=+1]
+include::modules/starting-router-getting-started.adoc[leveloffset=+1]
 
 // Sending some test messages
 include::modules/sending-test-messages.adoc[leveloffset=+1]
