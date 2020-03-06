@@ -110,7 +110,7 @@ qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *
     dlv->error        = 0;
     dlv->disposition  = 0;
 
-    qdr_delivery_read_extension_state(dlv, disposition, disposition_data, true);
+    qdr_delivery_set_extension_state(dlv, disposition, disposition_data, true);
     qdr_delivery_incref(dlv, "qdr_link_deliver_to_routed_link - newly created delivery, add to action list");
     qdr_delivery_incref(dlv, "qdr_link_deliver_to_routed_link - protect returned value");
 
@@ -124,6 +124,7 @@ qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *
 }
 
 
+// send up to credit pending outgoing deliveries
 int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit)
 {
     qdr_connection_t *conn = link->conn;
@@ -216,9 +217,13 @@ int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit)
                 }
                 sys_mutex_unlock(conn->work_lock);
 
-                // the core will need to update the delivery's disposition
-                if (new_disp)
-                    qdr_delivery_update_disposition(core, dlv, new_disp, true, 0, 0, false);
+                if (new_disp) {
+                    // the remote sender-settle-mode forced us to pre-settle the
+                    // message.  The core needs to know this, so we "fake" receiving a
+                    // settle+disposition update from the remote end of the link:
+                    qdr_delivery_remote_state_updated(core, dlv, new_disp, true, 0, 0, false);
+                }
+
                 qdr_delivery_decref(core, dlv, "qdr_link_process_deliveries - release local reference - done processing");
             } else {
                 sys_mutex_unlock(conn->work_lock);
@@ -252,11 +257,20 @@ void qdr_link_flow(qdr_core_t *core, qdr_link_t *link, int credit, bool drain_mo
         link->credit_to_core += credit;
     }
 
-    action->args.connection.link   = link;
+    set_safe_ptr_qdr_link_t(link, &action->args.connection.link);
     action->args.connection.credit = credit;
     action->args.connection.drain  = drain_mode;
 
     qdr_action_enqueue(core, action);
+    qdr_record_link_credit(core, link);
+}
+
+void qdr_link_set_drained(qdr_core_t *core, qdr_link_t *link)
+{
+    if (link) {
+        link->drain_mode = false;
+        link->credit_to_core = 0;
+    }
 }
 
 
@@ -291,16 +305,17 @@ void qdr_send_to2(qdr_core_t *core, qd_message_t *msg, const char *addr, bool ex
 
 static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
 {
-    if (discard)
+    qdr_link_t *link = safe_deref_qdr_link_t(action->args.connection.link);
+
+    if (discard || !link)
         return;
 
-    qdr_link_t *link      = action->args.connection.link;
     int  credit           = action->args.connection.credit;
     bool drain            = action->args.connection.drain;
     bool activate         = false;
     bool drain_was_set    = !link->drain_mode && drain;
     qdr_link_work_t *work = 0;
-    
+
     link->drain_mode = drain;
 
     //
@@ -309,11 +324,15 @@ static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discar
     //
     if (link->stalled_outbound) {
         link->stalled_outbound = false;
+
+        sys_mutex_lock(link->conn->work_lock);
+
         if (DEQ_SIZE(link->undelivered) > 0) {
-            // Adding this work at priority 0.
-            qdr_add_link_ref(link->conn->links_with_work, link, QDR_LINK_LIST_CLASS_WORK);
+            qdr_add_link_ref(&link->conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
             activate = true;
         }
+
+        sys_mutex_unlock(link->conn->work_lock);
     }
 
     if (link->core_endpoint) {
@@ -359,8 +378,7 @@ static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discar
             if (work)
                 DEQ_INSERT_TAIL(link->work_list, work);
             if (DEQ_SIZE(link->undelivered) > 0 || drain_was_set) {
-                // Adding this work at priority 0.
-                qdr_add_link_ref(link->conn->links_with_work, link, QDR_LINK_LIST_CLASS_WORK);
+                qdr_add_link_ref(&link->conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
                 activate = true;
             }
             sys_mutex_unlock(link->conn->work_lock);
@@ -419,38 +437,37 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
         // We are trying to forward a delivery on an address that has no outbound paths
         // AND the incoming link is targeted (not anonymous).
         //
-        // We shall release the delivery (it is currently undeliverable).
+        // We shall release the delivery (it is currently undeliverable). Since
+        // there are no receivers we will try to drain credit to prevent the
+        // sender from attempting to send more to this address.
         //
         if (dlv->settled) {
             // Increment the presettled_dropped_deliveries on the in_link
             link->dropped_presettled_deliveries++;
             if (dlv_link->link_type == QD_LINK_ENDPOINT)
                 core->dropped_presettled_deliveries++;
-
-            //
-            // The delivery is pre-settled. Call the qdr_delivery_release_CT so if this delivery is multi-frame
-            // we can restart receiving the delivery in case it is stalled. Note that messages will not
-            // *actually* be released because these are presettled messages.
-            //
-            qdr_delivery_release_CT(core, dlv);
-        } else {
-            qdr_delivery_release_CT(core, dlv);
-
-            //
-            // Drain credit on the link if it is not in an edge connection
-            //
-            if (!link->edge)
-                qdr_link_issue_credit_CT(core, link, 0, true);
         }
 
         //
-        // If the distribution is multicast or it's on an edge connection, we will replenish the credit.
-        // Otherwise, we will allow the credit to drain.
+        // Note if the message was pre-settled we still call the
+        // qdr_delivery_release_CT so if this delivery is multi-frame we can
+        // restart receiving the delivery in case it is stalled. Note that
+        // messages will not *actually* be released in this case because these
+        // are presettled messages.
         //
-        if (link->edge || qdr_is_addr_treatment_multicast(link->owning_addr))
+        qdr_delivery_release_CT(core, dlv);
+
+        //
+        // Credit update: since this is a targeted link to an address for which
+        // there is no consumers then do not replenish credit - drain instead.
+        // However edge is a special snowflake which always has credit available.
+        //
+        if (link->edge) {
             qdr_link_issue_credit_CT(core, link, 1, false);
-        else
+        } else {
+            qdr_link_issue_credit_CT(core, link, 0, true);  // drain
             link->credit_pending++;
+        }
 
         qdr_delivery_decref_CT(core, dlv, "qdr_link_forward_CT - removed from action (no path)");
         return;
@@ -472,25 +489,54 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
             }
 
         }
-        link->total_deliveries++;
-    }
-
-    //
-    // There is no address that we can send this delivery to, which means the addr was not found in our hastable. This
-    // can be because there were no receivers or because the address was not defined in the config file.
-    // If the treatment for such addresses is set to be unavailable, we send back a rejected disposition and detach the link
-    //
-    else if (core->qd->default_treatment == QD_TREATMENT_UNAVAILABLE) {
-        dlv->disposition = PN_REJECTED;
-        dlv->error = qdr_error(QD_AMQP_COND_NOT_FOUND, "Deliveries cannot be sent to an unavailable address");
-        qdr_delivery_push_CT(core, dlv);
-
+    } else {
         //
-        // We will not detach this link because this could be anonymous sender. We don't know
-        // which address the sender will be sending to next
-        // If this was not an anonymous sender, the initial attach would have been rejected if the target address was unavailable.
+        // There is no address that we can send this delivery to, which means
+        // the addr was not found in our hash table. This can be because there
+        // were no receivers or because the address was not defined in the
+        // config file.
         //
-        return;
+
+        qd_address_treatment_t trt = core->qd->default_treatment;
+        if (dlv->to_addr) {
+            qdr_address_config_t *ignore = 0;
+            trt = qdr_treatment_for_address_hash_with_default_CT(core,
+                                                                 dlv->to_addr,
+                                                                 trt,
+                                                                 &ignore);
+        }
+
+        if (trt == QD_TREATMENT_UNAVAILABLE) {
+            //
+            // The treatment for these addresses is set to be unavailable, we
+            // stop trying to forward it.  If the link is a locally attached client
+            // we reject the message if the link is not anonymous as per the
+            // documentation of the router's defaultTreatment=unavailable.  We
+            // simply release it for other link types as the message did have a
+            // destination at some point (it was forwarded to this router after
+            // all) - the loss of the destination may be temporary.
+            //
+            if (link->link_type == QD_LINK_ENDPOINT) {
+                dlv->error = qdr_error(QD_AMQP_COND_NOT_FOUND, "Deliveries cannot be sent to an unavailable address");
+                qdr_delivery_reject_CT(core, dlv);
+                if (qdr_link_is_anonymous(link)) {
+                    qdr_link_issue_credit_CT(core, link, 1, false);
+                } else {
+                    // cannot forward on this targeted link.  withhold credit and drain
+                    qdr_link_issue_credit_CT(core, link, 0, true);
+                }
+            } else {
+                qdr_delivery_release_CT(core, dlv);
+                qdr_link_issue_credit_CT(core, link, 1, false);
+            }
+            //
+            // We will not detach this link because this could be anonymous sender. We don't know
+            // which address the sender will be sending to next
+            // If this was not an anonymous sender, the initial attach would have been rejected if the target address was unavailable.
+            //
+            qdr_delivery_decref_CT(core, dlv, "qdr_link_forward_CT - removed from action (treatment unavailable)");
+            return;
+        }
     }
 
     //
@@ -531,6 +577,11 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
         //
         if (!dlv->settled)
             qdr_delivery_release_CT(core, dlv);
+        else {
+            link->dropped_presettled_deliveries++;
+            if (dlv_link->link_type == QD_LINK_ENDPOINT)
+                core->dropped_presettled_deliveries++;
+        }
 
         //
         // Decrementing the delivery ref count for the action
@@ -538,7 +589,7 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
         qdr_delivery_decref_CT(core, dlv, "qdr_link_forward_CT - removed from action (1)");
         qdr_link_issue_credit_CT(core, link, 1, false);
     } else if (fanout > 0) {
-        if (dlv->settled || dlv->multicast) {
+        if (dlv->settled) {
             //
             // The delivery is settled.  Keep it off the unsettled list and issue
             // replacement credit for it now.
@@ -579,7 +630,7 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
             // deliveries because it increases the risk of credit starvation if there
             // are many addresses sharing the link.
             //
-            if (link->link_type == QD_LINK_ROUTER || link->edge)
+            if (link->link_type == QD_LINK_CONTROL || link->link_type == QD_LINK_ROUTER || link->edge)
                 qdr_link_issue_credit_CT(core, link, 1, false);
         }
     }
@@ -597,6 +648,10 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
 
     if (!link)
         return;
+    if (link->conn)
+        link->conn->last_delivery_time = core->uptime_ticks;
+
+    link->total_deliveries++;
 
     //
     // Record the ingress time so we can track the age of this delivery.
@@ -624,8 +679,10 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
         // If this is an attach-routed link, put the delivery directly onto the peer link
         //
         qdr_delivery_t *peer = qdr_forward_new_delivery_CT(core, dlv, link->connected_link, dlv->msg);
-
-        qdr_delivery_copy_extension_state(dlv, peer, true);
+        qdr_delivery_set_extension_state(peer,
+                                         dlv->remote_disposition,
+                                         qdr_delivery_extension_state(dlv),
+                                         true);
 
         //
         // Copy the delivery tag.  For link-routing, the delivery tag must be preserved.
@@ -634,8 +691,6 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
         memcpy(peer->tag, action->args.connection.tag, peer->tag_length);
 
         qdr_forward_deliver_CT(core, link->connected_link, peer);
-
-        link->total_deliveries++;
 
         if (!dlv->settled) {
             DEQ_INSERT_TAIL(link->unsettled, dlv);
@@ -722,7 +777,6 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
             free_qdr_link_ref_t(temp_rlink);
         }
     } else {
-        assert(false);
         //
         // Take the action reference and use it for undelivered.  Don't decref/incref.
         //
@@ -784,16 +838,32 @@ void qdr_link_issue_credit_CT(qdr_core_t *core, qdr_link_t *link, int credit, bo
     if (!drain_changed && credit == 0)
         return;
 
-    qdr_link_work_t *work = new_qdr_link_work_t();
-    ZERO(work);
-
-    work->work_type = QDR_LINK_WORK_FLOW;
-    work->value     = credit;
-
+    qdr_link_work_drain_action_t drain_action = QDR_LINK_WORK_DRAIN_ACTION_NONE;
     if (drain_changed)
-        work->drain_action = drain ? QDR_LINK_WORK_DRAIN_ACTION_SET : QDR_LINK_WORK_DRAIN_ACTION_CLEAR;
+        drain_action = drain ? QDR_LINK_WORK_DRAIN_ACTION_SET : QDR_LINK_WORK_DRAIN_ACTION_CLEAR;
 
-    qdr_link_enqueue_work_CT(core, link, work);
+    qdr_connection_t *conn = link->conn;
+    sys_mutex_lock(conn->work_lock);
+    qdr_link_work_t *work = DEQ_TAIL(link->work_list);
+    // can we avoid adding a new work flow item?
+    if (work && work->work_type == QDR_LINK_WORK_FLOW
+        && (!drain_changed || work->drain_action == drain_action)) {
+        work->value += credit;
+        sys_mutex_unlock(conn->work_lock);
+        qdr_connection_activate_CT(core, conn);
+
+    } else {
+        sys_mutex_unlock(conn->work_lock);
+
+        // need a new work flow item
+        work = new_qdr_link_work_t();
+        ZERO(work);
+        work->work_type = QDR_LINK_WORK_FLOW;
+        work->value     = credit;
+        if (drain_changed)
+            work->drain_action = drain_action;
+        qdr_link_enqueue_work_CT(core, link, work);
+    }
 }
 
 

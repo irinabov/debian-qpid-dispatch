@@ -43,6 +43,8 @@
 #define QDR_CONNECTION_ACTIVE           18
 #define QDR_CONNECTION_ADMIN_STATUS     19
 #define QDR_CONNECTION_OPER_STATUS      20
+#define QDR_CONNECTION_UPTIME_SECONDS   21
+#define QDR_CONNECTION_LAST_DLV_SECONDS 22
 
 const char * const QDR_CONNECTION_DIR_IN  = "in";
 const char * const QDR_CONNECTION_DIR_OUT = "out";
@@ -83,6 +85,9 @@ const char *qdr_connection_columns[] =
      "active",
      "adminStatus",
      "operStatus",
+     "uptimeSeconds",
+     "lastDlvSeconds",
+
      0};
 
 const char *CONNECTION_TYPE = "org.apache.qpid.dispatch.connection";
@@ -114,6 +119,9 @@ static void qdr_connection_insert_column_CT(qdr_core_t *core, qdr_connection_t *
 {
     char id_str[100];
     const char *text = 0;
+
+    if (!conn)
+        return;
 
     if (as_map)
         qd_compose_insert_string(body, qdr_connection_columns[col]);
@@ -237,6 +245,17 @@ static void qdr_connection_insert_column_CT(qdr_core_t *core, qdr_connection_t *
         qd_compose_insert_string(body, text);
         break;
 
+    case QDR_CONNECTION_UPTIME_SECONDS:
+        qd_compose_insert_uint(body, core->uptime_ticks - conn->conn_uptime);
+        break;
+
+    case QDR_CONNECTION_LAST_DLV_SECONDS:
+        if (conn->last_delivery_time==0)
+            qd_compose_insert_null(body);
+        else
+            qd_compose_insert_uint(body, core->uptime_ticks - conn->last_delivery_time);
+        break;
+
     case QDR_CONNECTION_PROPERTIES: {
         pn_data_t *data = conn->connection_info->connection_properties;
         qd_compose_start_map(body);
@@ -284,10 +303,13 @@ static void qdr_agent_write_connection_CT(qdr_core_t *core, qdr_query_t *query, 
     qd_composed_field_t *body = query->body;
 
     qd_compose_start_list(body);
-    int i = 0;
-    while (query->columns[i] >= 0) {
-        qdr_connection_insert_column_CT(core, conn, query->columns[i], body, false);
-        i++;
+
+    if (conn) {
+        int i = 0;
+        while (query->columns[i] >= 0) {
+            qdr_connection_insert_column_CT(core, conn, query->columns[i], body, false);
+            i++;
+        }
     }
     qd_compose_end_list(body);
 }
@@ -295,9 +317,14 @@ static void qdr_agent_write_connection_CT(qdr_core_t *core, qdr_query_t *query, 
 
 static void qdr_manage_advance_connection_CT(qdr_query_t *query, qdr_connection_t *conn)
 {
-    query->next_offset++;
-    conn = DEQ_NEXT(conn);
-    query->more = !!conn;
+    if (conn) {
+        query->next_offset++;
+        conn = DEQ_NEXT(conn);
+        query->more = !!conn;
+    }
+    else {
+        query->more = false;
+    }
 }
 
 
@@ -325,16 +352,21 @@ void qdra_connection_get_first_CT(qdr_core_t *core, qdr_query_t *query, int offs
         conn = DEQ_NEXT(conn);
     assert(conn);
 
-    //
-    // Write the columns of the object into the response body.
-    //
-    qdr_agent_write_connection_CT(core, query, conn);
+    if (conn) {
+        //
+        // Write the columns of the object into the response body.
+        //
+        qdr_agent_write_connection_CT(core, query, conn);
 
-    //
-    // Advance to the next connection
-    //
-    query->next_offset = offset;
-    qdr_manage_advance_connection_CT(query, conn);
+        //
+        // Advance to the next connection
+        //
+        query->next_offset = offset;
+        qdr_manage_advance_connection_CT(query, conn);
+    }
+    else {
+        query->more = false;
+    }
 
     //
     // Enqueue the response.

@@ -424,11 +424,12 @@ static void on_transfer(void           *link_context,
                         qd_message_t   *msg)
 {
     qcm_edge_addr_proxy_t *ap = (qcm_edge_addr_proxy_t*) link_context;
+    uint64_t dispo = PN_ACCEPTED;
 
     //
     // Validate the message
     //
-    if (qd_message_check(msg, QD_DEPTH_BODY)) {
+    if (qd_message_check_depth(msg, QD_DEPTH_BODY) == QD_MESSAGE_DEPTH_OK) {
         //
         // Get the message body.  It must be a list with two elements.  The first is an address
         // and the second is a boolean indicating whether that address has upstream destinations.
@@ -460,7 +461,13 @@ static void on_transfer(void           *link_context,
 
         qd_parse_free(body);
         qd_iterator_free(iter);
+    } else {
+        qd_log(ap->core->log, QD_LOG_ERROR,
+               "Edge Address Proxy: received an invalid message body, rejecting");
+        dispo = PN_REJECTED;
     }
+
+    qdrc_endpoint_settle_CT(ap->core, dlv, dispo);
 
     //
     // Replenish the credit for this delivery

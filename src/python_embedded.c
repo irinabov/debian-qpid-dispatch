@@ -347,12 +347,13 @@ PyObject *qd_field_to_py(qd_parsed_field_t *field)
       case QD_AMQP_LIST32: {
           uint32_t count = qd_parse_sub_count(field);
           result = PyList_New(count);
-          for (uint32_t idx = 0; idx < count; idx++) {
-              qd_parsed_field_t *sub = qd_parse_sub_value(field, idx);
-              PyObject *pysub = qd_field_to_py(sub);
+          qd_parsed_field_t *item = qd_field_first_child(field);
+          for (uint32_t idx = 0; item && idx < count; idx++) {
+              PyObject *pysub = qd_field_to_py(item);
               if (pysub == 0)
                   return 0;
               PyList_SetItem(result, idx, pysub);
+              item = qd_field_next_child(item);
           }
           break;
       }
@@ -520,7 +521,7 @@ static void qd_io_rx_handler(void *context, qd_message_t *msg, int link_id, int 
     //
     // Parse the message through the body and exit if the message is not well formed.
     //
-    if (!qd_message_check(msg, QD_DEPTH_BODY))
+    if (qd_message_check_depth(msg, QD_DEPTH_BODY) != QD_MESSAGE_DEPTH_OK)
         return;
 
     // This is called from non-python threads so we need to acquire the GIL to use python APIS.

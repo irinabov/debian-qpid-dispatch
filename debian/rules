@@ -8,6 +8,10 @@ CFLAGS += -Wno-error=switch
 %:
 	dh $@ --with python2
 
+override_dh_auto_clean:
+	dh_auto_clean
+	find . -type l -exec rm -f {} \;
+
 override_dh_auto_configure:
 	dh_auto_configure -- -DCMAKE_BUILD_TYPE=RelWithDebInfo \
                              -DUSE_LIBWEBSOCKETS=OFF \

@@ -45,6 +45,16 @@ ALLOC_DEFINE(qd_parsed_field_t);
 ALLOC_DECLARE(qd_parsed_turbo_t);
 ALLOC_DEFINE(qd_parsed_turbo_t);
 
+qd_parsed_field_t* qd_field_first_child(qd_parsed_field_t *field)
+{
+    return DEQ_HEAD(field->children);
+}
+
+qd_parsed_field_t* qd_field_next_child(qd_parsed_field_t *field)
+{
+    return DEQ_NEXT(field);
+}
+
 /**
  * size = the number of bytes following tag:size (payload, including the count)
  * count = the number of elements. Applies only to compound structures
@@ -701,6 +711,63 @@ qd_parsed_field_t *qd_parse_value_by_key(qd_parsed_field_t *field, const char *k
 }
 
 
+// TODO(kgiusti) - de-duplicate all the buffer chain walking code!
+// See DISPATCH-1403
+//
+static inline int _turbo_advance(qd_iterator_pointer_t *ptr, int length)
+{
+    const int start = ptr->remaining;
+    int move = MIN(length, ptr->remaining);
+    while (move > 0) {
+        int avail = qd_buffer_cursor(ptr->buffer) - ptr->cursor;
+        if (move < avail) {
+            ptr->cursor += move;
+            ptr->remaining -= move;
+            break;
+        }
+        move -= avail;
+        ptr->remaining -= avail;
+        if (ptr->remaining == 0) {
+            ptr->cursor += avail;   // move to end
+            break;
+        }
+
+        // More remaining in buffer chain: advance to next buffer in chain
+        assert(DEQ_NEXT(ptr->buffer));
+        if (!DEQ_NEXT(ptr->buffer)) {
+            // this is an error!  ptr->remainer is not accurate.  This should not happen
+            // since the MA field must be completely received at this point
+            // (see DISPATCH-1394).
+            int copied = start - ptr->remaining;
+            ptr->remaining = 0;
+            ptr->cursor += avail;  // force to end of chain
+            return copied;
+        }
+        ptr->buffer = DEQ_NEXT(ptr->buffer);
+        ptr->cursor = qd_buffer_base(ptr->buffer);
+    }
+    return start - ptr->remaining;
+}
+
+
+// TODO(kgiusti): deduplicate!
+// See DISPATCH-1403
+//
+static inline int _turbo_copy(qd_iterator_pointer_t *ptr, char *buffer, int length)
+{
+    int move = MIN(length, ptr->remaining);
+    char * const start = buffer;
+    while (ptr->remaining && move > 0) {
+        int avail = MIN(move, qd_buffer_cursor(ptr->buffer) - ptr->cursor);
+        memcpy(buffer, ptr->cursor, avail);
+        buffer += avail;
+        move -= avail;
+        _turbo_advance(ptr, avail);
+    }
+    return (buffer - start);
+}
+
+
 const char *qd_parse_annotations_v1(
     bool                   strip_anno_in,
     qd_iterator_t         *ma_iter_in,
@@ -722,61 +789,108 @@ const char *qd_parse_annotations_v1(
         return parse_error;
     }
 
+    // define a shorthand name for the qd message annotation key prefix length
+#define QMPL QD_MA_PREFIX_LEN
+
+    // trace, phase, and class keys are all the same length
+    assert(QD_MA_TRACE_LEN == QD_MA_PHASE_LEN);
+    assert(QD_MA_TRACE_LEN == QD_MA_CLASS_LEN);
+    
     qd_parsed_turbo_t *anno;
     if (!strip_anno_in) {
         anno = DEQ_HEAD(annos);
         while (anno) {
-            qd_iterator_t *key_iter =
-                qd_iterator_buffer(anno->bufptr.buffer,
-                                anno->bufptr.cursor - qd_buffer_base(anno->bufptr.buffer),
-                                anno->size + anno->length_of_size,
-                                ITER_VIEW_ALL);
-            assert(key_iter);
+            uint8_t * dp;                     // pointer to key name in raw buf or extract buf
+            char key_name[QD_MA_MAX_KEY_LEN]; // key name extracted across buf boundary
+            int key_len = anno->size;
 
-            qd_parsed_field_t *key_field = qd_parse(key_iter);
-            assert(key_field);
-
-            qd_iterator_t *iter = qd_parse_raw(key_field);
-            assert(iter);
-
-            qd_parsed_turbo_t *anno_val = DEQ_NEXT(anno);
-            assert(anno_val);
-
-            qd_iterator_t *val_iter =
-                qd_iterator_buffer(anno_val->bufptr.buffer,
-                                anno_val->bufptr.cursor - qd_buffer_base(anno_val->bufptr.buffer),
-                                anno_val->size + anno_val->length_of_size,
-                                ITER_VIEW_ALL);
-            assert(val_iter);
-
-            qd_parsed_field_t *val_field = qd_parse(val_iter);
-            assert(val_field);
-
-            // Hoist the key name out of the buffers into a normal char array
-            char key_name[QD_MA_MAX_KEY_LEN + 1];
-            (void)qd_iterator_strncpy(iter, key_name, QD_MA_MAX_KEY_LEN + 1);
-
-            // transfer ownership of the extracted value to the message
-            if        (!strcmp(key_name, QD_MA_TRACE)) {
-                *ma_trace = val_field;
-            } else if (!strcmp(key_name, QD_MA_INGRESS)) {
-                *ma_ingress = val_field;
-            } else if (!strcmp(key_name, QD_MA_TO)) {
-                *ma_to_override = val_field;
-            } else if (!strcmp(key_name, QD_MA_PHASE)) {
-                *ma_phase = val_field;
+            const int avail = qd_buffer_cursor(anno->bufptr.buffer) - anno->bufptr.cursor;
+            if (avail >= anno->size + anno->length_of_size + 1) {
+                // The best case: key name is completely in current raw buffer
+                dp = anno->bufptr.cursor + anno->length_of_size + 1;
             } else {
-                // TODO: this key had the QD_MA_PREFIX but it does not match
-                //       one of the actual fields. 
-                qd_parse_free(val_field);
+                // Pull the key name from multiple buffers
+                qd_iterator_pointer_t wbuf = anno->bufptr;    // scratch buf pointers for getting key
+                _turbo_advance(&wbuf, anno->length_of_size + 1);
+                int t_size = MIN(anno->size, QD_MA_MAX_KEY_LEN); // get this many total
+                key_len = _turbo_copy(&wbuf, key_name, t_size);
+
+                dp = (uint8_t *)key_name;
             }
 
-            qd_iterator_free(key_iter);
-            qd_parse_free(key_field);
-            qd_iterator_free(val_iter);
-            // val_field is usually handed over to message_private and is freed 
+            // Verify that the key starts with the prefix.
+            // Once a key with the routing prefix is observed in the annotation
+            // stream then the remainder of the keys must be routing keys.
+            // Padding keys are not real routing annotations but they have
+            // the routing prefix.
+            assert(key_len >= QMPL && memcmp(QD_MA_PREFIX, dp, QMPL) == 0);
 
-            anno = DEQ_NEXT(anno_val);
+            // Advance pointer to data beyond the common prefix
+            dp += QMPL;
+
+            qd_ma_enum_t ma_type = QD_MAE_NONE;
+            switch (key_len) {
+                case QD_MA_TO_LEN:
+                    if (memcmp(QD_MA_TO + QMPL,      dp, QD_MA_TO_LEN - QMPL) == 0) {
+                        ma_type = QD_MAE_TO;
+                    }
+                    break;
+                case QD_MA_TRACE_LEN:
+                    if (memcmp(QD_MA_TRACE + QMPL,  dp, QD_MA_TRACE_LEN - QMPL) == 0) {
+                        ma_type = QD_MAE_TRACE;
+                    } else
+                    if (memcmp(QD_MA_PHASE + QMPL,  dp, QD_MA_PHASE_LEN - QMPL) == 0) {
+                        ma_type = QD_MAE_PHASE;
+                    }
+                    break;
+                case QD_MA_INGRESS_LEN:
+                    if (memcmp(QD_MA_INGRESS + QMPL, dp, QD_MA_INGRESS_LEN - QMPL) == 0) {
+                        ma_type = QD_MAE_INGRESS;
+                    }
+                    break;
+                default:
+                    // padding annotations are ignored here
+                    break;
+            }
+
+            // Process the data field
+            anno = DEQ_NEXT(anno);
+            assert(anno);
+
+            if (ma_type != QD_MAE_NONE) {
+                // produce a parsed_field for the data
+                qd_iterator_t *val_iter =
+                    qd_iterator_buffer(anno->bufptr.buffer,
+                                    anno->bufptr.cursor - qd_buffer_base(anno->bufptr.buffer),
+                                    anno->size + anno->length_of_size,
+                                    ITER_VIEW_ALL);
+                assert(val_iter);
+
+                qd_parsed_field_t *val_field = qd_parse(val_iter);
+                assert(val_field);
+
+                // transfer ownership of the extracted value to the message
+                switch (ma_type) {
+                    case QD_MAE_INGRESS:
+                        *ma_ingress = val_field;
+                        break;
+                    case QD_MAE_TRACE:
+                        *ma_trace = val_field;
+                        break;
+                    case QD_MAE_TO:
+                        *ma_to_override = val_field;
+                        break;
+                    case QD_MAE_PHASE:
+                        *ma_phase = val_field;
+                        break;
+                    case QD_MAE_NONE:
+                        assert(false);
+                        break;
+                }
+
+                qd_iterator_free(val_iter);
+            }
+            anno = DEQ_NEXT(anno);
         }
     }
 

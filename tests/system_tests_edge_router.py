@@ -27,21 +27,21 @@ from time import sleep
 from threading import Event
 from threading import Timer
 
-import unittest2 as unittest
 from proton import Message, Timeout
 from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, MgmtMsgProxy
 from system_test import AsyncTestReceiver
 from system_test import AsyncTestSender
 from system_test import QdManager
+from system_test import unittest
 from system_tests_link_routes import ConnLinkRouteService
 from test_broker import FakeService
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, DynamicNodeProperties
 from proton.utils import BlockingConnection
 from qpid_dispatch.management.client import Node
+from qpid_dispatch_internal.tools.command import version_supports_mutually_exclusive_arguments
 from subprocess import PIPE, STDOUT
 import re
-
 
 class AddrTimer(object):
     def __init__(self, parent):
@@ -1210,6 +1210,146 @@ class RouterTest(TestCase):
         test.run()
         self.assertEqual(None, test.error)
 
+    def run_qdstat(self, args, regexp=None, address=None):
+        if args:
+            popen_arg = ['qdstat', '--bus', str(address or self.router.addresses[0]),
+                 '--timeout', str(TIMEOUT)] + args
+        else:
+            popen_arg = ['qdstat', '--bus',
+                         str(address or self.router.addresses[0]),
+                         '--timeout', str(TIMEOUT)]
+
+        p = self.popen(popen_arg,
+                       name='qdstat-' + self.id(), stdout=PIPE, expect=None,
+            universal_newlines=True)
+
+        out = p.communicate()[0]
+        assert p.returncode == 0, \
+            "qdstat exit status %s, output:\n%s" % (p.returncode, out)
+        if regexp: assert re.search(regexp, out,
+                                    re.I), "Can't find '%s' in '%s'" % (
+        regexp, out)
+        return out
+
+    def test_68_edge_qdstat_all_routers(self):
+        # Connects to an edge router and runs "qdstat --all-routers"
+        # "qdstat --all-routers" is same as "qdstat --all-routers --g"
+        # Connecting to an edge router and running "qdstat --all-routers""will only yield the
+        # summary statostics of the edge router. It will not show statistics of the interior routers.
+        outs = self.run_qdstat(['--all-routers'],
+                               address=self.routers[2].addresses[0])
+        self.assertTrue("Router Id                        EA1" in outs)
+
+        outs = self.run_qdstat(['--all-routers', '--all-entities'],
+                               address=self.routers[2].addresses[0])
+        # Check if each entity  section is showing
+        self.assertTrue("Router Links" in outs)
+        self.assertTrue("Router Addresses" in outs)
+        self.assertTrue("Connections" in outs)
+        self.assertTrue("AutoLinks" in outs)
+        self.assertTrue("Auto Links" in outs)
+        self.assertEqual(outs.count("Link Routes"), 2)
+        self.assertTrue("Router Statistics" in outs)
+        self.assertTrue("Router Id                        EA1" in outs)
+
+        self.assertTrue("Types" in outs)
+
+        outs = self.run_qdstat(['-c', '--all-routers'],
+                               address=self.routers[2].addresses[0])
+
+        # Verify that the the edhe uplink connection is showing
+        self.assertTrue("INT.A" in outs)
+        self.assertTrue("inter-router" not in outs)
+
+        outs = self.run_qdstat(['--all-entities'],
+                               address=self.routers[2].addresses[0])
+        # Check if each entity  section is showing
+        self.assertTrue("Router Links" in outs)
+        self.assertTrue("Router Addresses" in outs)
+        self.assertTrue("Connections" in outs)
+        self.assertTrue("AutoLinks" in outs)
+        self.assertTrue("Auto Links" in outs)
+        self.assertEqual(outs.count("Link Routes"), 2)
+        self.assertTrue("Router Statistics" in outs)
+        self.assertTrue("Router Id                        EA1" in outs)
+
+        self.assertTrue("Types" in outs)
+
+    def test_69_interior_qdstat_all_routers(self):
+        # Connects to an interior router and runs "qdstat --all-routers"
+        # "qdstat --all-routers" is same as "qdstat --all-routers --all-entities"
+        # Connecting to an interior router and running "qdstat --all-routers""will yield the
+        # summary statostics of all the interior routers.
+        outs = self.run_qdstat(['--all-routers'],
+                               address=self.routers[0].addresses[0])
+        self.assertEqual(outs.count("Router Statistics"), 2)
+
+        outs = self.run_qdstat(['--all-routers', '-nv'],
+                               address=self.routers[0].addresses[0])
+        # 5 occurences including section headers
+        self.assertEqual(outs.count("INT.A"), 5)
+        self.assertEqual(outs.count("INT.B"), 5)
+
+        outs = self.run_qdstat(['--all-routers', '--all-entities'],
+                               address=self.routers[0].addresses[0])
+        self.assertEqual(outs.count("Router Links"), 2)
+        self.assertEqual(outs.count("Router Addresses"), 2)
+        self.assertEqual(outs.count("Connections"), 4)
+        self.assertEqual(outs.count("AutoLinks"), 2)
+        self.assertEqual(outs.count("Auto Links"), 2)
+        self.assertEqual(outs.count("Link Routes"), 4)
+        self.assertEqual(outs.count("Router Statistics"), 2)
+        self.assertEqual(outs.count("Types"), 2)
+
+        outs = self.run_qdstat(['--all-routers', '-nv'],
+                               address=self.routers[0].addresses[0])
+        # 5 occurences including section headers
+        self.assertEqual(outs.count("INT.A"), 5)
+        self.assertEqual(outs.count("INT.B"), 5)
+
+        outs = self.run_qdstat(['-c', '--all-routers'],
+                               address=self.routers[0].addresses[0])
+        self.assertEqual(outs.count("INT.A"), 2)
+        self.assertEqual(outs.count("INT.B"), 2)
+
+        outs = self.run_qdstat(['-l', '--all-routers'],
+                               address=self.routers[0].addresses[0])
+
+        # Two edge-downlinks from each interior to the two edges, 4 in total.
+        self.assertEqual(outs.count("edge-downlink"), 4)
+
+        # Gets all entity information of the interior router
+        outs = self.run_qdstat(['--all-entities'],
+                       address=self.routers[0].addresses[0])
+        self.assertEqual(outs.count("Router Links"), 1)
+        self.assertEqual(outs.count("Router Addresses"), 1)
+        self.assertEqual(outs.count("AutoLinks"), 1)
+        self.assertEqual(outs.count("Auto Links"), 1)
+        self.assertEqual(outs.count("Router Statistics"), 1)
+        self.assertEqual(outs.count("Link Routes"), 2)
+
+        if version_supports_mutually_exclusive_arguments():
+            has_error = False
+            try:
+                # You cannot combine --all-entities  with -c
+                outs = self.run_qdstat(['-c', '--all-entities'],
+                                   address=self.routers[0].addresses[0])
+            except Exception as e:
+                if "error: argument --all-entities: not allowed with argument -c/--connections" in str(e):
+                    has_error=True
+
+            self.assertTrue(has_error)
+
+            has_error = False
+            try:
+                outs = self.run_qdstat(['-r', 'INT.A', '--all-routers'],
+                                       address=self.routers[0].addresses[0])
+            except Exception as e:
+                if "error: argument --all-routers: not allowed with argument -r/--router" in str(e):
+                    has_error=True
+
+            self.assertTrue(has_error)
+
 
 class LinkRouteProxyTest(TestCase):
     """
@@ -1364,7 +1504,7 @@ class LinkRouteProxyTest(TestCase):
         rx = AsyncTestReceiver(self.EB1.listener, 'CfgLinkRoute1/foo',
                                wait=False, recover_link=True)
         tx = AsyncTestSender(self.EA1.listener, 'CfgLinkRoute1/foo',
-                             body="HEY HO LET'S GO!")
+                             message=Message(body="HEY HO LET'S GO!"))
         tx.wait()
 
         msg = rx.queue.get(timeout=TIMEOUT)
@@ -2557,6 +2697,38 @@ class MobileAddressEventTest(MessagingHandler):
     def run(self):
         Container(self).run()
 
+class EdgeListenerSender(TestCase):
+
+    inter_router_port = None
+
+    @classmethod
+    def setUpClass(cls):
+        super(EdgeListenerSender, cls).setUpClass()
+
+        def router(name, mode, connection, extra=None):
+            config = [
+                ('router', {'mode': mode, 'id': name}),
+                ('address',
+                 {'prefix': 'multicast', 'distribution': 'multicast'}),
+                connection
+            ]
+
+            config = Qdrouterd.Config(config)
+            cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
+
+        cls.routers = []
+
+        edge_port_A = cls.tester.get_port()
+        router('INT.A', 'interior',  ('listener', {'role': 'edge', 'port': edge_port_A}))
+        cls.routers[0].wait_ports()
+
+    # Without the fix for DISPATCH-1492, this test will fail because
+    # of the router crash.
+    def test_edge_listener_sender_crash_DISPATCH_1492(self):
+        addr = self.routers[0].addresses[0]
+        blocking_connection = BlockingConnection(addr)
+        blocking_sender = blocking_connection.create_sender(address="multicast")
+        self.assertTrue(blocking_sender!=None)
 
 if __name__== '__main__':
     unittest.main(main_module())

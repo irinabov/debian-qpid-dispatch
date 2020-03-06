@@ -63,6 +63,9 @@ static void qdr_config_link_route_insert_column_CT(qdr_link_route_t *lr, int col
     const char *text = 0;
     const char *key;
 
+    if  (!lr)
+        return;
+
     if (as_map)
         qd_compose_insert_string(body, qdr_config_link_route_columns[col]);
 
@@ -170,9 +173,11 @@ static void qdr_agent_write_config_link_route_CT(qdr_query_t *query,  qdr_link_r
 
     qd_compose_start_list(body);
     int i = 0;
-    while (query->columns[i] >= 0) {
-        qdr_config_link_route_insert_column_CT(lr, query->columns[i], body, false);
-        i++;
+    if (lr) {
+        while (query->columns[i] >= 0) {
+            qdr_config_link_route_insert_column_CT(lr, query->columns[i], body, false);
+            i++;
+        }
     }
     qd_compose_end_list(body);
 }
@@ -180,9 +185,14 @@ static void qdr_agent_write_config_link_route_CT(qdr_query_t *query,  qdr_link_r
 
 static void qdr_manage_advance_config_link_route_CT(qdr_query_t *query, qdr_link_route_t *lr)
 {
-    query->next_offset++;
-    lr = DEQ_NEXT(lr);
-    query->more = !!lr;
+    if (lr){
+        query->next_offset++;
+        lr = DEQ_NEXT(lr);
+        query->more = !!lr;
+    }
+    else {
+        query->more = false;
+    }
 }
 
 

@@ -102,8 +102,9 @@ static qdr_delivery_t *qdr_node_delivery_qdr_from_pn(pn_delivery_t *dlv)
 }
 
 
-static void qdr_node_reap_abandoned_deliveries(qdr_core_t *core, qd_link_t *link)
+void qd_link_abandoned_deliveries_handler(void *context, qd_link_t *link)
 {
+    qd_router_t    *router = (qd_router_t*) context;
     qd_link_ref_list_t *list = qd_link_get_ref_list(link);
     qd_link_ref_t      *ref  = DEQ_HEAD(*list);
 
@@ -112,12 +113,11 @@ static void qdr_node_reap_abandoned_deliveries(qdr_core_t *core, qd_link_t *link
         qdr_delivery_t *dlv = (qdr_delivery_t*) ref->ref;
         ref->ref = 0;
         qdr_delivery_set_context(dlv, 0);
-        qdr_delivery_decref(core, dlv, "qdr_node_reap_abandoned_deliveries");
+        qdr_delivery_decref(router->router_core, dlv, "qd_link_abandoned_deliveries_handler");
         free_qd_link_ref_t(ref);
         ref = DEQ_HEAD(*list);
     }
 }
-
 
 
 
@@ -344,8 +344,10 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
         pn_link_advance(pn_link);
         next_delivery = pn_link_current(pn_link) != 0;
 
-        if (qdr_delivery_disposition(delivery) != 0)
-            pn_delivery_update(pnd, qdr_delivery_disposition(delivery));
+        uint64_t local_disp = qdr_delivery_disposition(delivery);
+        if (local_disp != 0) {
+            pn_delivery_update(pnd, local_disp);
+        }
     }
 
     if (qd_message_is_discard(msg)) {
@@ -463,20 +465,19 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
     // using the address from the link target.
     //
     qd_message_depth_t  validation_depth = (anonymous_link || check_user) ? QD_DEPTH_PROPERTIES : QD_DEPTH_MESSAGE_ANNOTATIONS;
-    bool                valid_message    = qd_message_check(msg, validation_depth);
+    qd_message_depth_status_t  depth_valid = qd_message_check_depth(msg, validation_depth);
 
-    if (!valid_message) {
-        if (receive_complete) {
-            //
-            // The entire message has been received and the message is still invalid.  Reject the message.
-            //
+    if (depth_valid != QD_MESSAGE_DEPTH_OK) {
+        if (depth_valid == QD_MESSAGE_DEPTH_INVALID) {
             qd_message_set_discard(msg, true);
             pn_link_flow(pn_link, 1);
             pn_delivery_update(pnd, PN_REJECTED);
             pn_delivery_settle(pnd);
             qd_message_free(msg);
+        } else {
+            // otherwise wait until more data arrives and re-try the validation
+            assert(depth_valid == QD_MESSAGE_DEPTH_INCOMPLETE);
         }
-        // otherwise wait until more data arrives and re-try the validation
         return next_delivery;
     }
 
@@ -689,12 +690,12 @@ static void AMQP_disposition_handler(void* context, qd_link_t *link, pn_delivery
     //
     // Update the disposition of the delivery
     //
-    qdr_delivery_update_disposition(router->router_core, delivery,
-                                    pn_delivery_remote_state(pnd),
-                                    pn_delivery_settled(pnd),
-                                    error,
-                                    pn_disposition_data(disp),
-                                    false);
+    qdr_delivery_remote_state_updated(router->router_core, delivery,
+                                      pn_delivery_remote_state(pnd),
+                                      pn_delivery_settled(pnd),
+                                      error,
+                                      pn_disposition_data(disp),
+                                      false);
 
     //
     // If settled, close out the delivery
@@ -825,7 +826,6 @@ static int AMQP_link_detach_handler(void* context, qd_link_t *link, qd_detach_ty
         }
     }
 
-    qd_router_t    *router = (qd_router_t*) context;
     qdr_link_t     *rlink  = (qdr_link_t*) qd_link_get_context(link);
     pn_condition_t *cond   = qd_link_pn(link) ? pn_link_remote_condition(qd_link_pn(link)) : 0;
 
@@ -843,7 +843,6 @@ static int AMQP_link_detach_handler(void* context, qd_link_t *link, qd_detach_ty
         //
         if (dt == QD_LOST || qdr_link_get_context(rlink) == 0) {
             qdr_link_set_context(rlink, 0);
-            qdr_node_reap_abandoned_deliveries(router->router_core, link);
             qd_link_free(link);
         }
 
@@ -1203,6 +1202,16 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
 
     pn_data_format(props, props_str, &props_len);
 
+    if (conn->connector) {
+        char conn_msg[300];
+        qd_format_string(conn_msg, 300, "[C%"PRIu64"] Connection Opened: dir=%s host=%s vhost=%s encrypted=%s"
+                " auth=%s user=%s container_id=%s",
+                connection_id, inbound ? "in" : "out", host, vhost ? vhost : "", encrypted ? proto : "no",
+                        authenticated ? mech : "no", (char*) user, container);
+        strcpy(conn->connector->conn_msg, conn_msg);
+    }
+
+
     qd_log(router->log_source, QD_LOG_INFO, "[C%"PRIu64"] Connection Opened: dir=%s host=%s vhost=%s encrypted=%s"
            " auth=%s user=%s container_id=%s props=%s",
            connection_id, inbound ? "in" : "out", host, vhost ? vhost : "", encrypted ? proto : "no",
@@ -1262,6 +1271,7 @@ static qd_node_type_t router_node = {"router", 0, 0,
                                      AMQP_writable_conn_handler,
                                      AMQP_link_detach_handler,
                                      AMQP_link_attach_handler,
+                                     qd_link_abandoned_deliveries_handler,
                                      AMQP_link_flow_handler,
                                      0,   // node_created_handler
                                      0,   // node_destroyed_handler
@@ -1362,6 +1372,14 @@ static void CORE_link_first_attach(void             *context,
     pn_link_open(qd_link_pn(qlink));
 
     //
+    // All links on the inter router or edge connection have unbounded q2 limit.
+    // Blocking control messages can lead to various failures
+    //
+    if (qdr_connection_role(conn) == QDR_ROLE_EDGE_CONNECTION || qdr_connection_role(conn) == QDR_ROLE_INTER_ROUTER) {
+        qd_link_set_q2_limit_unbounded(qlink, true);
+    }
+
+    //
     // Mark the link as stalled and waiting for initial credit.
     //
     if (qdr_link_direction(link) == QD_OUTGOING)
@@ -1375,13 +1393,17 @@ static void CORE_link_second_attach(void *context, qdr_link_t *link, qdr_terminu
     if (!qlink)
         return;
 
+    pn_link_t *pn_link = qd_link_pn(qlink);
+    if (!pn_link)
+        return;
+
     qdr_terminus_copy(source, qd_link_source(qlink));
     qdr_terminus_copy(target, qd_link_target(qlink));
 
     //
     // Open (attach) the link
     //
-    pn_link_open(qd_link_pn(qlink));
+    pn_link_open(pn_link);
 
     qd_connection_t  *conn     = qd_link_connection(qlink);
     qdr_connection_t *qdr_conn = (qdr_connection_t*) qd_connection_get_context(conn);
@@ -1424,7 +1446,6 @@ static void CORE_close_connection(void *context, qdr_connection_t *qdr_conn, qdr
 
 static void CORE_link_detach(void *context, qdr_link_t *link, qdr_error_t *error, bool first, bool close)
 {
-    qd_router_t *router = (qd_router_t*) context;
     qd_link_t   *qlink  = (qd_link_t*) qdr_link_get_context(link);
     if (!qlink)
         return;
@@ -1446,10 +1467,13 @@ static void CORE_link_detach(void *context, qdr_link_t *link, qdr_error_t *error
     // if we don't nullify it here.
     //
     if (pn_link_state(pn_link) & PN_LOCAL_UNINIT) {
-        if (pn_link_is_receiver(pn_link))
+        if (pn_link_is_receiver(pn_link)) {
             pn_terminus_set_type(pn_link_target(pn_link), PN_UNSPECIFIED);
-        else
+            pn_terminus_copy(pn_link_source(pn_link), pn_link_remote_source(pn_link));
+        } else {
             pn_terminus_set_type(pn_link_source(pn_link), PN_UNSPECIFIED);
+            pn_terminus_copy(pn_link_target(pn_link), pn_link_remote_target(pn_link));
+        }
     }
 
     if (close)
@@ -1468,7 +1492,6 @@ static void CORE_link_detach(void *context, qdr_link_t *link, qdr_error_t *error
     // If this is the second detach, free the qd_link
     //
     if (!first) {
-        qdr_node_reap_abandoned_deliveries(router->router_core, qlink);
         qd_link_free(qlink);
     }
 }
@@ -1502,14 +1525,17 @@ static void CORE_link_offer(void *context, qdr_link_t *link, int delivery_count)
 
 static void CORE_link_drained(void *context, qdr_link_t *link)
 {
+    qd_router_t *router = (qd_router_t*) context;
     qd_link_t *qlink = (qd_link_t*) qdr_link_get_context(link);
     if (!qlink)
         return;
 
     pn_link_t *plink = qd_link_pn(qlink);
 
-    if (plink)
+    if (plink) {
         pn_link_drained(plink);
+        qdr_link_set_drained(router->router_core, link);
+    }
 }
 
 
@@ -1646,6 +1672,18 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
 }
 
 
+static int CORE_link_get_credit(void *context, qdr_link_t *link)
+{
+    qd_link_t *qlink = (qd_link_t*) qdr_link_get_context(link);
+    pn_link_t *plink = !!qlink ? qd_link_pn(qlink) : 0;
+
+    if (!plink)
+        return 0;
+
+    return pn_link_remote_credit(plink);
+}
+
+
 static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t disp, bool settled)
 {
     qd_router_t   *router = (qd_router_t*) context;
@@ -1703,10 +1741,13 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
         //
         // If the delivery is still arriving, don't push out the disposition change yet.
         //
-        if (qd_message_receive_complete(msg))
+        if (qd_message_receive_complete(msg)) {
             pn_delivery_update(pnd, disp);
-        else
+        } else {
+            // just update the local disposition for now - AMQP_rx_handler will
+            // write this to proton once the message is fully received.
             qdr_delivery_set_disposition(dlv, disp);
+        }
     }
 
     if (settled) {
@@ -1754,6 +1795,7 @@ void qd_router_setup_late(qd_dispatch_t *qd)
                             CORE_link_drain,
                             CORE_link_push,
                             CORE_link_deliver,
+                            CORE_link_get_credit,
                             CORE_delivery_update,
                             CORE_close_connection);
 

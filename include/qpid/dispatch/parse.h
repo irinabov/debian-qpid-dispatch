@@ -243,6 +243,9 @@ qd_parsed_field_t *qd_parse_sub_key(qd_parsed_field_t *field, uint32_t idx);
  */
 qd_parsed_field_t *qd_parse_sub_value(qd_parsed_field_t *field, uint32_t idx);
 
+qd_parsed_field_t *qd_field_first_child(qd_parsed_field_t *field);
+qd_parsed_field_t *qd_field_next_child(qd_parsed_field_t *field);
+
 /**
  * Convenience Function - Return true iff the field is a map.
  *
@@ -300,6 +303,17 @@ void qd_parse_annotations(
     qd_parsed_field_t    **ma_trace,
     qd_iterator_pointer_t *blob_pointer,
     uint32_t              *blob_item_count);
+
+/**
+ * Identify which annotation is being parsed
+ */
+typedef enum {
+    QD_MAE_INGRESS,
+    QD_MAE_TRACE,
+    QD_MAE_TO,
+    QD_MAE_PHASE,
+    QD_MAE_NONE
+} qd_ma_enum_t;
 
 ///@}
 

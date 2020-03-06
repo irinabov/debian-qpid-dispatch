@@ -24,7 +24,6 @@ from __future__ import division
 from __future__ import absolute_import
 from __future__ import print_function
 
-import unittest2 as unittest
 import system_test, re, os, json
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
@@ -34,6 +33,7 @@ from qpid_dispatch_internal.management.qdrouter import QdSchema
 from qpid_dispatch_internal.compat import dictify
 from qpid_dispatch_internal.compat import BINARY
 from system_test import Qdrouterd, message, Process
+from system_test import unittest
 from itertools import chain
 
 PREFIX = u'org.apache.qpid.dispatch.'
@@ -62,7 +62,7 @@ class ManagementTest(system_test.TestCase):
         super(ManagementTest, cls).setUpClass()
         # Stand-alone router
         conf0=Qdrouterd.Config([
-            ('router', { 'mode': 'standalone', 'id': 'solo'}),
+            ('router', { 'mode': 'standalone', 'id': 'solo', 'metadata': 'selftest;solo'}),
             ('listener', {'name': 'l0', 'port':cls.get_port(), 'role':'normal'}),
             # Extra listeners to exercise managment query
             ('listener', {'name': 'l1', 'port':cls.get_port(), 'role':'normal'}),
@@ -127,6 +127,13 @@ class ManagementTest(system_test.TestCase):
         self.assertRaises(BadRequestStatus, self.node.call, self.node.request())
         self.assertRaises(NotImplementedStatus, self.node.call,
                           self.node.request(operation="nosuch", type="org.amqp.management"))
+
+    def test_metadata(self):
+        """Query with type only"""
+        response = self.node.query(type=ROUTER)
+        for attr in ['type', 'metadata']:
+            self.assertTrue(attr in response.attribute_names)
+        self.assertEqual(response.get_entities()[0]['metadata'], 'selftest;solo')
 
     def test_query_type(self):
         """Query with type only"""
@@ -463,9 +470,9 @@ class ManagementTest(system_test.TestCase):
     def test_get_schema(self):
         schema = dictify(QdSchema().dump())
         got = self.node.call(self.node.request(operation="GET-JSON-SCHEMA", identity="self")).body
-        self.assertEquals(schema, dictify(json.loads(got)))
+        self.assertEqual(schema, dictify(json.loads(got)))
         got = self.node.call(self.node.request(operation="GET-SCHEMA", identity="self")).body
-        self.assertEquals(schema, got)
+        self.assertEqual(schema, got)
 
 
 class SimpleSndRecv(MessagingHandler):

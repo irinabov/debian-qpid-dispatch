@@ -58,7 +58,7 @@ static void logger(int lll, const char *line)  {
     while (len > 1 && isspace(line[len-1])) { /* Strip trailing newline */
         --len;
     }
-    qd_log(http_log, qd_level(lll), "%.*s", len, line);
+    qd_log(http_log, qd_level(lll), "%.*s", (int)len, line);
 }
 
 static void log_init() {
@@ -471,6 +471,8 @@ static int stats_get_deliveries_ingress_route_container(qdr_global_stats_t *stat
 static int stats_get_deliveries_egress_route_container(qdr_global_stats_t *stats) { return stats->deliveries_egress_route_container; }
 static int stats_get_deliveries_delayed_1sec(qdr_global_stats_t *stats) { return stats->deliveries_delayed_1sec; }
 static int stats_get_deliveries_delayed_10sec(qdr_global_stats_t *stats) { return stats->deliveries_delayed_10sec; }
+static int stats_get_deliveries_stuck(qdr_global_stats_t *stats) { return stats->deliveries_stuck; }
+static int stats_get_links_blocked(qdr_global_stats_t *stats) { return stats->links_blocked; }
 static int stats_get_deliveries_redirected_to_fallback(qdr_global_stats_t *stats) { return stats->deliveries_redirected_to_fallback; }
 
 static struct metric_definition metrics[] = {
@@ -493,6 +495,8 @@ static struct metric_definition metrics[] = {
     {"deliveries_egress_route_container", "counter", stats_get_deliveries_egress_route_container},
     {"deliveries_delayed_1sec", "counter", stats_get_deliveries_delayed_1sec},
     {"deliveries_delayed_10sec", "counter", stats_get_deliveries_delayed_10sec},
+    {"deliveries_stuck", "gauge", stats_get_deliveries_stuck},
+    {"links_blocked", "gauge", stats_get_links_blocked},
     {"deliveries_redirected_to_fallback", "counter", stats_get_deliveries_redirected_to_fallback}
 };
 static size_t metrics_length = sizeof(metrics)/sizeof(metrics[0]);
@@ -555,7 +559,7 @@ static int callback_metrics(struct lws *wsi, enum lws_callback_reasons reason,
         while (stats->current < metrics_length) {
             if (write_metric(&position, end, &metrics[stats->current], &stats->context->stats)) {
                 stats->current++;
-                qd_log(hs->log, QD_LOG_DEBUG, "wrote metric %i of %i", stats->current, metrics_length);
+                qd_log(hs->log, QD_LOG_DEBUG, "wrote metric %lu of %lu", stats->current, metrics_length);
             } else {
                 qd_log(hs->log, QD_LOG_DEBUG, "insufficient space in buffer");
                 break;

@@ -44,9 +44,12 @@
 #define QDR_LINK_MODIFIED_COUNT           20
 #define QDR_LINK_DELAYED_1SEC             21
 #define QDR_LINK_DELAYED_10SEC            22
-#define QDR_LINK_INGRESS_HISTOGRAM        23
-#define QDR_LINK_PRIORITY                 24
-#define QDR_LINK_SETTLE_RATE              25
+#define QDR_LINK_DELIVERIES_STUCK         23
+#define QDR_LINK_INGRESS_HISTOGRAM        24
+#define QDR_LINK_PRIORITY                 25
+#define QDR_LINK_SETTLE_RATE              26
+#define QDR_LINK_CREDIT_AVAILABLE         27
+#define QDR_LINK_ZERO_CREDIT_SECONDS      28
 
 const char *qdr_link_columns[] =
     {"name",
@@ -72,9 +75,12 @@ const char *qdr_link_columns[] =
      "modifiedCount",
      "deliveriesDelayed1Sec",
      "deliveriesDelayed10Sec",
+     "deliveriesStuck",
      "ingressHistogram",
      "priority",
      "settleRate",
+     "creditAvailable",
+     "zeroCreditSeconds",
      0};
 
 static const char *qd_link_type_name(qd_link_type_t lt)
@@ -98,6 +104,9 @@ static const char *address_key(qdr_address_t *addr)
 static void qdr_agent_write_column_CT(qdr_core_t *core, qd_composed_field_t *body, int col, qdr_link_t *link)
 {
     char *text = 0;
+
+    if (!link)
+        return;
 
     switch(col) {
     case QDR_LINK_NAME: {
@@ -227,6 +236,10 @@ static void qdr_agent_write_column_CT(qdr_core_t *core, qd_composed_field_t *bod
         qd_compose_insert_ulong(body, link->deliveries_delayed_10sec);
         break;
 
+    case QDR_LINK_DELIVERIES_STUCK:
+        qd_compose_insert_ulong(body, link->deliveries_stuck);
+        break;
+
     case QDR_LINK_INGRESS_HISTOGRAM:
         if (link->ingress_histogram) {
             qd_compose_start_list(body);
@@ -260,6 +273,17 @@ static void qdr_agent_write_column_CT(qdr_core_t *core, qd_composed_field_t *bod
     }
         break;
 
+    case QDR_LINK_CREDIT_AVAILABLE:
+        qd_compose_insert_uint(body, link->credit_reported);
+        break;
+
+    case QDR_LINK_ZERO_CREDIT_SECONDS:
+        if (link->zero_credit_time == 0)
+            qd_compose_insert_uint(body, 0);
+        else
+            qd_compose_insert_uint(body, core->uptime_ticks - link->zero_credit_time);
+        break;
+
     default:
         qd_compose_insert_null(body);
         break;
@@ -271,10 +295,12 @@ static void qdr_agent_write_link_CT(qdr_core_t *core, qdr_query_t *query,  qdr_l
     qd_composed_field_t *body = query->body;
 
     qd_compose_start_list(body);
-    int i = 0;
-    while (query->columns[i] >= 0) {
-        qdr_agent_write_column_CT(core, body, query->columns[i], link);
-        i++;
+    if (link) {
+        int i = 0;
+        while (query->columns[i] >= 0) {
+            qdr_agent_write_column_CT(core, body, query->columns[i], link);
+            i++;
+        }
     }
     qd_compose_end_list(body);
 }
@@ -315,16 +341,21 @@ void qdra_link_get_first_CT(qdr_core_t *core, qdr_query_t *query, int offset)
         link = DEQ_NEXT(link);
     assert(link);
 
-    //
-    // Write the columns of the link into the response body.
-    //
-    qdr_agent_write_link_CT(core, query, link);
+    if (link) {
+        //
+        // Write the columns of the link into the response body.
+        //
+        qdr_agent_write_link_CT(core, query, link);
 
-    //
-    // Advance to the next address
-    //
-    query->next_offset = offset;
-    qdr_manage_advance_link_CT(query, link);
+        //
+        // Advance to the next address
+        //
+        query->next_offset = offset;
+        qdr_manage_advance_link_CT(query, link);
+    }
+    else {
+        query->more = false;
+    }
 
     //
     // Enqueue the response.

@@ -58,7 +58,6 @@ struct qd_link_t {
     qd_direction_t              direction;
     void                       *context;
     qd_node_t                  *node;
-    bool                        drain_mode;
     pn_snd_settle_mode_t        remote_snd_settle_mode;
     qd_link_ref_list_t          ref_list;
     bool                        q2_limit_unbounded;
@@ -122,7 +121,6 @@ static void setup_outgoing_link(qd_container_t *container, pn_link_t *pn_link)
     link->node       = node;
 
     link->remote_snd_settle_mode = pn_link_remote_snd_settle_mode(pn_link);
-    link->drain_mode             = pn_link_get_drain(pn_link);
 
     pn_link_set_context(pn_link, link);
     node->ntype->outgoing_handler(node->context, link);
@@ -159,7 +157,6 @@ static void setup_incoming_link(qd_container_t *container, pn_link_t *pn_link)
     link->direction  = QD_INCOMING;
     link->context    = 0;
     link->node       = node;
-    link->drain_mode = pn_link_get_drain(pn_link);
     link->remote_snd_settle_mode = pn_link_remote_snd_settle_mode(pn_link);
 
     pn_link_set_context(pn_link, link);
@@ -282,6 +279,7 @@ static void close_links(qd_container_t *container, pn_connection_t *conn, bool p
         qd_link_t *qd_link = (qd_link_t*) pn_link_get_context(pn_link);
 
         if (qd_link && qd_link_get_context(qd_link) == 0) {
+            pn_link_set_context(pn_link, 0);
             pn_link = pn_link_next(pn_link, 0);
             qd_link_free(qd_link);
             continue;
@@ -509,45 +507,47 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
             qd_conn->pn_sess = 0;
         if (!(pn_connection_state(conn) & PN_LOCAL_CLOSED)) {
             if (pn_session_state(ssn) == (PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED)) {
+
+
                 // remote has nuked our session.  Check for any links that were
                 // left open and forcibly detach them, since no detaches will
                 // arrive on this session.
                 pn_connection_t *conn = pn_session_connection(ssn);
-                pn_link_t *pn_link = pn_link_head(conn, PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE);
-                while (pn_link) {
-                    if (pn_link_session(pn_link) == ssn) {
-                        qd_link_t *qd_link = (qd_link_t*) pn_link_get_context(pn_link);
-                        if (qd_link && qd_link->node) {
-                            if (qd_conn->policy_settings) {
-                                if (qd_link->direction == QD_OUTGOING) {
-                                    qd_conn->n_receivers--;
-                                    assert(qd_conn->n_receivers >= 0);
-                                } else {
-                                    qd_conn->n_senders--;
-                                    assert(qd_conn->n_senders >= 0);
-                                }
-                            }
-                            qd_log(container->log_source, QD_LOG_DEBUG,
-                                   "Aborting link '%s' due to parent session end",
-                                   pn_link_name(pn_link));
-                            qd_link->node->ntype->link_detach_handler(qd_link->node->context,
-                                                                      qd_link, QD_LOST);
-                        }
-                    }
-                    pn_link = pn_link_next(pn_link, PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE);
-                }
-                if (qd_conn->policy_settings) {
-                    qd_conn->n_sessions--;
-                }
 
-                pn_link = pn_link_head(conn, PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED);
+                //Sweep thru every pn_link in this connection and a matching session and zero out the
+                // qd_link->pn_link reference. We do this in order to not miss any pn_links
+                pn_link = pn_link_head(conn, 0);
                 while (pn_link) {
                     if (pn_link_session(pn_link) == ssn) {
                         qd_link_t *qd_link = (qd_link_t*) pn_link_get_context(pn_link);
+
+                        if ((pn_link_state(pn_link) == (PN_LOCAL_ACTIVE | PN_REMOTE_ACTIVE))) {
+                            if (qd_link && qd_link->node) {
+                                if (qd_conn->policy_settings) {
+                                    if (qd_link->direction == QD_OUTGOING) {
+                                        qd_conn->n_receivers--;
+                                        assert(qd_conn->n_receivers >= 0);
+                                    } else {
+                                        qd_conn->n_senders--;
+                                        assert(qd_conn->n_senders >= 0);
+                                    }
+                                }
+                                qd_log(container->log_source, QD_LOG_DEBUG,
+                                       "Aborting link '%s' due to parent session end",
+                                       pn_link_name(pn_link));
+                                qd_link->node->ntype->link_detach_handler(qd_link->node->context,
+                                                                          qd_link, QD_LOST);
+                            }
+                        }
+
                         if (qd_link)
                             qd_link->pn_link = 0;
                     }
-                    pn_link = pn_link_next(pn_link, PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED);
+                    pn_link = pn_link_next(pn_link, 0);
+
+                }
+                if (qd_conn->policy_settings) {
+                    qd_conn->n_sessions--;
                 }
 
                 pn_session_close(ssn);
@@ -617,6 +617,8 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
                 if (node) {
                     node->ntype->link_detach_handler(node->context, qd_link, dt);
                 }
+            } else {
+                pn_link_free(pn_link);
             }
         }
         break;
@@ -873,7 +875,6 @@ qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, c
     link->direction  = dir;
     link->context    = node->context;
     link->node       = node;
-    link->drain_mode = pn_link_get_drain(link->pn_link);
     link->remote_snd_settle_mode = pn_link_remote_snd_settle_mode(link->pn_link);
 
     pn_link_set_context(link->pn_link, link);
@@ -895,17 +896,8 @@ void qd_link_free(qd_link_t *link)
     DEQ_REMOVE(container->links, link);
     sys_mutex_unlock(container->lock);
 
-
-    qd_link_ref_list_t *list = qd_link_get_ref_list(link);
-
-    if (list) {
-        qd_link_ref_t *link_ref = DEQ_HEAD (*list);
-        while (link_ref) {
-            DEQ_REMOVE_HEAD(*list);
-            free_qd_link_ref_t(link_ref);
-            link_ref = DEQ_HEAD (*list);
-        }
-    }
+    qd_node_t *node = link->node;
+    node->ntype->link_abandoned_deliveries_handler(node->context, link);
 
     free_qd_link_t(link);
 }
@@ -1041,18 +1033,6 @@ void qd_link_detach(qd_link_t *link)
         pn_link_detach(link->pn_link);
         pn_link_close(link->pn_link);
     }
-}
-
-
-bool qd_link_drain_changed(qd_link_t *link, bool *mode)
-{
-    bool pn_mode = pn_link_get_drain(link->pn_link);
-    bool changed = pn_mode != link->drain_mode;
-
-    *mode = pn_mode;
-    if (changed)
-        link->drain_mode = pn_mode;
-    return changed;
 }
 
 

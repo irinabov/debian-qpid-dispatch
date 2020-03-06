@@ -24,13 +24,14 @@ from __future__ import print_function
 
 from time import sleep
 import json, os
-import unittest2 as unittest
 import logging
 from threading import Timer
 from subprocess import PIPE, STDOUT
 from proton import Message, Timeout, Delivery
 from system_test import TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR
 from system_test import AsyncTestReceiver
+from system_test import AsyncTestSender
+from system_test import unittest
 
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, AtLeastOnce
@@ -197,6 +198,7 @@ class TwoRouterTest(TestCase):
     def test_10_propagated_disposition(self):
         test = PropagatedDisposition(self, self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
+        self.assertTrue(test.passed)
 
     def test_11_three_ack(self):
         test = ThreeAck(self, self.routers[0].addresses[0], self.routers[1].addresses[0])
@@ -362,6 +364,28 @@ class TwoRouterTest(TestCase):
         test = DeleteConnectionWithReceiver(self.routers[0].addresses[0])
         self.assertEqual(test.error, None)
         test.run()
+
+    def test_30_huge_address(self):
+        # try a link with an extremely long address
+        # DISPATCH-1461
+        addr = "A" * 2019
+        rx = AsyncTestReceiver(self.routers[0].addresses[0],
+                               source=addr)
+        tx = AsyncTestSender(self.routers[1].addresses[0],
+                             target=addr,
+                             count=100)
+        tx.wait()
+
+        i = 100
+        while i:
+            try:
+                rx.queue.get(timeout=TIMEOUT)
+                i -= 1
+            except AsyncTestReceiver.Empty:
+                break;
+        self.assertEqual(0, i)
+        rx.stop()
+
 
 class DeleteConnectionWithReceiver(MessagingHandler):
     def __init__(self, address):
@@ -1426,43 +1450,62 @@ class SemanticsBalanced(MessagingHandler):
 class PropagatedDisposition(MessagingHandler):
     def __init__(self, test, address1, address2):
         super(PropagatedDisposition, self).__init__(auto_accept=False)
-        self.addrs = [address1, address2]
+        self.address1 = address1
+        self.address2 = address2
         self.settled = []
         self.test = test
+        self.sender_conn = None
+        self.receiver_conn = None
+        self.passed = False
 
     def on_start(self, event):
-        connections = [event.container.connect(a) for a in self.addrs]
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.sender_conn = event.container.connect(self.address1)
+        self.receiver_conn = event.container.connect(self.address2)
         addr = "unsettled/2"
-        self.sender = event.container.create_sender(connections[0], addr)
-        self.receiver = event.container.create_receiver(connections[1], addr)
+        self.sender = event.container.create_sender(self.sender_conn, addr)
+        self.receiver = event.container.create_receiver(self.receiver_conn, addr)
         self.receiver.flow(2)
         self.trackers = {}
         for b in ['accept', 'reject']:
             self.trackers[self.sender.send(Message(body=b))] = b
 
+    def timeout(self):
+        unique_list = sorted(list(dict.fromkeys(self.settled)))
+        self.error = "Timeout Expired: Expected ['accept', 'reject'] got %s" % unique_list
+        self.sender_conn.close()
+        self.receiver_conn.close()
+
+    def check(self):
+        unique_list = sorted(list(dict.fromkeys(self.settled)))
+        if unique_list == [u'accept', u'reject']:
+            self.passed = True
+            self.sender_conn.close()
+            self.receiver_conn.close()
+            self.timer.cancel()
+
     def on_message(self, event):
-        if event.message.body == 'accept':
+        if event.message.body == u'accept':
             event.delivery.update(Delivery.ACCEPTED)
             event.delivery.settle()
-        elif event.message.body == 'reject':
+        elif event.message.body == u'reject':
             event.delivery.update(Delivery.REJECTED)
             event.delivery.settle()
-            event.connection.close()
 
     def on_accepted(self, event):
         self.test.assertEqual(Delivery.ACCEPTED, event.delivery.remote_state)
         self.test.assertEqual('accept', self.trackers[event.delivery])
         self.settled.append('accept')
+        self.check()
 
     def on_rejected(self, event):
         self.test.assertEqual(Delivery.REJECTED, event.delivery.remote_state)
         self.test.assertEqual('reject', self.trackers[event.delivery])
         self.settled.append('reject')
-        event.connection.close()
+        self.check()
 
     def run(self):
         Container(self).run()
-        self.test.assertEqual(['accept', 'reject'], sorted(self.settled))
 
 
 class ThreeAck(MessagingHandler):
