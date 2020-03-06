@@ -1,3 +1,9 @@
+qpid-dispatch (1.10.0-1qpid+bionic1) bionic; urgency=medium
+
+  * Rebased to Dispatch 1.10.0
+
+ -- Irina Boverman <iboverma@redhat.com>  Fri,  6 Mar 2020 14:23:56 -0400
+
 qpid-dispatch (1.9.0-1qpid+bionic1) bionic; urgency=medium
   
   * Rebased to Dispatch 1.9.0
