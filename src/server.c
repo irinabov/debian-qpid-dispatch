@@ -18,6 +18,7 @@
  */
 
 #include "python_private.h"             // must be first!
+#include "dispatch_private.h"
 #include <qpid/dispatch/python_embedded.h>
 
 #include <qpid/dispatch/ctools.h>
@@ -894,6 +895,7 @@ static void qd_increment_conn_index(qd_connection_t *ctx)
 
 }
 
+
 /* Events involving a connection or listener are serialized by the proactor so
  * only one event per connection / listener will be processed at a time.
  */
@@ -963,11 +965,18 @@ static bool handle(qd_server_t *qd_server, pn_event_t *e, pn_connection_t *pn_co
             if (ctx && ctx->connector) { /* Outgoing connection */
                 qd_increment_conn_index(ctx);
                 const qd_server_config_t *config = &ctx->connector->config;
+                ctx->connector->state = CXTR_STATE_FAILED;
+                char conn_msg[300];
                 if (condition  && pn_condition_is_set(condition)) {
-                    qd_log(qd_server->log_source, QD_LOG_INFO, "[C%"PRIu64"] Connection to %s failed: %s %s", ctx->connection_id, config->host_port,
-                           pn_condition_get_name(condition), pn_condition_get_description(condition));
+                    qd_format_string(conn_msg, 300, "[C%"PRIu64"] Connection to %s failed: %s %s", ctx->connection_id, config->host_port,
+                            pn_condition_get_name(condition), pn_condition_get_description(condition));
+                    strcpy(ctx->connector->conn_msg, conn_msg);
+
+                    qd_log(qd_server->log_source, QD_LOG_INFO, conn_msg);
                 } else {
-                    qd_log(qd_server->log_source, QD_LOG_INFO, "[C%"PRIu64"] Connection to %s failed", ctx->connection_id, config->host_port);
+                    qd_format_string(conn_msg, 300, "[C%"PRIu64"] Connection to %s failed", ctx->connection_id, config->host_port);
+                    strcpy(ctx->connector->conn_msg, conn_msg);
+                    qd_log(qd_server->log_source, QD_LOG_INFO, conn_msg);
                 }
             } else if (ctx && ctx->listener) { /* Incoming connection */
                 if (condition && pn_condition_is_set(condition)) {
@@ -1063,6 +1072,7 @@ static void try_open_lh(qd_connector_t *ct)
         qd_timer_schedule(ct->timer, ct->delay);
         return;
     }
+
     ctx->connector    = ct;
     const qd_server_config_t *config = &ct->config;
 
@@ -1267,6 +1277,27 @@ void qd_server_set_container(qd_dispatch_t *qd, qd_container_t *container)
     qd->server->container = container;
 }
 
+void qd_server_trace_all_connections()
+{
+    qd_dispatch_t *qd = qd_dispatch_get_dispatch();
+    if (qd->server) {
+        sys_mutex_lock(qd->server->lock);
+        qd_connection_list_t  conn_list = qd->server->conn_list;
+        qd_connection_t *conn = DEQ_HEAD(conn_list);
+        while(conn) {
+            //
+            // If there is already a tracer on the transport, nothing to do, move on to the next connection.
+            //
+            pn_transport_t *tport  = pn_connection_transport(conn->pn_conn);
+            if (! pn_transport_get_tracer(tport)) {
+                pn_transport_trace(tport, PN_TRACE_FRM);
+                pn_transport_set_tracer(tport, transport_tracer);
+            }
+            conn = DEQ_NEXT(conn);
+        }
+        sys_mutex_unlock(qd->server->lock);
+    }
+}
 
 void qd_server_run(qd_dispatch_t *qd)
 {
@@ -1454,6 +1485,8 @@ qd_connector_t *qd_server_connector(qd_server_t *server)
     ct->conn_index = 1;
     ct->state   = CXTR_STATE_INIT;
     ct->lock = sys_mutex();
+    ct->conn_msg = (char*) malloc(300);
+    memset(ct->conn_msg, 0, 300);
     ct->timer = qd_timer(ct->server->qd, try_open_cb, ct);
     if (!ct->lock || !ct->timer) {
         qd_connector_decref(ct);
@@ -1506,12 +1539,14 @@ bool qd_connector_decref(qd_connector_t* ct)
         }
         sys_mutex_free(ct->lock);
         if (ct->policy_vhost) free(ct->policy_vhost);
+        free(ct->conn_msg);
         free_qd_connector_t(ct);
         return true;
     }
     return false;
 }
 
+__attribute__((noinline)) // permit replacement by dummy implementation in unit_tests
 void qd_server_timeout(qd_server_t *server, qd_duration_t duration) {
     pn_proactor_set_timeout(server->proactor, duration);
 }

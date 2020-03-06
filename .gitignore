@@ -11,6 +11,7 @@ tests/authservice.py
 tests/failoverserver.py
 tests/system_tests_authz_service_plugin.py
 tests/system_tests_handle_failover.py
+tests/system_tests_topology_disposition.py
 *.iml
 .idea
 .metadata
@@ -18,8 +19,10 @@ tests/system_tests_handle_failover.py
 .history/
 .tox
 .vscode
-console/stand-alone/node_modules/
-console/stand-alone/dist/
-console/stand-alone/package-lock.json
 tools/qdmanage
 tools/qdstat
+console/react/node_modules/
+console/react/build/
+console/react/coverage/
+console/react/.prettierrc
+console/react/.prettierignore

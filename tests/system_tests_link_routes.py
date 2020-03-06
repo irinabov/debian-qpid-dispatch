@@ -22,7 +22,6 @@ from __future__ import division
 from __future__ import absolute_import
 from __future__ import print_function
 
-import unittest2 as unittest
 from time import sleep, time
 from threading import Event
 from subprocess import PIPE, STDOUT
@@ -32,6 +31,7 @@ from system_test import AsyncTestSender
 from system_test import AsyncTestReceiver
 from system_test import QdManager
 from system_test import MgmtMsgProxy
+from system_test import unittest, QdManager
 from test_broker import FakeBroker
 
 from proton import Delivery
@@ -272,11 +272,11 @@ class LinkRouteTest(TestCase):
         self.assertEqual(out_list.count('out'), 4)
 
         parts = out.split("\n")
-        self.assertEqual(len(parts), 12)
+        self.assertEqual(len(parts), 15)
 
         out = self.run_qdstat_linkRoute(self.routers[1].addresses[0], args=['--limit=1'])
         parts = out.split("\n")
-        self.assertEqual(len(parts), 5)
+        self.assertEqual(len(parts), 8)
 
     def test_ccc_qdstat_link_routes_routerC(self):
         """
@@ -337,7 +337,7 @@ class LinkRouteTest(TestCase):
         # 3. inbound link to the $management
         # 4. outbound link to $management
         # self.assertEqual(4, len()
-        self.assertEquals(4, len(local_node.query(type='org.apache.qpid.dispatch.router.link').results))
+        self.assertEqual(4, len(local_node.query(type='org.apache.qpid.dispatch.router.link').results))
 
         blocking_connection.close()
 
@@ -610,7 +610,7 @@ class LinkRouteTest(TestCase):
 
         cmd = 'QUERY --type=linkRoute'
         out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
-        self.assertEquals(out.rstrip(), '[]')
+        self.assertEqual(out.rstrip(), '[]')
 
         # linkRoutes now gone on QDR.B but remember that it still exist on QDR.C
         # We will now try to create a receiver on address org.apache.dev on QDR.C.
@@ -632,7 +632,7 @@ class LinkRouteTest(TestCase):
 
         cmd = 'QUERY --type=linkRoute'
         out = self.run_qdmanage(cmd=cmd, address=addr)
-        self.assertEquals(out.rstrip(), '[]')
+        self.assertEqual(out.rstrip(), '[]')
 
         res = local_node.query(type='org.apache.qpid.dispatch.router')
         results = res.results[0]
@@ -1608,6 +1608,168 @@ class SessionKiller(FakeBroker):
         event.session.close()
 
 
+class FakeBrokerDrain(FakeBroker):
+    """
+    DISPATCH-1496 - Make sure that the router does not grant additional credit
+    when drain is issued by a receiver connected to the router on a
+    link routed address
+    """
+    def __init__(self, url):
+        super(FakeBrokerDrain, self).__init__(url)
+        self.first_flow_received = False
+        self.first_drain_mode = False
+        self.second_drain_mode = False
+        self.error = None
+        self.num_flows = 0
+        self.success = False
+
+    def on_link_flow(self, event):
+        if event.link.is_sender:
+            if event.sender.drain_mode:
+                if not self.first_drain_mode:
+                    self.first_drain_mode = True
+                    event.sender.drained()
+                elif not self.second_drain_mode:
+                    self.second_drain_mode = True
+                    if event.link.credit == 1000:
+                        # Without the patch for DISPATCH-1496,
+                        # the event.link.credit value would be 2000
+                        self.success = True
+                    else:
+                        self.success = False
+                    event.sender.drained()
+            else:
+                if not self.first_flow_received:
+                    self.first_flow_received = True
+                    msg = Message(body="First Drain Transfer")
+                    event.link.send(msg)
+
+
+class DrainReceiver(MessagingHandler):
+    def __init__(self, url, fake_broker):
+        super(DrainReceiver, self).__init__(prefetch=0, auto_accept=False)
+        self.url = url
+        self.received = 0
+        self.receiver = None
+        self.first_drain_sent = False
+        self.second_drain_sent = False
+        self.first_flow_sent = False
+        self.receiver_conn = None
+        self.error = None
+        self.num_flows = 0
+        self.fake_broker = fake_broker
+
+    def on_start(self, event):
+        self.receiver_conn = event.container.connect(self.url)
+        self.receiver = event.container.create_receiver(self.receiver_conn, "org.apache")
+
+        # Step 1: Send a flow of 1000 to the router. The router will forward this
+        #   flow to the FakeBroker
+        self.receiver.flow(1000)
+        self.first_flow_sent = True
+
+    def on_link_flow(self, event):
+        if event.receiver == self.receiver:
+            self.num_flows += 1
+            if self.num_flows == 1:
+                # Step 4: The response drain received from the FakeBroker
+                # Step 5: Send second flow of 1000 credits. This is forwarded to the FakeBroker
+                self.receiver.flow(1000)
+                self.timer = event.reactor.schedule(3, Timeout(self))
+            elif self.num_flows == 2:
+                if not self.fake_broker.success:
+                    self.error = "The FakeBroker did not receive correct credit of 1000"
+                self.receiver_conn.close()
+
+    def timeout(self):
+        # Step 6: The second drain is sent to the router. The router was forwarding the wrong credit (2000) to the FakeBroker
+        # but with the fix for DISPATCH-1496, the correct credit is forwarded (1000)
+        self.receiver.drain(0)
+        self.second_drain_sent = True
+
+    def on_message(self, event):
+        if event.receiver == self.receiver:
+            self.received += 1
+
+            # Step 2: In response to Step 1, the broker has sent the only message in its queue
+            if self.received == 1:
+                self.first_drain_sent = True
+                #print ("First message received. Doing first drain")
+                # Step 3: The receiver drains after receiving the first message.
+                # This drain is forwarded to the FakeBroker
+                self.receiver.drain(0)
+
+    def run(self):
+        Container(self).run()
+
+
+class LinkRouteDrainTest(TestCase):
+    """
+    Test link route drain implementation.
+    DISPATCH-1496 alleges that the router is granting extra credit when
+    forwarding the drain.
+
+    Uses a router which connects to a FakeBroker (FB)
+
+             +-------------+         +---------+
+             |             | <------ |         |
+             | fake broker |         |  QDR.A  |
+             |             | ------> |         | ------> +-------------------+
+             +-------------+         +---------+         | receiver          |
+                                                         +-------------------+
+    The router will grant extra credit when the following sequence is used
+    1. The receiver attaches to the router on a a link routed address called "org.apache"
+    2. Receiver issues a flow of 1000. The FakeBroker has only one message in its
+       "examples" queue and it sends it over to the router which forwards it to the receiver
+    3. After receiving the message the receiver issues a drain(0). This drain is
+       forwarded to the FakeBroker by the router and the FB responds. There
+       is not problem with this drain
+    4. The receiver again gives a flow of 1000 and it is forwarded to the FB. There
+       are no messages in the broker queue, so the FB sends no messages
+    5. The receiver again issues a drain(0). At this time, without the fix for
+       DISPATCH-1496, the router issues double the credit to the FB. Instead
+       of issuing a credit of 1000, it issues a credit of 2000.
+    """
+    @classmethod
+    def setUpClass(cls):
+        """Configure and start QDR.A"""
+        super(LinkRouteDrainTest, cls).setUpClass()
+        config = [
+            ('router', {'mode': 'standalone', 'id': 'QDR.A'}),
+            # for client connections:
+            ('listener', {'role': 'normal',
+                          'host': '0.0.0.0',
+                          'port': cls.tester.get_port(),
+                          'saslMechanisms': 'ANONYMOUS'}),
+            # to connect to the fake broker
+            ('connector', {'name': 'broker',
+                           'role': 'route-container',
+                           'host': '127.0.0.1',
+                           'port': cls.tester.get_port(),
+                           'saslMechanisms': 'ANONYMOUS'}),
+
+            # forward 'org.apache' messages to + from fake broker:
+            ('linkRoute', {'prefix': 'org.apache', 'containerId': 'FakeBroker', 'direction': 'in'}),
+            ('linkRoute', {'prefix': 'org.apache', 'containerId': 'FakeBroker', 'direction': 'out'})
+        ]
+        config = Qdrouterd.Config(config)
+        cls.router = cls.tester.qdrouterd('A', config, wait=False)
+
+    def _fake_broker(self, cls):
+        """Spawn a fake broker listening on the broker's connector
+        """
+        fake_broker = cls(self.router.connector_addresses[0])
+        # wait until the connection to the fake broker activates
+        self.router.wait_connectors()
+        return fake_broker
+
+    def test_DISPATCH_1496(self):
+        fake_broker = self._fake_broker(FakeBrokerDrain)
+        drain_receiver = DrainReceiver(self.router.addresses[0], fake_broker)
+        drain_receiver.run()
+        self.assertEquals(drain_receiver.error, None)
+
+
 class ConnectionLinkRouteTest(TestCase):
     """
     Test connection scoped link route implementation
@@ -1820,7 +1982,7 @@ class ConnectionLinkRouteTest(TestCase):
         s = AsyncTestSender(self.QDR_A.addresses[0],
                             "flea.B",
                             container_id="flea.BSender",
-                            body="SENDING TO flea.B",
+                            message=Message(body="SENDING TO flea.B"),
                             count=COUNT)
         s.wait()   # for sender to complete
         for i in range(COUNT):
@@ -1836,7 +1998,7 @@ class ConnectionLinkRouteTest(TestCase):
         s = AsyncTestSender(self.QDR_B.addresses[0],
                             "flea.A",
                             container_id="flea.ASender",
-                            body="SENDING TO flea.A",
+                            message=Message(body="SENDING TO flea.A"),
                             count=COUNT)
         s.wait()
         for i in range(COUNT):
@@ -2052,6 +2214,161 @@ class InvalidTagTest(MessagingHandler):
     def run(self):
         Container(self).run()
 
+class Dispatch1428(TestCase):
+    """
+    Sets up 2 routers (one of which are acting as brokers (QDR.A)).
+
+        QDR.A acting broker #1
+             +---------+         +---------+
+             |         | <------ |         |
+             |  QDR.A  |         |  QDR.B  |
+             |         | ------> |         |
+             +---------+         +---------+
+
+    """
+    @classmethod
+    def get_router(cls, index):
+        return cls.routers[index]
+
+    @classmethod
+    def setUpClass(cls):
+        """Start two routers"""
+        super(Dispatch1428, cls).setUpClass()
+
+        def router(name, connection):
+
+            config = [
+                ('router', {'mode': 'interior', 'id': 'QDR.%s'%name}),
+            ] + connection
+
+            config = Qdrouterd.Config(config)
+            cls.routers.append(cls.tester.qdrouterd(name, config, wait=False))
+
+        cls.routers = []
+        a_listener_port = cls.tester.get_port()
+        b_listener_port = cls.tester.get_port()
+
+        router('A',
+               [
+                   ('listener', {'role': 'normal', 'host': '0.0.0.0', 'port': a_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
+               ])
+        router('B',
+               [
+                   ('listener', {'role': 'normal', 'host': '0.0.0.0', 'port': b_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
+                   ('connector', {'name': 'one', 'role': 'route-container', 'host': '0.0.0.0', 'port': a_listener_port, 'saslMechanisms': 'ANONYMOUS'}),
+                   ('connector', {'name': 'two', 'role': 'route-container', 'host': '0.0.0.0', 'port': a_listener_port, 'saslMechanisms': 'ANONYMOUS'})
+               ]
+               )
+        sleep(2)
+
+
+    def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
+        p = self.popen(
+            ['qdmanage'] + cmd.split(' ') + ['--bus', address or self.address(), '--indent=-1', '--timeout', str(TIMEOUT)],
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
+            universal_newlines=True)
+        out = p.communicate(input)[0]
+        try:
+            p.teardown()
+        except Exception as e:
+            raise Exception("%s\n%s" % (e, out))
+        return out
+
+    def test_both_link_routes_active(self):
+        cmds = [
+            'CREATE --type=linkRoute name=foo prefix=foo direction=in connection=one',
+            'CREATE --type=linkRoute name=bar prefix=bar direction=in connection=two',
+            'CREATE --type=linkRoute name=baz prefix=baz direction=in containerId=QDR.A'
+        ]
+        for c in cmds:
+            self.run_qdmanage(cmd=c, address=self.routers[1].addresses[0])
+
+        # Now that the qdmanage has run, query the link routes and make sure that their "operStatus" is "active" before
+        # running any of the tests.
+        long_type = 'org.apache.qpid.dispatch.router.config.linkRoute'
+        qd_manager = QdManager(self, address=self.routers[1].addresses[0])
+
+        for i in range(5):
+            all_link_routes_activated = True
+            link_routes = qd_manager.query(long_type)
+            for link_route in link_routes:
+                oper_status = link_route['operStatus']
+                if oper_status != "active":
+                    all_link_routes_activated = False
+                    break
+            if not all_link_routes_activated:
+                # One or more of the link routes have not been activated.
+                # Check after one second.
+                sleep(1)
+            else:
+                break
+
+        # All link routes created in this test MUST be activated before
+        # we can continue further testing.
+        self.assertTrue(all_link_routes_activated)
+
+
+        first = SendReceive("%s/foo" % self.routers[1].addresses[0], "%s/foo" % self.routers[0].addresses[0])
+        first.run()
+        self.assertEqual(None, first.error)
+        second = SendReceive("%s/bar" % self.routers[1].addresses[0], "%s/bar" % self.routers[0].addresses[0])
+        second.run()
+        self.assertEqual(None, second.error)
+        third = SendReceive("%s/baz" % self.routers[1].addresses[0], "%s/baz" % self.routers[0].addresses[0])
+        third.run()
+        self.assertEqual(None, third.error)
+
+class Timeout(object):
+    def __init__(self, parent):
+        self.parent = parent
+
+    def on_timer_task(self, event):
+        self.parent.timeout()
+
+
+class SendReceive(MessagingHandler):
+    def __init__(self, send_url, recv_url, message=None):
+        super(SendReceive, self).__init__()
+        self.send_url = send_url
+        self.recv_url = recv_url
+        self.message = message or Message(body="SendReceiveTest")
+        self.sent = False
+        self.error = None
+
+    def close(self):
+        self.sender.close()
+        self.receiver.close()
+        self.sender.connection.close()
+        self.receiver.connection.close()
+
+    def timeout(self):
+        self.error = "Timeout Expired - Check for cores"
+        self.close()
+
+    def stop(self):
+        self.close()
+        self.timer.cancel()
+
+    def on_start(self, event):
+        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
+        event.container.container_id = "SendReceiveTestClient"
+        self.sender = event.container.create_sender(self.send_url)
+        self.receiver = event.container.create_receiver(self.recv_url)
+
+    def on_sendable(self, event):
+        if not self.sent:
+            event.sender.send(self.message)
+            self.sent = True
+
+    def on_message(self, event):
+        if self.message.body != event.message.body:
+            self.error = "Incorrect message. Got %s, expected %s" % (event.message.body, self.message.body)
+
+    def on_accepted(self, event):
+        self.stop()
+
+    def run(self):
+        Container(self).run()
 
 if __name__ == '__main__':
     unittest.main(main_module())

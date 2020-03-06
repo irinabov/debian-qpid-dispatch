@@ -52,6 +52,13 @@ set(unit_test_size_SOURCES
 add_executable(unit_tests_size ${unit_test_size_SOURCES})
 target_link_libraries(unit_tests_size qpid-dispatch)
 
+add_executable(test-sender test-sender.c)
+target_link_libraries(test-sender ${Proton_LIBRARIES})
+
+add_executable(test-receiver test-receiver.c)
+target_link_libraries(test-receiver ${Proton_LIBRARIES})
+
+
 set(TEST_WRAP ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/run.py)
 
 add_test(unit_tests_size_10000 ${TEST_WRAP} unit_tests_size 10000)
@@ -65,9 +72,10 @@ add_test(unit_tests_size_1     ${TEST_WRAP} unit_tests_size 1)
 add_test(unit_tests            ${TEST_WRAP} unit_tests ${CMAKE_CURRENT_SOURCE_DIR}/threads4.conf)
 
 # Unit test python modules
-add_test(router_engine_test    ${TEST_WRAP} unit2 -v router_engine_test)
-add_test(management_test       ${TEST_WRAP} unit2 -v management)
-add_test(router_policy_test    ${TEST_WRAP} unit2 -v router_policy_test)
+add_test(router_engine_test    ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v router_engine_test)
+add_test(management_test       ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v management)
+add_test(router_policy_test    ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v router_policy_test)
+add_test(test_command    ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v test_command)
 
 if(USE_LIBWEBSOCKETS)
   set(SYSTEM_TESTS_HTTP system_tests_http)
@@ -112,12 +120,13 @@ foreach(py_test_module
     system_tests_topology_disposition
     system_tests_topology_addition
     system_tests_disallow_link_resumable_link_route
-    system_tests_global_delivery_counts
+    system_tests_delivery_counts
     system_tests_exchange_bindings
     system_tests_cmdline_parsing
     system_tests_bad_configuration
     system_tests_ssl
     system_tests_edge_router
+    system_tests_connector_status
     system_tests_core_endpoint
     ${SYSTEM_TESTS_HTTP}
     ${CONSOLE_TEST}
@@ -127,9 +136,12 @@ foreach(py_test_module
     system_tests_multi_phase
     system_tests_multicast
     system_tests_fallback_dest
+    system_tests_router_mesh
+    system_tests_stuck_deliveries
+    system_tests_log_level_update
     )
 
-  add_test(${py_test_module} ${TEST_WRAP} unit2 -v ${py_test_module})
+  add_test(${py_test_module} ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v ${py_test_module})
   list(APPEND SYSTEM_TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/${py_test_module}.py)
 endforeach()
 

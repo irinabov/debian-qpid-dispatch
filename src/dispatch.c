@@ -60,6 +60,13 @@ const char     *MULTICAST_DISTRIBUTION = "multicast";
 const char     *BALANCED_DISTRIBUTION  = "balanced";
 const char     *UNAVAILABLE_DISTRIBUTION = "unavailable";
 
+qd_dispatch_t *qd = 0;
+
+qd_dispatch_t *qd_dispatch_get_dispatch()
+{
+    return qd;
+}
+
 qd_dispatch_t *qd_dispatch(const char *python_pkgdir, bool test_hooks)
 {
     //
@@ -69,7 +76,7 @@ qd_dispatch_t *qd_dispatch(const char *python_pkgdir, bool test_hooks)
     gettimeofday(&time, NULL);
     srandom((unsigned int)time.tv_sec + ((unsigned int)time.tv_usec << 11));
     
-    qd_dispatch_t *qd = NEW(qd_dispatch_t);
+    qd = NEW(qd_dispatch_t);
     ZERO(qd);
 
     qd_entity_cache_initialize();   /* Must be first */
@@ -204,6 +211,7 @@ qd_error_t qd_dispatch_configure_router(qd_dispatch_t *qd, qd_entity_t *entity)
     qd->allow_resumable_link_route = qd_entity_opt_bool(entity, "allowResumableLinkRoute", true); QD_ERROR_RET();
     qd->timestamps_in_utc = qd_entity_opt_bool(entity, "timestampsInUTC", false); QD_ERROR_RET();
     qd->timestamp_format = qd_entity_opt_string(entity, "timestampFormat", 0); QD_ERROR_RET();
+    qd->metadata = qd_entity_opt_string(entity, "metadata", 0); QD_ERROR_RET();
 
     if (! qd->sasl_config_path) {
         qd->sasl_config_path = qd_entity_opt_string(entity, "saslConfigDir", 0); QD_ERROR_RET();
