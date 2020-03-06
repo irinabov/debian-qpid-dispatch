@@ -674,6 +674,16 @@ int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit);
 
 void qdr_link_flow(qdr_core_t *core, qdr_link_t *link, int credit, bool drain_mode);
 
+/**
+ * Sets the link's drain flag to false and sets credit to core to zero.
+ * The passed in link has been drained and hence no longer in drain mode.
+ * Call this right after calling pn_link_drained
+ *
+ * @param core - router core
+ * @param link - the link that has been drained
+ */
+void qdr_link_set_drained(qdr_core_t *core, qdr_link_t *link);
+
 typedef void (*qdr_link_first_attach_t)  (void *context, qdr_connection_t *conn, qdr_link_t *link, 
                                           qdr_terminus_t *source, qdr_terminus_t *target);
 typedef void (*qdr_link_second_attach_t) (void *context, qdr_link_t *link,
@@ -685,6 +695,7 @@ typedef void (*qdr_link_drained_t)       (void *context, qdr_link_t *link);
 typedef void (*qdr_link_drain_t)         (void *context, qdr_link_t *link, bool mode);
 typedef int  (*qdr_link_push_t)          (void *context, qdr_link_t *link, int limit);
 typedef uint64_t (*qdr_link_deliver_t)   (void *context, qdr_link_t *link, qdr_delivery_t *delivery, bool settled);
+typedef int (*qdr_link_get_credit_t)     (void *context, qdr_link_t *link);
 typedef void (*qdr_delivery_update_t)    (void *context, qdr_delivery_t *dlv, uint64_t disp, bool settled);
 typedef void (*qdr_connection_close_t)   (void *context, qdr_connection_t *conn, qdr_error_t *error);
 
@@ -700,6 +711,7 @@ void qdr_connection_handlers(qdr_core_t             *core,
                              qdr_link_drain_t           drain,
                              qdr_link_push_t            push,
                              qdr_link_deliver_t         deliver,
+                             qdr_link_get_credit_t      get_credit,
                              qdr_delivery_update_t      delivery_update,
                              qdr_connection_close_t     conn_close);
 
@@ -854,6 +866,8 @@ typedef struct {
     size_t deliveries_egress_route_container;
     size_t deliveries_delayed_1sec;
     size_t deliveries_delayed_10sec;
+    size_t deliveries_stuck;
+    size_t links_blocked;
     size_t deliveries_redirected_to_fallback;
 }  qdr_global_stats_t;
 ALLOC_DECLARE(qdr_global_stats_t);

@@ -22,9 +22,10 @@ from __future__ import division
 from __future__ import absolute_import
 from __future__ import print_function
 
-import unittest2 as unittest
+import sys
 from proton          import Message, Timeout
 from system_test     import TestCase, Qdrouterd, main_module, TIMEOUT, SkipIfNeeded
+from system_test     import unittest
 from proton.handlers import MessagingHandler
 from proton.reactor  import Container, LinkOption, ApplicationEvent, EventInjector
 
@@ -606,7 +607,8 @@ class DistributionTests ( TestCase ):
                              self.A_addr,
                              self.B_addr,
                              self.C_addr,
-                             "addr_09"
+                             "addr_09",
+                             print_debug=False
                            )
         test.run()
         self.assertEqual ( None, test.error )
@@ -2241,7 +2243,8 @@ class ClosestTest ( MessagingHandler ):
     router_1, and then 2 receivers each on all 3 routers.
 
     """
-    def __init__ ( self, test_name, router_1, router_2, router_3, addr_suffix ):
+    def __init__ ( self, test_name, router_1, router_2, router_3, addr_suffix,
+                   print_debug=False ):
         super ( ClosestTest, self ).__init__(prefetch=0)
         self.error       = None
         self.router_1    = router_1
@@ -2272,8 +2275,22 @@ class ClosestTest ( MessagingHandler ):
         self.test_name           = test_name
 
         self.sender = None
+        self.n_sent_1 = 0
+        self.n_sent_2 = 0
+        self.n_sent_3 = 0
+
+        self.recv_1_a_closed = False
+        self.recv_1_b_closed = False
+        self.recv_2_a_closed = False
+        self.recv_2_b_closed = False
+
+        self.first_check = True
+        self.send_on_sendable = True
+
+        self.print_debug = print_debug
 
     def timeout ( self ):
+        sys.stdout.flush()
         self.bail ( "Timeout Expired " )
 
 
@@ -2322,46 +2339,72 @@ class ClosestTest ( MessagingHandler ):
         self.recv_3_b.flow ( self.n_expected )
 
         self.addr_check_receiver = event.container.create_receiver ( self.cnx_1, dynamic=True )
+        self.addr_check_receiver.flow(100)
         self.addr_check_sender   = event.container.create_sender ( self.cnx_1, "$management" )
+
+        self.m_sent_1 = False
+        self.m_sent_2 = False
+        self.m_sent_3 = False
 
 
     def on_link_opened(self, event):
-        if event.receiver:
-            event.receiver.flow ( self.n_expected )
         if event.receiver == self.addr_check_receiver:
             # my addr-check link has opened: make the addr_checker with the given address.
             self.addr_checker = AddressChecker ( self.addr_check_receiver.remote_source.address )
             self.addr_check()
 
-
-    def on_sendable ( self, event ):
-        # Fix for DISPATCH-1408 - Make sure that the correct sender  is sending the messages to self.dest
-        if event.sender == self.sender:
-            msg = Message ( body     = "Hello, closest.",
-                            address  = self.dest)
-            event.sender.send ( msg )
-
-
     def on_message ( self, event ):
-
         if event.receiver == self.addr_check_receiver:
             # This is a response to one of my address-readiness checking messages.
             response = self.addr_checker.parse_address_query_response(event.message)
-            if response.status_code == 200 and response.subscriberCount == 2 and response.remoteCount == 2:
-                # now we know that we have two subscribers on attached router, and two remote
-                # routers that know about the address. The network is ready.
-                # Now we can make the sender without getting a
-                # "No Path To Destination" error.
-                self.sender = event.container.create_sender ( self.send_cnx, self.dest )
+            if self.first_check:
+                if response.status_code == 200 and response.subscriberCount == 2 and response.remoteCount == 2:
+                    # now we know that we have two subscribers on attached router, and two remote
+                    # routers that know about the address. The network is ready.
+                    # Now we can make the sender without getting a
+                    # "No Path To Destination" error.
+                    self.sender = event.container.create_sender ( self.send_cnx, self.dest )
 
-                # And we can quit checking.
-                if self.addr_check_timer:
-                    self.addr_check_timer.cancel()
-                    self.addr_check_timer = None
+                    if not self.m_sent_1:
+                        self.m_sent_1 = True
+                        while self.n_sent_1 < self.one_third:
+                            msg = Message(body="Hello, closest.",
+                                          address=self.dest)
+                            self.sender.send(msg)
+                            self.n_sent_1 += 1
+                        if self.print_debug:
+                            print ("First hundred sent")
+
+                    # And we can quit checking.
+                    if self.addr_check_timer:
+                        self.addr_check_timer.cancel()
+                        self.addr_check_timer = None
+                else:
+                    # If the latest check did not find the link-attack route ready,
+                    # schedule another check a little while from now.
+                    self.addr_check_timer = event.reactor.schedule(3, AddressCheckerTimeout(self))
             else:
-                # If the latest check did not find the link-attack route ready,
-                # schedule another check a little while from now.
-                self.addr_check_timer = event.reactor.schedule(0.25, AddressCheckerTimeout(self))
+                if response.status_code == 200 and response.subscriberCount == 0 and response.remoteCount == 1:
+                    if not self.m_sent_3:
+                        self.m_sent_3 = True
+                        while self.n_sent_2 < self.one_third:
+                            msg = Message(body="Hello, closest.",
+                                          address=self.dest)
+                            self.sender.send(msg)
+                            self.n_sent_2 += 1
+
+                        if self.print_debug:
+                            print("Third hundred sent")
+
+                    if self.addr_check_timer:
+                        self.addr_check_timer.cancel()
+                        self.addr_check_timer = None
+                else:
+                    # If the latest check did not find the link-attack route ready,
+                    # schedule another check a little while from now.
+                    self.addr_check_timer = event.reactor.schedule(3,
+                                                                   AddressCheckerTimeout(
+                                                                       self))
         else :
             # This is a payload message.
             self.n_received += 1
@@ -2378,10 +2421,16 @@ class ClosestTest ( MessagingHandler ):
                 self.count_2_b += 1
             elif event.receiver == self.recv_3_a:
                 self.count_3_a += 1
+                if self.print_debug:
+                    print ("self.count_3_a", self.count_3_a)
             elif event.receiver == self.recv_3_b:
                 self.count_3_b += 1
+                if self.print_debug:
+                    print("self.count_3_b", self.count_3_b)
 
             if self.n_received == self.one_third:
+                if self.print_debug:
+                    print("First one third received")
                 # The first one-third of messages should have gone exclusively
                 # to the near receivers.  At this point we should have
                 # no messages in the mid or far receivers.
@@ -2390,10 +2439,12 @@ class ClosestTest ( MessagingHandler ):
                 if (self.count_2_a + self.count_2_b + self.count_3_a + self.count_3_b) > 0 :
                     self.bail ( "error: routers 2 or 3 got messages before router 1 receivers were closed." )
                 # Make sure both receivers got some messages.
-                if (self.count_1_a * self.count_1_b) == 0:
-                    self.bail ( "error: one of the receivers on router 1 got no messages." )
+                if (self.count_1_a < self.one_third/2 or  self.count_1_b < self.one_third/2) or (self.count_1_b != self.count_1_a):
+                    self.bail ( "error: recv_1_a and  recv_1_b did not get equal number of messages" )
 
             elif self.n_received == 2 * self.one_third:
+                if self.print_debug:
+                    print("Second one third received")
                 # The next one-third of messages should have gone exclusively
                 # to the router_2 receivers.  At this point we should have
                 # no messages in the far receivers.
@@ -2402,18 +2453,49 @@ class ClosestTest ( MessagingHandler ):
                 if (self.count_3_a + self.count_3_b) > 0 :
                     self.bail ( "error: router 3 got messages before 2 was closed." )
                 # Make sure both receivers got some messages.
-                if (self.count_2_a * self.count_2_b) == 0:
-                    self.bail ( "error: one of the receivers on router 2 got no messages." )
+                if (self.count_2_a < self.one_third/2 or  self.count_2_b < self.one_third/2) or (self.count_2_b != self.count_2_a):
+                    self.bail ( "error: recv_2_a and  recv_2_b did not get equal number of messages" )
 
             # By the time we reach the expected number of messages
             # we have closed the router_1 and router_2 receivers.  If the
             # router_3 receivers are empty at this point, something is wrong.
             if self.n_received >= self.n_expected :
-                if (self.count_3_a * self.count_3_b) == 0:
-                    self.bail ( "error: one of the receivers on router 3 got no messages." )
+                if self.print_debug:
+                    print("Third one third received")
+                if (self.count_3_a < self.one_third/2 or  self.count_3_b < self.one_third/2) or (self.count_3_b != self.count_3_a):
+                    self.bail ( "error: recv_3_a and  recv_3_b did not get equal number of messages" )
                 else:
                     self.bail ( None )
 
+    def on_link_closed(self, event):
+        if event.receiver == self.recv_1_b or event.receiver == self.recv_1_a:
+            if event.receiver == self.recv_1_a:
+                self.recv_1_a_closed = True
+            if event.receiver == self.recv_1_b:
+                self.recv_1_b_closed = True
+            if self.recv_1_a_closed and self.recv_1_b_closed and not self.m_sent_2:
+                if self.print_debug:
+                    print ("self.recv_1_a_closed and self.recv_1_b_closed")
+
+                self.m_sent_2 = True
+                while self.n_sent_3 < self.one_third:
+                    msg = Message(body="Hello, closest.",
+                                  address=self.dest)
+                    self.sender.send(msg)
+                    self.n_sent_3 += 1
+                if self.print_debug:
+                    print("Second hundred sent")
+
+        if event.receiver == self.recv_2_a or event.receiver == self.recv_2_b:
+            if event.receiver == self.recv_2_a:
+                self.recv_2_a_closed = True
+            if event.receiver == self.recv_2_b:
+                self.recv_2_b_closed = True
+            if self.recv_2_a_closed and self.recv_2_b_closed:
+                self.first_check = False
+                if self.print_debug:
+                    print ("self.recv_2_a_closed and self.recv_2_b_closed")
+                self.addr_check()
 
     def addr_check ( self ):
         # Send the message that will query the management code to discover
