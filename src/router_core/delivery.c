@@ -124,6 +124,11 @@ bool qdr_delivery_is_aborted(const qdr_delivery_t *delivery)
     return qd_message_aborted(delivery->msg);
 }
 
+void qdr_delivery_set_presettled(qdr_delivery_t *delivery)
+{
+    if (delivery)
+        delivery->presettled = true;
+}
 
 void qdr_delivery_decref(qdr_core_t *core, qdr_delivery_t *delivery, const char *label)
 {
@@ -201,13 +206,15 @@ void qdr_delivery_remote_state_updated(qdr_core_t *core, qdr_delivery_t *deliver
 }
 
 
-qdr_delivery_t *qdr_deliver_continue(qdr_core_t *core,qdr_delivery_t *in_dlv)
+qdr_delivery_t *qdr_deliver_continue(qdr_core_t *core,qdr_delivery_t *in_dlv, bool settled)
 {
+
     qdr_action_t   *action = qdr_action(qdr_deliver_continue_CT, "deliver_continue");
-    action->args.connection.delivery = in_dlv;
+    action->args.delivery.delivery = in_dlv;
 
     qd_message_t *msg = qdr_delivery_message(in_dlv);
-    action->args.connection.more = !qd_message_receive_complete(msg);
+    action->args.delivery.more = !qd_message_receive_complete(msg);
+    action->args.delivery.presettled = settled;
 
     // This incref is for the action reference
     qdr_delivery_incref(in_dlv, "qdr_deliver_continue - add to action list");
@@ -448,6 +455,15 @@ static void qdr_delete_delivery_internal_CT(qdr_core_t *core, qdr_delivery_t *de
     qdr_delivery_increment_counters_CT(core, delivery);
 
     //
+    // Remove any subscription references
+    //
+    qdr_subscription_ref_t *sub = DEQ_HEAD(delivery->subscriptions);
+    while (sub) {
+        qdr_del_subscription_ref_CT(&delivery->subscriptions, sub);
+        sub = DEQ_HEAD(delivery->subscriptions);
+    }
+
+    //
     // Free all the peer qdr_delivery_ref_t references
     //
     qdr_delivery_ref_t *ref = DEQ_HEAD(delivery->peers);
@@ -647,7 +663,7 @@ static void qdr_update_delivery_CT(qdr_core_t *core, qdr_action_t *action, bool 
 
     } else {
         //
-        // Anycast forwarding
+        // Anycast forwarding - note: peer _may_ be freed by this call
         //
         free_error = !qdr_delivery_anycast_update_CT(core, dlv, peer, new_disp, settled, error);
     }
@@ -717,10 +733,17 @@ static bool qdr_delivery_anycast_update_CT(qdr_core_t *core, qdr_delivery_t *dlv
             if (qdr_delivery_link(peer)) {
                 peer_moved = qdr_delivery_settled_CT(core, peer);
             }
+
+            // expect: caller holds reference to dlv, so unlink will not free it
+            // expect: peer refcount held locally, so unlink will not free it
+            assert(sys_atomic_get(&dlv->ref_count) > 1);
+            assert(sys_atomic_get(&peer->ref_count) > 1);
             qdr_delivery_unlink_peers_CT(core, dlv, peer);
         }
 
         if (dlink)
+            // DISPATCH-1544: caller holds reference - dlv not freed
+            /* coverity[pass_freed_arg] */
             dlv_moved = qdr_delivery_settled_CT(core, dlv);
     }
 
@@ -731,6 +754,8 @@ static bool qdr_delivery_anycast_update_CT(qdr_core_t *core, qdr_delivery_t *dlv
         qdrc_endpoint_do_update_CT(core, dlink->core_endpoint, dlv, settled);
 
     if (push || peer_moved)
+        // DISPATCH-1544: peer incref-ed above - will not be freed
+        /* coverity[deref_arg] */
         qdr_delivery_push_CT(core, peer);
 
     //
@@ -801,6 +826,9 @@ void qdr_delivery_mcast_inbound_update_CT(qdr_core_t *core, qdr_delivery_t *in_d
         }
 
         if (moved) {
+            // expect: in_dlv still references out_peer (with refcount), so
+            // out_peer will not be freed by this decref:
+            assert(!unlink || sys_atomic_get(&out_peer->ref_count) > 1);
             qdr_delivery_decref_CT(core, out_peer,
                                    "qdr_delivery_mcast_inbound_update_CT - removed out_peer from unsettled");
         }
@@ -811,9 +839,13 @@ void qdr_delivery_mcast_inbound_update_CT(qdr_core_t *core, qdr_delivery_t *in_d
                (unlink) ? "True" : "False");
 
         if (unlink) {
+            // expect: in_dlv should not be freed here as caller must hold reference:
+            assert(sys_atomic_get(&in_dlv->ref_count) > 1);
             qdr_delivery_unlink_peers_CT(core, in_dlv, out_peer);  // may free out_peer!
         }
 
+        // DISPATCH-1544:
+        /* coverity[deref_arg] */
         out_peer = qdr_delivery_next_peer_CT(in_dlv);
     }
 
@@ -987,11 +1019,14 @@ void qdr_delivery_mcast_outbound_update_CT(qdr_core_t *core,
 
     qdr_delivery_incref(in_dlv, "qdr_delivery_mcast_outbound_update_CT - prevent mcast free");
 
+    // Note: qdr_delivery_mcast_outbound_settled_CT may free out_dlv!
     if (settled && qdr_delivery_mcast_outbound_settled_CT(core, in_dlv, out_dlv, &dlv_moved)) {
         push_dlv = true;
     }
 
     if (push_dlv || dlv_moved) {
+        // DISPATCH-1544: in_dlv incref-ed above - will not be freed at this point
+        /* coverity[deref_arg] */
         qdr_delivery_push_CT(core, in_dlv);
     }
     if (dlv_moved) {
@@ -1013,6 +1048,9 @@ void qdr_deliver_continue_peers_CT(qdr_core_t *core, qdr_delivery_t *in_dlv)
     qdr_delivery_t *peer = qdr_delivery_first_peer_CT(in_dlv);
 
     while (peer) {
+        if (! peer->presettled && in_dlv->presettled) {
+            peer->presettled       = in_dlv->presettled;
+        }
         qdr_link_work_t *work      = peer->link_work;
         qdr_link_t      *peer_link = qdr_delivery_link(peer);
 
@@ -1046,8 +1084,18 @@ static void qdr_deliver_continue_CT(qdr_core_t *core, qdr_action_t *action, bool
     if (discard)
         return;
 
-    qdr_delivery_t *in_dlv  = action->args.connection.delivery;
-    bool more = action->args.connection.more;
+    qdr_delivery_t *in_dlv  = action->args.delivery.delivery;
+    bool more = action->args.delivery.more;
+    bool presettled = action->args.delivery.presettled;
+
+    //
+    // If the delivery is already pre-settled, don't do anything with the pre-settled flag.
+    //
+    // If the in_delivery was not pre-settled, you can go to pre-settled.
+    if (! in_dlv->presettled && presettled) {
+        in_dlv->presettled = presettled;
+    }
+
     qdr_link_t *link = qdr_delivery_link(in_dlv);
 
     //
@@ -1063,11 +1111,11 @@ static void qdr_deliver_continue_CT(qdr_core_t *core, qdr_action_t *action, bool
             // The entire message has now been received. Check to see if there are in process subscriptions that need to
             // receive this message. in process subscriptions, at this time, can deal only with full messages.
             //
-            qdr_subscription_t *sub = DEQ_HEAD(in_dlv->subscriptions);
-            while (sub) {
-                DEQ_REMOVE_HEAD(in_dlv->subscriptions);
-                qdr_forward_on_message_CT(core, sub, link, in_dlv->msg);
-                sub = DEQ_HEAD(in_dlv->subscriptions);
+            qdr_subscription_ref_t *subref = DEQ_HEAD(in_dlv->subscriptions);
+            while (subref) {
+                qdr_forward_on_message_CT(core, subref->sub, link, in_dlv->msg);
+                qdr_del_subscription_ref_CT(&in_dlv->subscriptions, subref);
+                subref = DEQ_HEAD(in_dlv->subscriptions);
             }
 
             // This is a presettled multi-frame unicast delivery.
@@ -1097,13 +1145,19 @@ static void qdr_deliver_continue_CT(qdr_core_t *core, qdr_action_t *action, bool
                 qdr_delivery_t *next_peer = 0;
                 while (peer) {
                     next_peer = qdr_delivery_next_peer_CT(in_dlv);
-                    qdr_delivery_unlink_peers_CT(core, in_dlv, peer);
+                    // DISPATCH-1544: ensure there is an additional ref held by action
+                    // so in_dlv will not be freed when peer unlinked
+                    assert(sys_atomic_get(&in_dlv->ref_count) > 1);
+                    qdr_delivery_unlink_peers_CT(core, in_dlv, peer);  // peer make be freed here!
                     peer = next_peer;
                 }
 
                 // Remove the delivery from the settled list and decref the in_dlv.
+                /* coverity[deref_after_free] */
                 in_dlv->where = QDR_DELIVERY_NOWHERE;
                 DEQ_REMOVE(link->settled, in_dlv);
+                // expect: action holds a ref to in_dlv, so it should not be freed here
+                assert(sys_atomic_get(&in_dlv->ref_count) > 1);
                 qdr_delivery_decref_CT(core, in_dlv, "qdr_deliver_continue_CT - remove from settled list");
             }
         }

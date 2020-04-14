@@ -61,12 +61,44 @@ struct qd_link_t {
     pn_snd_settle_mode_t        remote_snd_settle_mode;
     qd_link_ref_list_t          ref_list;
     bool                        q2_limit_unbounded;
+    bool                        q3_blocked;
+    DEQ_LINKS_N(Q3, qd_link_t); ///< Q3 blocked links
 };
-
-DEQ_DECLARE(qd_link_t, qd_link_list_t);
 
 ALLOC_DEFINE(qd_link_t);
 ALLOC_DEFINE(qd_link_ref_t);
+
+/** Encapsulates a proton session */
+struct qd_session_t {
+    DEQ_LINKS(qd_session_t);
+    pn_session_t   *pn_sess;
+    qd_link_list_t  q3_blocked_links;  ///< Q3 blocked if !empty
+};
+
+// macros to work around PROTON-2184 (see container.h)
+//
+static inline void qd_session_link_pn(qd_session_t *qd_ssn, pn_session_t *pn_ssn)
+{
+    assert(qd_ssn && pn_ssn);
+    pn_session_set_context(pn_ssn, qd_ssn);
+}
+
+#ifdef QD_NULL_SESSION_CONTEXT
+static inline void qd_session_unlink_pn(qd_session_t *qd_ssn, pn_session_t *pn_ssn)
+{
+    assert(qd_ssn);
+    pn_session_set_context(pn_ssn, QD_NULL_SESSION_CONTEXT);
+}
+#else
+static inline void qd_session_unlink_pn(qd_session_t *qd_ssn, pn_session_t *pn_ssn)
+{
+    assert(qd_ssn);
+    pn_session_set_context(pn_ssn, 0);
+}
+#endif
+
+ALLOC_DECLARE(qd_session_t);
+ALLOC_DEFINE(qd_session_t);
 
 typedef struct qdc_node_type_t {
     DEQ_LINKS(struct qdc_node_type_t);
@@ -298,6 +330,22 @@ static void close_links(qd_container_t *container, pn_connection_t *conn, bool p
 }
 
 
+/** cleanup_link
+ * Prior to freeing qd_link_t - safe to call during shutdown
+ */
+static void cleanup_link(qd_link_t *link)
+{
+    if (link) {
+        if (link->q3_blocked)
+            qd_link_q3_unblock(link);
+        if (link->pn_link) {
+            pn_link_set_context(link->pn_link, NULL);
+            link->pn_link = 0;
+        }
+        link->pn_sess = 0;
+    }
+}
+
 static int close_handler(qd_container_t *container, pn_connection_t *conn, qd_connection_t* qd_conn)
 {
     //
@@ -307,6 +355,7 @@ static int close_handler(qd_container_t *container, pn_connection_t *conn, qd_co
     if (qd_conn)
         qd_conn->closed = true;
     close_links(container, conn, true);
+    qd_session_cleanup(qd_conn);
     if (qd_conn)
         notify_closed(container, qd_conn, qd_connection_get_context(qd_conn));
     return 0;
@@ -457,10 +506,12 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
             qd_conn->closed = true;
         if (pn_connection_state(conn) == (PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED)) {
             close_links(container, conn, false);
+            qd_session_cleanup(qd_conn);
             pn_connection_close(conn);
             qd_conn_event_batch_complete(container, qd_conn, true);
         } else if (pn_connection_state(conn) == (PN_LOCAL_CLOSED | PN_REMOTE_CLOSED)) {
             close_links(container, conn, false);
+            qd_session_cleanup(qd_conn);
             notify_closed(container, qd_conn, qd_connection_get_context(qd_conn));
             qd_conn_event_batch_complete(container, qd_conn, true);
         }
@@ -470,12 +521,24 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
         if (!(pn_connection_state(conn) & PN_LOCAL_CLOSED)) {
             ssn = pn_event_session(event);
             if (pn_session_state(ssn) & PN_LOCAL_UNINIT) {
+                // remote created new session
+                assert(qd_session_from_pn(ssn) == 0);
+                qd_session_t *qd_ssn = qd_session(ssn);
+                if (!qd_ssn) {
+                    pn_condition_t *cond = pn_session_condition(ssn);
+                    pn_condition_set_name(cond, QD_AMQP_COND_INTERNAL_ERROR);
+                    pn_condition_set_description(cond, "Insufficient memory");
+                    pn_session_close(ssn);
+                    break;
+                }
                 if (qd_conn->policy_settings) {
                     if (!qd_policy_approve_amqp_session(ssn, qd_conn)) {
+                        qd_session_free(qd_ssn);
                         break;
                     }
                     qd_conn->n_sessions++;
                 }
+                qd_session_link_pn(qd_ssn, ssn);
                 qd_policy_apply_session_settings(ssn, qd_conn);
                 pn_session_open(ssn);
             }
@@ -484,8 +547,12 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
 
     case PN_SESSION_LOCAL_CLOSE :
         ssn = pn_event_session(event);
-        if (ssn == qd_conn->pn_sess)
-            qd_conn->pn_sess = 0;
+        for (int i = 0; i < QD_SSN_CLASS_COUNT; ++i) {
+            if (ssn == qd_conn->pn_sessions[i]) {
+                qd_conn->pn_sessions[i] = 0;
+                break;
+            }
+        }
         pn_link = pn_link_head(conn, PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED);
         while (pn_link) {
             if (pn_link_session(pn_link) == ssn) {
@@ -497,14 +564,20 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
         }
 
         if (pn_session_state(ssn) == (PN_LOCAL_CLOSED | PN_REMOTE_CLOSED)) {
+            qd_session_t *qd_ssn = qd_session_from_pn(ssn);
+            qd_session_free(qd_ssn);
             add_session_to_free_list(&qd_conn->free_link_session_list, ssn);
         }
         break;
 
     case PN_SESSION_REMOTE_CLOSE :
         ssn = pn_event_session(event);
-        if (ssn == qd_conn->pn_sess)
-            qd_conn->pn_sess = 0;
+        for (int i = 0; i < QD_SSN_CLASS_COUNT; ++i) {
+            if (ssn == qd_conn->pn_sessions[i]) {
+                qd_conn->pn_sessions[i] = 0;
+                break;
+            }
+        }
         if (!(pn_connection_state(conn) & PN_LOCAL_CLOSED)) {
             if (pn_session_state(ssn) == (PN_LOCAL_ACTIVE | PN_REMOTE_CLOSED)) {
 
@@ -553,6 +626,8 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
                 pn_session_close(ssn);
             }
             else if (pn_session_state(ssn) == (PN_LOCAL_CLOSED | PN_REMOTE_CLOSED)) {
+                qd_session_t *qd_ssn = qd_session_from_pn(ssn);
+                qd_session_free(qd_ssn);
                 add_session_to_free_list(&qd_conn->free_link_session_list, ssn);
             }
         }
@@ -618,7 +693,7 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
                     node->ntype->link_detach_handler(node->context, qd_link, dt);
                 }
             } else {
-                pn_link_free(pn_link);
+                add_link_to_free_list(&qd_conn->free_link_session_list, pn_link);
             }
         }
         break;
@@ -696,6 +771,7 @@ void qd_container_free(qd_container_t *container)
     qd_link_t *link = DEQ_HEAD(container->links);
     while (link) {
         DEQ_REMOVE_HEAD(container->links);
+        cleanup_link(link);
         free_qd_link_t(link);
         link = DEQ_HEAD(container->links);
     }
@@ -846,26 +922,38 @@ qd_lifetime_policy_t qd_container_node_get_life_policy(const qd_node_t *node)
 }
 
 
-qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, const char* name)
+qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, const char* name, qd_session_class_t ssn_class)
 {
-    qd_link_t *link = new_qd_link_t();
-    if (!link) {
-        return NULL;
-    }
     const qd_server_config_t * cf = qd_connection_config(conn);
 
+    pn_session_t *pn_ssn = conn->pn_sessions[ssn_class];
+    if (!pn_ssn) {
+        pn_ssn = pn_session(qd_connection_pn(conn));
+        if (!pn_ssn) {
+            return NULL;
+        }
+        qd_session_t *qd_ssn = qd_session(pn_ssn);
+        if (!qd_ssn) {
+            pn_session_free(pn_ssn);
+            return NULL;  // PN_LOCAL_CLOSE event will free pn_ssn
+        }
+
+        conn->pn_sessions[ssn_class] = pn_ssn;
+        pn_session_set_incoming_capacity(pn_ssn, cf->incoming_capacity);
+        pn_session_open(pn_ssn);
+    }
+
+    qd_link_t *link = new_qd_link_t();
+    if (!link) {
+        return NULL;  // ok to keep qd_session around - will reuse & free on conn close
+    }
     ZERO(link);
+
     sys_mutex_lock(node->container->lock);
     DEQ_INSERT_TAIL(node->container->links, link);
     sys_mutex_unlock(node->container->lock);
 
-    if (!conn->pn_sess) {
-        conn->pn_sess = pn_session(qd_connection_pn(conn));
-        pn_session_set_incoming_capacity(conn->pn_sess, cf->incoming_capacity);
-        pn_session_open(conn->pn_sess);
-    }
-
-    link->pn_sess = conn->pn_sess;
+    link->pn_sess = pn_ssn;
 
     if (dir == QD_OUTGOING)
         link->pn_link = pn_sender(link->pn_sess, name);
@@ -886,11 +974,6 @@ qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, c
 void qd_link_free(qd_link_t *link)
 {
     if (!link) return;
-    if (link->pn_link) {
-        pn_link_set_context(link->pn_link, NULL);
-        link->pn_link = 0;
-    }
-    link->pn_sess = 0;
     qd_container_t *container = link->node->container;
     sys_mutex_lock(container->lock);
     DEQ_REMOVE(container->links, link);
@@ -899,6 +982,7 @@ void qd_link_free(qd_link_t *link)
     qd_node_t *node = link->node;
     node->ntype->link_abandoned_deliveries_handler(node->context, link);
 
+    cleanup_link(link);
     free_qd_link_t(link);
 }
 
@@ -1039,4 +1123,93 @@ void qd_link_detach(qd_link_t *link)
 void *qd_link_get_node_context(const qd_link_t *link)
 {
     return (link && link->node) ? link->node->context : 0;
+}
+
+
+/** sending link has entered Q3 flow control */
+void qd_link_q3_block(qd_link_t *link)
+{
+    assert(link);
+    if (!link->q3_blocked && link->pn_sess) {
+        qd_session_t *qd_ssn = qd_session_from_pn(link->pn_sess);
+        assert(qd_ssn);
+        link->q3_blocked = true;
+        DEQ_INSERT_TAIL_N(Q3, qd_ssn->q3_blocked_links, link);
+    }
+}
+
+
+void qd_link_q3_unblock(qd_link_t *link)
+{
+    assert(link);
+    if (link->q3_blocked) {
+        qd_session_t *qd_ssn = qd_session_from_pn(link->pn_sess);
+        assert(qd_ssn);
+        DEQ_REMOVE_N(Q3, qd_ssn->q3_blocked_links, link);
+        link->q3_blocked = false;
+    }
+}
+
+
+qd_session_t *qd_session(pn_session_t *pn_ssn)
+{
+    assert(pn_ssn);
+    qd_session_t *qd_ssn = qd_session_from_pn(pn_ssn);
+    if (!qd_ssn) {
+        qd_ssn = new_qd_session_t();
+        if (qd_ssn) {
+            ZERO(qd_ssn);
+            qd_ssn->pn_sess = pn_ssn;
+            DEQ_INIT(qd_ssn->q3_blocked_links);
+            qd_session_link_pn(qd_ssn, pn_ssn);
+        }
+    }
+    return qd_ssn;
+}
+
+
+void qd_session_free(qd_session_t *qd_ssn)
+{
+    if (qd_ssn) {
+        qd_link_t *link = DEQ_HEAD(qd_ssn->q3_blocked_links);
+        while (link) {
+            qd_link_q3_unblock(link);  // removes link from list
+            link = DEQ_HEAD(qd_ssn->q3_blocked_links);
+        }
+        if (qd_ssn->pn_sess) {
+            qd_session_unlink_pn(qd_ssn, qd_ssn->pn_sess);
+        }
+        free_qd_session_t(qd_ssn);
+    }
+}
+
+
+qd_link_list_t *qd_session_q3_blocked_links(qd_session_t *qd_ssn)
+{
+    return qd_ssn ? &qd_ssn->q3_blocked_links : 0;
+}
+
+
+bool qd_session_is_q3_blocked(const qd_session_t *qd_ssn)
+{
+    return qd_ssn && !DEQ_IS_EMPTY(qd_ssn->q3_blocked_links);
+}
+
+
+
+/** release all qd_session_t instances for the connection
+ * called prior to releasing the qd_connection_t
+ */
+void qd_session_cleanup(qd_connection_t *qd_conn)
+{
+    pn_connection_t *pn_conn = (qd_conn) ? qd_conn->pn_conn : 0;
+    if (!pn_conn)
+        return;
+
+    pn_session_t *pn_ssn = pn_session_head(pn_conn, 0);
+    while (pn_ssn) {
+        qd_session_t *qd_ssn = qd_session_from_pn(pn_ssn);
+        qd_session_free(qd_ssn);
+        pn_ssn = pn_session_next(pn_ssn, 0);
+    }
 }

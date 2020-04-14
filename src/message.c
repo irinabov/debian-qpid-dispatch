@@ -1162,20 +1162,27 @@ void qd_message_add_fanout(qd_message_t *in_msg,
     LOCK(content->lock);
     ++content->fanout;
 
-    // do not free the buffers until all fanout senders are done with them
     qd_buffer_t *buf = DEQ_HEAD(content->buffers);
-    if (buf) {
-        // DISPATCH-1330: since we're incrementing the refcount be sure to set
-        // the cursor to the head buf in case msg is discarded before all data
-        // is sent (we'll decref any unsent buffers at that time)
-        //
-        msg->cursor.buffer = buf;
-
-        while (buf) {
-            qd_buffer_inc_fanout(buf);
-            buf = DEQ_NEXT(buf);
-        }
+    // DISPATCH-1590: content->buffers may not be set up yet if
+    // content->pending is the first buffer and it is not yet full.
+    if (!buf) {
+        // assumption: proton will never signal a readable delivery if there is
+        // no data at all.
+        assert(content->pending && qd_buffer_size(content->pending) > 0);
+        DEQ_INSERT_TAIL(content->buffers, content->pending);
+        content->pending = 0;
+        buf = DEQ_HEAD(content->buffers);
     }
+    // DISPATCH-1330: since we're incrementing the refcount be sure to set
+    // the cursor to the head buf in case msg is discarded before all data
+    // is sent (we'll decref any unsent buffers at that time)
+    //
+    msg->cursor.buffer = buf;
+    while (buf) {
+        qd_buffer_inc_fanout(buf);
+        buf = DEQ_NEXT(buf);
+    }
+
     UNLOCK(content->lock);
 }
 
@@ -1677,11 +1684,12 @@ void qd_message_send(qd_message_t *in_msg,
 
     buf = msg->cursor.buffer;
 
-    pn_session_t     *pns  = pn_link_session(pnl);
+    pn_session_t     *pns = pn_link_session(pnl);
+    const size_t q3_upper = BUFFER_SIZE * QD_QLIMIT_Q3_UPPER;
 
     while (!content->aborted
            && buf
-           && pn_session_outgoing_bytes(pns) <= QD_QLIMIT_Q3_UPPER) {
+           && pn_session_outgoing_bytes(pns) < q3_upper) {
 
         // This will send the remaining data in the buffer if any. There may be
         // zero bytes left to send if we stopped here last time and there was
@@ -1783,7 +1791,7 @@ void qd_message_send(qd_message_t *in_msg,
         }
     }
 
-    *q3_stalled = (pn_session_outgoing_bytes(pns) > QD_QLIMIT_Q3_UPPER);
+    *q3_stalled = (pn_session_outgoing_bytes(pns) >= q3_upper);
 }
 
 

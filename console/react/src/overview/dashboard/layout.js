@@ -57,6 +57,8 @@ import { utils } from "../../common/amqp/utilities";
 import throughputData from "./throughputData";
 import inflightData from "./inflightData";
 
+const SUPPRESS_NOTIFICATIONS = "noNotify";
+
 class PageLayout extends React.PureComponent {
   constructor(props) {
     super(props);
@@ -70,7 +72,8 @@ class PageLayout extends React.PureComponent {
       isNavOpenMobile: false,
       isMobileView: false,
       user: "anonymous",
-      timePeriod: 60
+      timePeriod: 60,
+      suppress: JSON.parse(localStorage.getItem(SUPPRESS_NOTIFICATIONS)) || false
     };
     this.isDropdownOpen = false;
 
@@ -97,6 +100,7 @@ class PageLayout extends React.PureComponent {
     this.throughputChartData = new throughputData(this.service);
     this.inflightChartData = new inflightData(this.service);
     this.updateCharts();
+    document.title = this.props.config.title;
   };
 
   componentWillUnmount = () => {
@@ -209,13 +213,34 @@ class PageLayout extends React.PureComponent {
       );
 
       //this.redirect = true;
-      this.props.history.replace(connectPath);
-      this.setState({
-        activeItem,
-        activeGroup,
-        connected: true,
-        isConnectFormOpen: false
-      });
+      let user = "anonymous";
+      let parts = this.service.management.connection.getReceiverAddress().split("/");
+      parts[parts.length - 1] = "$management";
+      let router = parts.join("/");
+      // get connections for router to which console is connected
+      this.service.management.topology.fetchEntity(
+        router,
+        "connection",
+        [],
+        (_nodeId, _entity, response) => {
+          response.results.some(result => {
+            let c = utils.flatten(response.attributeNames, result);
+            if (utils.isConsole(c)) {
+              user = c.user;
+              return true;
+            }
+            return false;
+          });
+          this.props.history.replace(connectPath);
+          this.setState({
+            user,
+            activeItem,
+            activeGroup,
+            connected: true,
+            isConnectFormOpen: false
+          });
+        }
+      );
     }
   };
 
@@ -273,6 +298,12 @@ class PageLayout extends React.PureComponent {
     }
   };
 
+  handleSuppress = () => {
+    this.setState({ suppress: !this.state.suppress ? "ok" : false }, () => {
+      localStorage.setItem(SUPPRESS_NOTIFICATIONS, JSON.stringify(this.state.suppress));
+    });
+  };
+
   render() {
     const { activeItem, activeGroup } = this.state;
     const { isNavOpenDesktop, isNavOpenMobile, isMobileView } = this.state;
@@ -327,7 +358,10 @@ class PageLayout extends React.PureComponent {
             </Button>
           </ToolbarItem>
           <ToolbarItem className="notification-button">
-            <NotificationDrawer ref={el => (this.notificationRef = el)} />
+            <NotificationDrawer
+              ref={el => (this.notificationRef = el)}
+              suppress={this.state.suppress}
+            />
           </ToolbarItem>
         </ToolbarGroup>
         <ToolbarGroup>
@@ -341,6 +375,8 @@ class PageLayout extends React.PureComponent {
               ref={el => (this.dropdownRef = el)}
               handleContextHide={this.handleUserMenuHide}
               handleDropdownLogout={this.handleDropdownLogout}
+              handleSuppress={this.handleSuppress}
+              suppress={this.state.suppress}
               isConnected={this.isConnected}
               parentClass="user-button"
             />
