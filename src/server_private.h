@@ -43,7 +43,7 @@ qd_connection_t *qd_server_connection(qd_server_t *server, qd_server_config_t* c
 
 qd_connector_t* qd_connection_connector(const qd_connection_t *c);
 
-void qd_connection_handle(qd_connection_t *c, pn_event_t *e);
+bool qd_connection_handle(qd_connection_t *c, pn_event_t *e);
 
 
 const qd_server_config_t *qd_connector_config(const qd_connector_t *c);
@@ -147,7 +147,7 @@ struct qd_connection_t {
     int                             enqueued;
     qd_timer_t                      *timer;   // Timer for initial-setup
     pn_connection_t                 *pn_conn;
-    pn_session_t                    *pn_sess;
+    pn_session_t                    *pn_sessions[QD_SSN_CLASS_COUNT];
     pn_ssl_t                        *ssl;
     qd_listener_t                   *listener;
     qd_connector_t                  *connector;
@@ -186,5 +186,15 @@ ALLOC_DECLARE(qd_pn_free_link_session_t);
  * For every connection on the server's connection list, call pn_transport_set_tracer and enable trace logging
  */
 void qd_server_trace_all_connections();
+
+/**
+ * This function is set as the pn_transport->tracer and is invoked when proton tries to write the log message to pn_transport->tracer
+ */
+void transport_tracer(pn_transport_t *transport, const char *message);
+
+/**
+ * This is similar to the transport_tracer but it writes the message to the log at the trace level even if trace level is not enabled.
+ */
+void connection_transport_tracer(pn_transport_t *transport, const char *message);
 
 #endif

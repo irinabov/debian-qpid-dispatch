@@ -108,7 +108,7 @@ static qd_config_ssl_profile_t *qd_find_ssl_profile(qd_connection_manager_t *cm,
  * Read the file from the password_file location on the file system and populate password_field with the
  * contents of the file.
  */
-static void qd_set_password_from_file(char *password_file, char **password_field, qd_log_source_t *log_source)
+static void qd_set_password_from_file(const char *password_file, char **password_field, qd_log_source_t *log_source)
 {
     if (password_file) {
         FILE *file = fopen(password_file, "r");
@@ -403,13 +403,15 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
         char *actual_pass = 0;
         bool is_file_path = 0;
         qd_config_process_password(&actual_pass, config->sasl_password, &is_file_path, false, qd->connection_manager->log_source);
-        if (actual_pass && is_file_path) {
-            qd_set_password_from_file(actual_pass, &config->sasl_password, qd->connection_manager->log_source);
-
-        }
-        else if (actual_pass) {
-            free(config->sasl_password);
-            config->sasl_password = actual_pass;
+        if (actual_pass) {
+            if (is_file_path) {
+                qd_set_password_from_file(actual_pass, &config->sasl_password, qd->connection_manager->log_source);
+                free(actual_pass);
+            }
+            else {
+                free(config->sasl_password);
+                config->sasl_password = actual_pass;
+            }
         }
     }
 
@@ -595,12 +597,15 @@ qd_config_ssl_profile_t *qd_dispatch_configure_ssl_profile(qd_dispatch_t *qd, qd
         char *actual_pass = 0;
         bool is_file_path = 0;
         qd_config_process_password(&actual_pass, ssl_profile->ssl_password, &is_file_path, true, cm->log_source); CHECK();
-        if (actual_pass && is_file_path) {
-            qd_set_password_from_file(actual_pass, &ssl_profile->ssl_password, cm->log_source);
-        }
-        else if (actual_pass) {
-            free(ssl_profile->ssl_password);
-            ssl_profile->ssl_password = actual_pass;
+        if (actual_pass) {
+            if (is_file_path) {
+                qd_set_password_from_file(actual_pass, &ssl_profile->ssl_password, cm->log_source);
+                free(actual_pass);
+            }
+            else {
+                free(ssl_profile->ssl_password);
+                ssl_profile->ssl_password = actual_pass;
+            }
         }
     }
     else if (password_file) {
@@ -781,7 +786,7 @@ qd_error_t qd_entity_refresh_connector(qd_entity_t* entity, void *impl)
     int arr_length = get_failover_info_length(conn_info_list);
 
     // This is the string that will contain the comma separated failover list
-    char failover_info[arr_length];
+    char failover_info[arr_length + 1];
     failover_info[0] = 0;
 
     while(item) {
@@ -915,12 +920,24 @@ qd_connection_manager_t *qd_connection_manager(qd_dispatch_t *qd)
 }
 
 
+// Called on router shutdown
+//
 void qd_connection_manager_free(qd_connection_manager_t *cm)
 {
     if (!cm) return;
     qd_listener_t *li = DEQ_HEAD(cm->listeners);
     while (li) {
         DEQ_REMOVE_HEAD(cm->listeners);
+        if (li->pn_listener) {
+            // DISPATCH-1508: force cleanup of pn_listener context.  This is
+            // usually done in the PN_LISTENER_CLOSE event handler in server.c,
+            // but since the router is going down those events will no longer
+            // be generated.
+            pn_listener_set_context(li->pn_listener, 0);
+            pn_listener_close(li->pn_listener);
+            li->pn_listener = 0;
+            qd_listener_decref(li);  // for the pn_listener's context
+        }
         qd_listener_decref(li);
         li = DEQ_HEAD(cm->listeners);
     }

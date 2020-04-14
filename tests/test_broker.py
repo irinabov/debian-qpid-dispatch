@@ -85,13 +85,14 @@ class FakeBroker(MessagingHandler):
             except IndexError: # no more messages
                 return 0
 
-    def __init__(self, url, container_id=None):
-        super(FakeBroker, self).__init__()
+    def __init__(self, url, container_id=None, **handler_kwargs):
+        super(FakeBroker, self).__init__(**handler_kwargs)
         self.url = url
         self.queues = {}
         self.acceptor = None
         self.in_count = 0
         self.out_count = 0
+        self.link_errors = 0
         self._connections = []
         self._error = None
         self._container = Container(self)
@@ -149,6 +150,10 @@ class FakeBroker(MessagingHandler):
         if link.source.address in self.queues and self.queues[link.source.address].unsubscribe(link):
             del self.queues[link.source.address]
 
+    def on_link_error(self, event):
+        self.link_errors += 1
+        self.on_link_closing(event)
+
     def on_link_closing(self, event):
         if event.link.is_sender:
             self._unsubscribe(event.link)
@@ -173,11 +178,11 @@ class FakeBroker(MessagingHandler):
         self.remove_stale_consumers(event.connection)
 
     def remove_stale_consumers(self, connection):
-        l = connection.link_head(Endpoint.REMOTE_ACTIVE)
-        while l:
-            if l.is_sender:
-                self._unsubscribe(l)
-            l = l.next(Endpoint.REMOTE_ACTIVE)
+        link = connection.link_head(Endpoint.REMOTE_ACTIVE)
+        while link:
+            if link.is_sender:
+                self._unsubscribe(link)
+            link = link.next(Endpoint.REMOTE_ACTIVE)
 
     def on_sendable(self, event):
         self.out_count += self._queue(event.link.source.address).dispatch(event.link)

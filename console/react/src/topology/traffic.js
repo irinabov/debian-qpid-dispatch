@@ -224,9 +224,7 @@ class Congestion extends TrafficAnimation {
             let little = Math.min(f, t);
             let big = Math.max(f, t);
             if (little >= 0) {
-              let key = ["#hitpath", nodes[little].uid(srv), nodes[big].uid(srv)].join(
-                "-"
-              );
+              let key = ["#hitpath", nodes[little].uid(), nodes[big].uid()].join("-");
               if (!links[key]) links[key] = [];
               links[key].push(link);
             }
@@ -237,8 +235,15 @@ class Congestion extends TrafficAnimation {
     // accumulate the colors/directions to be used
     for (let key in links) {
       let congestion = self.congestion(links[key]);
-      let pathId = key.replace(/\./g, "\\.").replace(/ /g, "\\ ");
-      let path = d3.select(pathId);
+      let path;
+      d3.selectAll("path.hittarget").each(function(l) {
+        if (
+          key === `#hitpath-${l.suid}-${l.tuid}` ||
+          key === `#hitpath-${l.tuid}-${l.suid}`
+        ) {
+          path = d3.select(this);
+        }
+      });
       if (path && !path.empty()) {
         // start the path with transparent white
         if (!path.attr("style")) {
@@ -474,12 +479,17 @@ class Dots extends TrafficAnimation {
       let foreIndex = 0;
       for (let h = 0; h < hop.length; h++) {
         let ahop = hop[h];
-        let pathId = id.replace(/\./g, "\\.").replace(/ /g, "\\ ");
+        let pathId = CSS.escape(id); //id.replace(/\./g, "\\.").replace(/ /g, "\\ ");
+        /*
         let flowId =
           id.replace(/\./g, "").replace(/ /g, "") +
           "-" +
           this.addressIndex(ahop.address) +
           (ahop.back ? "b" : "");
+          */
+        let flowId = CSS.escape(
+          `${id}-${this.addressIndex(ahop.address)}${ahop.back ? "b" : ""}`
+        );
         let path = d3.select("#path" + pathId);
         if (!path.empty()) {
           if (ahop.back) {
