@@ -355,6 +355,16 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
         // Message has been marked for discard, no further processing necessary
         //
         if (receive_complete) {
+            // If this discarded delivery has already been settled by proton,
+            // set the presettled flag on the delivery to true if it is not already true.
+            // Since the entire message has already been received, we directly call the
+            // function to set the pre-settled flag since we cannot go thru the core-thread
+            // to do this since the delivery has been discarded.
+            // Discarded streaming deliveries are not put thru the core thread via the continue action.
+            if (pn_delivery_settled(pnd))
+                qdr_delivery_set_presettled(delivery);
+
+
             // note: expected that the code that set discard has handled
             // setting disposition and updating flow!
             pn_delivery_settle(pnd);
@@ -376,7 +386,7 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
     //
 
     if (delivery) {
-        qdr_deliver_continue(router->router_core, delivery);
+        qdr_deliver_continue(router->router_core, delivery, pn_delivery_settled(pnd));
         return next_delivery;
     }
 
@@ -776,19 +786,45 @@ static int AMQP_link_attach_handler(void* context, qd_link_t *link)
 
 
 /**
- * Handler for flow events on links
+ * Handler for flow events on links.  Flow updates include session window
+ * state, which needs to be checked for unblocking Q3.
  */
 static int AMQP_link_flow_handler(void* context, qd_link_t *link)
 {
-    qd_router_t *router = (qd_router_t*) context;
-    qdr_link_t  *rlink  = (qdr_link_t*) qd_link_get_context(link);
-    pn_link_t   *pnlink = qd_link_pn(link);
+    qd_router_t *router  = (qd_router_t*) context;
+    pn_link_t   *pnlink  = qd_link_pn(link);
+    qdr_link_t  *rlink   = (qdr_link_t*) qd_link_get_context(link);
 
-    if (!rlink)
-        return 0;
+    if (rlink) {
+        qdr_link_flow(router->router_core, rlink, pn_link_remote_credit(pnlink), pn_link_get_drain(pnlink));
+    }
 
-    qdr_link_flow(router->router_core, rlink, pn_link_remote_credit(pnlink), pn_link_get_drain(pnlink));
-
+    // check if Q3 can be unblocked
+    pn_session_t *pn_ssn = pn_link_session(pnlink);
+    if (pn_ssn) {
+        qd_session_t *qd_ssn = qd_session_from_pn(pn_ssn);
+        if (qd_ssn && qd_session_is_q3_blocked(qd_ssn)) {
+            // Q3 blocked - have we drained enough outgoing bytes?
+            const size_t q3_lower = BUFFER_SIZE * QD_QLIMIT_Q3_LOWER;
+            if (pn_session_outgoing_bytes(pn_ssn) < q3_lower) {
+                // yes.  We must now unblock all links that have been blocked by Q3
+                qd_link_list_t *blinks = qd_session_q3_blocked_links(qd_ssn);
+                qd_link_t *blink = DEQ_HEAD(*blinks);
+                while (blink) {
+                    qd_link_q3_unblock(blink);  // removes from blinks list!
+                    if (blink != link) {        // already flowed this link
+                        rlink = (qdr_link_t *) qd_link_get_context(blink);
+                        if (rlink) {
+                            pnlink = qd_link_pn(blink);
+                            // signalling flow to the core causes the link to be re-activated
+                            qdr_link_flow(router->router_core, rlink, pn_link_remote_credit(pnlink), pn_link_get_drain(pnlink));
+                        }
+                    }
+                    blink = DEQ_HEAD(*blinks);
+                }
+            }
+        }
+    }
     return 0;
 }
 
@@ -1343,7 +1379,8 @@ static void CORE_link_first_attach(void             *context,
                                    qdr_connection_t *conn,
                                    qdr_link_t       *link, 
                                    qdr_terminus_t   *source,
-                                   qdr_terminus_t   *target)
+                                   qdr_terminus_t   *target,
+                                   qd_session_class_t ssn_class)
 {
     qd_router_t     *router = (qd_router_t*) context;
     qd_connection_t *qconn  = (qd_connection_t*) qdr_connection_get_context(conn);
@@ -1352,7 +1389,7 @@ static void CORE_link_first_attach(void             *context,
     //
     // Create a new link to be attached
     //
-    qd_link_t *qlink = qd_link(router->node, qconn, qdr_link_direction(link), qdr_link_name(link));
+    qd_link_t *qlink = qd_link(router->node, qconn, qdr_link_direction(link), qdr_link_name(link), ssn_class);
 
     //
     // Copy the source and target termini to the link
@@ -1420,6 +1457,29 @@ static void CORE_link_second_attach(void *context, qdr_link_t *link, qdr_terminu
     //
     if (qdr_link_direction(link) == QD_OUTGOING)
         qdr_link_stalled_outbound(link);
+}
+
+
+static void CORE_conn_trace(void *context, qdr_connection_t *qdr_conn, bool trace)
+{
+    qd_connection_t      *qconn  = (qd_connection_t*) qdr_connection_get_context(qdr_conn);
+
+    if (!qconn)
+        return;
+
+    pn_transport_t *tport  = pn_connection_transport(qconn->pn_conn);
+
+    if (!tport)
+        return;
+
+    if (trace) {
+        pn_transport_trace(tport, PN_TRACE_FRM);
+        pn_transport_set_tracer(tport, connection_transport_tracer);
+
+    }
+    else {
+        pn_transport_trace(tport, PN_TRACE_OFF);
+    }
 }
 
 static void CORE_close_connection(void *context, qdr_connection_t *qdr_conn, qdr_error_t *error)
@@ -1631,8 +1691,10 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
 
     qd_message_send(msg_out, qlink, qdr_link_strip_annotations_out(link), &restart_rx, &q3_stalled);
 
-    if (q3_stalled)
+    if (q3_stalled) {
+        qd_link_q3_block(qlink);
         qdr_link_stalled_outbound(link);
+    }
 
     if (restart_rx) {
         qd_link_restart_rx(qd_message_get_receiving_link(msg_out));
@@ -1729,9 +1791,9 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
         return;
 
     //
-    // If the disposition has changed, update the proton delivery.
+    // If the disposition has changed and the proton delivery has not already been settled, update the proton delivery.
     //
-    if (disp != pn_delivery_remote_state(pnd) && !qdr_delivery_presettled(dlv)) {
+    if (disp != pn_delivery_remote_state(pnd) && !pn_delivery_settled(pnd)) {
         qd_message_t *msg = qdr_delivery_message(dlv);
 
         if (disp == PN_MODIFIED)
@@ -1797,7 +1859,8 @@ void qd_router_setup_late(qd_dispatch_t *qd)
                             CORE_link_deliver,
                             CORE_link_get_credit,
                             CORE_delivery_update,
-                            CORE_close_connection);
+                            CORE_close_connection,
+                            CORE_conn_trace);
 
     qd_router_python_setup(qd->router);
     qd_timer_schedule(qd->router->timer, 1000);

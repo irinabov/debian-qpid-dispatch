@@ -30,6 +30,7 @@
  */
 
 #include <proton/engine.h>
+#include <proton/version.h>
 #include <qpid/dispatch/dispatch.h>
 #include <qpid/dispatch/server.h>
 #include <qpid/dispatch/ctools.h>
@@ -68,10 +69,38 @@ typedef enum {
 } qd_detach_type_t;
 
 
+/**
+ * Session Class
+ *
+ * Used when creating new links from the router.  A connection maintains a set
+ * of sessions over which links can be created.  The session class indicates
+ * which session to use when creating a link.
+ */
+typedef enum {
+    QD_SSN_ENDPOINT,          ///< client data links
+    QD_SSN_ROUTER_CONTROL,    ///< router protocol
+    QD_SSN_ROUTER_DATA_PRI_0, ///< inter-router data links (by priority)
+    QD_SSN_ROUTER_DATA_PRI_1,
+    QD_SSN_ROUTER_DATA_PRI_2,
+    QD_SSN_ROUTER_DATA_PRI_3,
+    QD_SSN_ROUTER_DATA_PRI_4,
+    QD_SSN_ROUTER_DATA_PRI_5,
+    QD_SSN_ROUTER_DATA_PRI_6,
+    QD_SSN_ROUTER_DATA_PRI_7,
+    QD_SSN_ROUTER_DATA_PRI_8,
+    QD_SSN_ROUTER_DATA_PRI_9,
+    QD_SSN_CORE_ENDPOINT,     ///< core subscriptions
+    QD_SSN_LINK_ROUTE,        ///< link routes
+    QD_SSN_CLASS_COUNT
+} qd_session_class_t;
+
+
 typedef struct qd_node_t     qd_node_t;
+typedef struct qd_session_t  qd_session_t;
 typedef struct qd_link_t     qd_link_t;
 
 ALLOC_DECLARE(qd_link_t);
+DEQ_DECLARE(qd_link_t, qd_link_list_t);
 
 typedef bool (*qd_container_delivery_handler_t)                  (void *node_context, qd_link_t *link);
 typedef void (*qd_container_disposition_handler_t)               (void *node_context, qd_link_t *link, pn_delivery_t *pnd);
@@ -160,7 +189,7 @@ void qd_container_node_set_context(qd_node_t *node, void *node_context);
 qd_dist_mode_t qd_container_node_get_dist_modes(const qd_node_t *node);
 qd_lifetime_policy_t qd_container_node_get_life_policy(const qd_node_t *node);
 
-qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, const char *name);
+qd_link_t *qd_link(qd_node_t *node, qd_connection_t *conn, qd_direction_t dir, const char *name, qd_session_class_t);
 void qd_link_free(qd_link_t *link);
 
 /**
@@ -200,6 +229,31 @@ void qd_link_detach(qd_link_t *link);
 void qd_link_free(qd_link_t *link);
 void *qd_link_get_node_context(const qd_link_t *link);
 void qd_link_restart_rx(qd_link_t *link);
+void qd_link_q3_block(qd_link_t *link);
+void qd_link_q3_unblock(qd_link_t *link);
+
+qd_session_t *qd_session(pn_session_t *pn_ssn);
+void qd_session_cleanup(qd_connection_t *qd_conn);
+void qd_session_free(qd_session_t *qd_ssn);
+bool qd_session_is_q3_blocked(const qd_session_t *qd_ssn);
+qd_link_list_t *qd_session_q3_blocked_links(qd_session_t *qd_ssn);
+
+
+// handy macros to get around PROTON-2184: pn_session_set_context aborts if
+// context==0  (can remove this once qdrouter requires >= proton 0.31.x)
+#if ((PN_VERSION_MAJOR == 0) && (PN_VERSON_MINOR <= 30))
+#define QD_NULL_SESSION_CONTEXT ((qd_session_t *)1)
+static inline qd_session_t *qd_session_from_pn(pn_session_t *pn_ssn)
+{
+    qd_session_t *qd_ssn = (qd_session_t *)pn_session_get_context(pn_ssn);
+    return (qd_ssn == QD_NULL_SESSION_CONTEXT) ? 0 : qd_ssn;
+}
+#else
+static inline qd_session_t *qd_session_from_pn(pn_session_t *pn_ssn)
+{
+    return (qd_session_t *)pn_session_get_context(pn_ssn);
+}
+#endif
 
 ///@}
 #endif

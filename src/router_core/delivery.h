@@ -50,7 +50,7 @@ struct qdr_delivery_t {
     pn_data_t              *extension_state;     ///< delivery-state in disposition performative
     qdr_error_t            *error;
     bool                    settled;
-    bool                    presettled;
+    bool                    presettled; /// Proton does not have a notion of pre-settled. This flag is introduced in Dispatch and should exclusively be used only to update management counters like presettled delivery counts on links etc. This flag DOES NOT represent the remote settlement state of the delivery.
     qdr_delivery_where_t    where;
     uint8_t                 tag[QDR_DELIVERY_TAG_MAX];
     int                     tag_length;
@@ -59,7 +59,7 @@ struct qdr_delivery_t {
     int                     tracking_addr_bit;
     int                     ingress_index;
     qdr_link_work_t        *link_work;         ///< Delivery work item for this delivery
-    qdr_subscription_list_t subscriptions;
+    qdr_subscription_ref_list_t subscriptions;
     qdr_delivery_ref_list_t peers;             /// Use this list if there if the delivery has more than one peer.
     bool                    multicast;         /// True if this delivery is targeted for a multicast address.
     bool                    via_edge;          /// True if this delivery arrived via an edge-connection.
@@ -110,13 +110,20 @@ void qdr_delivery_write_extension_state(qdr_delivery_t *dlv, pn_delivery_t* pdlv
 /* release dlv and possibly schedule its deletion on the core thread */
 void qdr_delivery_decref(qdr_core_t *core, qdr_delivery_t *delivery, const char *label);
 
+/** Set the presettled flag on the delivery to true if it is not already true.
+ * The presettled flag can only go from false to true and not vice versa.
+ * This function should only be called when the delivery has been discarded and receive_complete flag is true in which case there
+ * will be no thread contention.
+**/
+void qdr_delivery_set_presettled(qdr_delivery_t *delivery);
+
 /* handles delivery disposition and settlement changes from the remote end of
  * the link, and schedules Core thread */
 void qdr_delivery_remote_state_updated(qdr_core_t *core, qdr_delivery_t *delivery, uint64_t disp,
                                        bool settled, qdr_error_t *error, pn_data_t *ext_state, bool ref_given);
 
 /* invoked when incoming message data arrives - schedule core thread */
-qdr_delivery_t *qdr_deliver_continue(qdr_core_t *core, qdr_delivery_t *delivery);
+qdr_delivery_t *qdr_deliver_continue(qdr_core_t *core, qdr_delivery_t *delivery, bool settled);
 
 
 //

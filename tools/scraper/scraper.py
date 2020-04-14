@@ -34,7 +34,6 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 import argparse
-import ast
 import os
 import sys
 import traceback
@@ -138,10 +137,6 @@ def main_except(argv):
         rtrs = parser.parse_log_file(arg_log_file, log_i, comn)
         comn.routers.append(rtrs)
 
-        # marshall facts about the run
-        for rtr in rtrs:
-            rtr.discover_connection_facts(comn)
-
     # Create lists of various things sorted by time
     tree = []  # log line
     ls_tree = []  # link state lines
@@ -154,6 +149,17 @@ def main_except(argv):
     tree = sorted(tree, key=lambda lfl: lfl.datetime)
     ls_tree = sorted(ls_tree, key=lambda lfl: lfl.datetime)
     rr_tree = sorted(rr_tree, key=lambda lfl: lfl.datetime)
+
+    # post_extract the shortened names
+    comn.shorteners.short_link_names.sort_main()
+    comn.shorteners.short_data_names.sort_main()
+    for plf in tree:
+        plf.post_extract_names()
+
+    # marshall connection facts
+    for rtr_list in comn.routers:
+        for rtr in rtr_list:
+            rtr.discover_connection_facts(comn)
 
     # Back-propagate a router name/version/mode to each list's router0.
     # Complain if container name or version changes between instances.
@@ -763,7 +769,7 @@ def main_except(argv):
     print("<hr>")
 
     print("<a name=\"c_msgdump\"></a>")
-    comn.shorteners.short_data_names.htmlDump(True)
+    comn.shorteners.short_data_names.htmlDump(with_link=True, log_strings=True)
     print("<hr>")
 
     # link state info
@@ -827,7 +833,12 @@ def main_except(argv):
                 line = plf.line
                 sti = line.find("{")
                 line = line[sti:]
-                l_dict = ast.literal_eval(line)
+                try:
+                    l_dict = common.ls_eval(line)
+                except:
+                    traceback.print_exc()
+                    sys.stderr.write("Failed to parse router %s, line %d : %s. Analysis continuing...\n" % (plf.router.iname, plf.lineno, plf.line))
+                    l_dict = {}
                 costs_row = new_costs_row(PEER_COST_ABSENT)
                 for i in range(0, comn.n_logs):
                     if len(comn.routers[i]) > 0:
@@ -852,7 +863,7 @@ def main_except(argv):
                 if plf.router.is_interior():
                     cur_costs[plf.router.container_name] = costs_row
             except:
-                pass
+                raise
             print("</tr>")
             # if the costs are stable across all routers then put an indicator in table
             costs_stable = True

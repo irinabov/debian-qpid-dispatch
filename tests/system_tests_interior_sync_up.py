@@ -44,7 +44,7 @@ class AddrTimer(object):
         self.parent = parent
 
     def on_timer_task(self, event):
-            self.parent.check_address()
+        self.parent.check_address()
 
 
 class RouterTest(TestCase):
@@ -129,7 +129,7 @@ class InteriorSyncUpTest(MessagingHandler):
         self.timer             = None
         self.poll_timer        = None
         self.delay_timer       = None
-        self.count             = 200
+        self.count             = 2000
         self.delay_count       = 12   # This should be larger than MAX_KEPT_DELTAS in mobile.py
         self.inter_router_port = inter_router_port
 

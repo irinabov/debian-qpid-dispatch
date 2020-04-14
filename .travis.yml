@@ -33,28 +33,30 @@ matrix:
     addons:
       apt:
         packages: []
-    cache:
-      directories:
-        - $HOME/.m2/repository
-      before_cache:
-        - rm -rf $HOME/.m2/repository/org/apache/qpid/*
     install: []
     before_script: []
     script:
     - mvn apache-rat:check
+    before_cache:
+    - rm -rf $HOME/.m2/repository/org/apache/qpid/*
+    cache:
+      directories:
+      - $HOME/.m2/repository
+    after_script:
+    - cat target/rat.txt || true
   # prepending /usr/bin to PATH to avoid mismatched python interpreters in /opt
   - os: linux
     env:
     - PATH="/usr/bin:$PATH" PROTON_VERSION=master BUILD_TYPE=Debug
   - os: linux
     env:
-    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.29.0 BUILD_TYPE=Coverage
+    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.30.0 BUILD_TYPE=Coverage
   - os: linux
     env:
-    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.29.0 BUILD_TYPE=RelWithDebInfo
+    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.30.0 BUILD_TYPE=RelWithDebInfo
     - DISPATCH_CMAKE_ARGS='-DRUNTIME_CHECK=asan'
   - os: osx
-    osx_image: xcode10.1
+    osx_image: xcode11
     env:
     - PATH="/opt/local/bin:/opt/local/sbin:/usr/local/bin:$PATH" PROTON_VERSION=master
     before_install:
@@ -66,7 +68,6 @@ matrix:
     - sudo port select --set python3 python37
     - python -m venv p3venv
     - source p3venv/bin/activate
-    - pip install unittest2
 
 addons:
   apt:
@@ -85,6 +86,7 @@ addons:
     - dblatex
     # unit test requirement
     - python-unittest2
+    - tox
     # code coverage
     - lcov
 

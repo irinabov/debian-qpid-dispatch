@@ -34,6 +34,7 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 import errno, os, time, socket, random, subprocess, shutil, unittest, __main__, re, sys
+from datetime import datetime
 from subprocess import PIPE, STDOUT
 from copy import copy
 try:
@@ -388,12 +389,14 @@ class Qdrouterd(Process):
             self.defaults()
             return "".join(["%s {\n%s}\n"%(n, props(p, 1)) for n, p in self])
 
-    def __init__(self, name=None, config=Config(), pyinclude=None, wait=True, perform_teardown=True, cl_args=[]):
+    def __init__(self, name=None, config=Config(), pyinclude=None, wait=True,
+                 perform_teardown=True, cl_args=None, expect=Process.RUNNING):
         """
         @param name: name used for for output files, default to id from config.
         @param config: router configuration
         @keyword wait: wait for router to be ready (call self.wait_ready())
         """
+        cl_args = cl_args or []
         self.config = copy(config)
         self.perform_teardown = perform_teardown
         if not name: name = self.config.router_id
@@ -413,7 +416,7 @@ class Qdrouterd(Process):
             args += ['-I', os.path.join(env_home, 'python')]
 
         args = os.environ.get('QPID_DISPATCH_RUNNER', '').split() + args
-        super(Qdrouterd, self).__init__(args, name=name, expect=Process.RUNNING)
+        super(Qdrouterd, self).__init__(args, name=name, expect=expect)
         self._management = None
         self._wait_ready = False
         if wait:
@@ -428,8 +431,10 @@ class Qdrouterd(Process):
 
     def teardown(self):
         if self._management:
-            try: self._management.close()
+            try:
+                self._management.close()
             except: pass
+            self._management = None
 
         if not self.perform_teardown:
             return
@@ -631,7 +636,6 @@ class Tester(object):
         if errors:
             raise RuntimeError("Errors during teardown: \n\n%s" % "\n\n".join([str(e) for e in errors]))
 
-
     def cleanup(self, x):
         """Record object x for clean-up during tear-down.
         x should have on of the methods teardown, tearDown, stop or close"""
@@ -829,6 +833,7 @@ class AsyncTestReceiver(MessagingHandler):
             raise Exception("Timed out waiting for receiver start")
 
     def _main(self):
+        self._container.timeout = 5.0
         self._container.start()
         while self._container.process():
             if self._stop_thread:
@@ -870,6 +875,13 @@ class AsyncTestReceiver(MessagingHandler):
     def on_message(self, event):
         self.queue.put(event.message)
 
+    def on_disconnected(self, event):
+        # if remote terminates the connection kill the thread else it will spin
+        # on the cpu
+        if self._conn:
+            self._conn.close()
+            self._conn = None
+
 
 class AsyncTestSender(MessagingHandler):
     """
@@ -906,6 +918,7 @@ class AsyncTestSender(MessagingHandler):
         self._thread.start()
 
     def _main(self):
+        self._container.timeout = 5.0
         self._container.start()
         while self._container.process():
             self._check_if_done()
@@ -965,27 +978,45 @@ class AsyncTestSender(MessagingHandler):
 
     def on_link_error(self, event):
         self.error = "link error:%s" % str(event.link.remote_condition)
-        self._conn.close()
-        self._conn = None
+        if self._conn:
+            self._conn.close()
+            self._conn = None
+
+    def on_disconnected(self, event):
+        # if remote terminates the connection kill the thread else it will spin
+        # on the cpu
+        self.error = "connection to remote dropped"
+        if self._conn:
+            self._conn.close()
+            self._conn = None
 
 
 class QdManager(object):
     """
     A means to invoke qdmanage during a testcase
     """
-    def __init__(self, tester=None, address=None, timeout=TIMEOUT):
+    def __init__(self, tester=None, address=None, timeout=TIMEOUT,
+                 router_id=None,
+                 edge_router_id=None):
         # 'tester' - can be 'self' when called in a test,
         # or an instance any class derived from Process (like Qdrouterd)
         self._tester = tester or Tester(None)
         self._timeout = timeout
         self._address = address
+        self.router_id = router_id
+        self.edge_router_id = edge_router_id
+        self.router = []
+        if self.router_id:
+            self.router = self.router + ['--router', self.router_id]
+        elif self.edge_router_id:
+            self.router = self.router + ['--edge-router', self.edge_router_id]
 
     def __call__(self, cmd, address=None, input=None, expect=Process.EXIT_OK,
                  timeout=None):
         assert address or self._address, "address missing"
         p = self._tester.popen(
             ['qdmanage'] + cmd.split(' ')
-            + ['--bus', address or self._address,
+            + self.router + ['--bus', address or self._address,
                '--indent=-1',
                '--timeout', str(timeout or self._timeout)],
             stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
@@ -1171,3 +1202,72 @@ def get_link_info(name, address):
         if item.get('name') == name:
             return item
     return None
+
+def has_mobile_dest_in_address_table(address, dest):
+    qdm = QdManager(address=address)
+    rc = qdm.query('org.apache.qpid.dispatch.router.address')
+    has_dest = False
+    for item in rc:
+        if dest in item.get("name"):
+            has_dest = True
+            break
+    return has_dest
+
+
+def get_inter_router_links(address):
+    """
+    Return a list of all links with type="inter-router
+    :param address:
+    """
+    inter_router_links = []
+    qdm = QdManager(address=address)
+    rc = qdm.query('org.apache.qpid.dispatch.router.link')
+    for item in rc:
+        if item.get("linkType") == "inter-router":
+            inter_router_links.append(item)
+
+    return inter_router_links
+
+
+class Timestamp(object):
+    """
+    Time stamps for logging.
+    """
+    def __init__(self):
+        self.ts = datetime.now()
+
+    def __str__(self):
+        return self.ts.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+class Logger(object):
+    """
+    Record an event log for a self test.
+    May print per-event or save events to be printed later.
+    """
+
+    def __init__(self, title="Logger", print_to_console=False, save_for_dump=True):
+        self.title = title
+        self.print_to_console = print_to_console
+        self.save_for_dump = save_for_dump
+        self.logs = []
+
+    def log(self, msg):
+        ts = Timestamp()
+        if self.save_for_dump:
+            self.logs.append( (ts, msg) )
+        if self.print_to_console:
+            print("%s %s" % (ts, msg))
+            sys.stdout.flush()
+
+    def dump(self):
+        print(self)
+        sys.stdout.flush()
+
+    def __str__(self):
+        lines = []
+        lines.append(self.title)
+        for ts, msg in self.logs:
+            lines.append("%s %s" % (ts, msg))
+        res = str('\n'.join(lines))
+        return res
