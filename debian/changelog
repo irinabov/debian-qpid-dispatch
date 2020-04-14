@@ -1,3 +1,9 @@
+qpid-dispatch (1.11.0-1qpid+xenial1) xenial; urgency=medium
+
+  * Rebased to Dispatch 1.11.0
+
+ -- Irina Boverman <iboverma@redhat.com>  Tue, 14 Apr 2020 10:38:56 -0400
+
 qpid-dispatch (1.10.0-1qpid+xenial1) xenial; urgency=medium
 
   * Rebased to Dispatch 1.10.0
