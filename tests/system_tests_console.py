@@ -25,6 +25,7 @@ from __future__ import print_function
 import os
 import errno
 import re
+import time
 import unittest
 from subprocess import PIPE
 import subprocess
@@ -51,7 +52,7 @@ class ConsolePreReq(object):
             devnull = open(os.devnull, "w")
             subprocess.Popen([name], stdout=devnull, stderr=devnull).communicate()
         except OSError as e:
-            if e.errno == os.errno.ENOENT:
+            if errno == errno.ENOENT:
                 return False
         return True
 
@@ -116,7 +117,7 @@ class ConsoleTest(TestCase):
         pret = 0
 
         out = ''
-        prg = ['npm',  'test', '--', '--watchAll=false', '--coverage']
+        prg = ['npm',  'test', '--', '--watchAll=false']
 
         p = self.popen(prg, 
             cwd=os.path.join(os.environ.get('BUILD_DIR'), 'console'),
@@ -134,6 +135,7 @@ class ConsoleTest(TestCase):
 
         sender.stop()
         receiver.stop()
+        time.sleep(1)
 
         assert pret == 0, \
             "console test exit status %d, output:\n%s" % (pret, out)

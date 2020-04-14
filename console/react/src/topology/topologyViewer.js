@@ -158,16 +158,14 @@ class TopologyViewer extends Component {
           if (!this.mounted) return;
 
           // create the svg
-          this.props.service.management.topology
-            .startUpdating(null, this.getEdgeNodes())
-            .then(() => {
-              this.init().then(() => {
-                if (!this.mounted) return;
-                // get notified when a router is added/dropped and when
-                // the number of connections for a router changes
-                this.topology.addChangedAction("topology", this.topologyChanged);
-              });
+          this.topology.startUpdating(null, this.getEdgeNodes()).then(() => {
+            this.init().then(() => {
+              if (!this.mounted) return;
+              // get notified when a router is added/dropped and when
+              // the number of connections for a router changes
+              this.topology.addChangedAction("topology", this.topologyChanged);
             });
+          });
         });
       });
   };
@@ -176,6 +174,21 @@ class TopologyViewer extends Component {
     let message;
     let silent = true;
     if (changed.connections.length > 0) {
+      // see if any routers have stale info
+      const nodeInfo = this.topology.nodeInfo();
+      for (let id in nodeInfo) {
+        const ds = this.forceData.nodes.nodes.filter(n => n.key === id);
+        ds.forEach(d => {
+          d.dropped = nodeInfo[id].connection.stale;
+        });
+        const links = this.forceData.links.links.filter(
+          l => l.source.key === id || l.target.key === id
+        );
+        links.forEach(l => {
+          l.dropped = nodeInfo[id].connection.stale;
+        });
+        this.restart();
+      }
       message = `${
         changed.connections[0].from > changed.connections[0].to ? "Lost" : "New"
       } connection for ${utils.nameFromId(changed.connections[0].router)}`;
@@ -354,121 +367,115 @@ class TopologyViewer extends Component {
   // initialize the nodes and links array from the QDRService.topology._nodeInfo object
   init = () => {
     return new Promise((resolve, reject) => {
-      if (this.mounted) {
-        const { width, height } = getSizes("topology");
-        this.width = width;
-        this.height = height;
-        if (this.width < 768) {
-          const legendOptions = this.state.legendOptions;
-          legendOptions.map.open = false;
-          legendOptions.map.show = false;
-          this.setState({ legendOptions });
-        }
-        let nodeInfo = this.topology.nodeInfo();
-        let nodeCount = Object.keys(nodeInfo).length;
+      const { width, height } = getSizes("topology");
+      this.width = width;
+      this.height = height;
+      if (this.width < 768) {
+        const legendOptions = this.state.legendOptions;
+        legendOptions.map.open = false;
+        legendOptions.map.show = false;
+        this.setState({ legendOptions });
+      }
+      let nodeInfo = this.topology.nodeInfo();
+      let nodeCount = Object.keys(nodeInfo).length;
 
-        this.mouseover_node = null;
-        this.selected_node = null;
-        this.createSvg();
-
-        // read the map data from the data file and build the map layer
-        if (this.backgroundMap) {
-          this.backgroundMap.init(this, this.svg, this.width, this.height).then(() => {
-            this.forceData.nodes.saveLonLat(this.backgroundMap);
-            this.backgroundMap.setMapOpacity(this.state.legendOptions.map.show);
-          });
-        }
-        this.traffic.remove();
-        if (this.state.legendOptions.traffic.dots)
-          this.traffic.addAnimationType(
-            "dots",
-            separateAddresses,
-            Nodes.radius("inter-router")
-          );
-        if (this.state.legendOptions.traffic.congestion)
-          this.traffic.addAnimationType(
-            "congestion",
-            separateAddresses,
-            Nodes.radius("inter-router")
-          );
-
-        // mouse event vars
-        this.mousedown_node = null;
-
-        this.forceData.nodes.initialize(nodeInfo, this.width, this.height, localStorage);
-        this.forceData.links.initialize(
-          nodeInfo,
-          this.forceData.nodes,
-          this.separateContainers,
-          [],
-          this.height,
-          localStorage
+      this.mouseover_node = null;
+      this.selected_node = null;
+      this.createSvg();
+      // read the map data from the data file and build the map layer
+      this.backgroundMap.init(this, this.svg, this.width, this.height).then(() => {
+        this.backgroundMap.setMapOpacity(this.state.legendOptions.map.show);
+        if (this.state.legendOptions.map.show) this.backgroundMap.restartZoom();
+        this.forceData.nodes.saveLonLat(this.backgroundMap);
+        this.forceData.nodes.savePositions();
+      });
+      this.traffic.remove();
+      if (this.state.legendOptions.traffic.dots)
+        this.traffic.addAnimationType(
+          "dots",
+          separateAddresses,
+          Nodes.radius("inter-router")
         );
+      if (this.state.legendOptions.traffic.congestion)
+        this.traffic.addAnimationType(
+          "congestion",
+          separateAddresses,
+          Nodes.radius("inter-router")
+        );
+      // mouse event vars
+      this.mousedown_node = null;
 
-        this.force = d3.layout
-          .force()
-          .nodes(this.forceData.nodes.nodes)
-          .links(this.forceData.links.links)
-          .size([this.width, this.height])
-          .linkDistance(d => {
-            return this.forceData.nodes.linkDistance(d, nodeCount);
-          })
-          .charge(d => {
-            return this.forceData.nodes.charge(d, nodeCount);
-          })
-          .friction(0.1)
-          .gravity(d => {
-            return this.forceData.nodes.gravity(d, nodeCount);
-          })
-          .on("tick", this.tick)
-          .on("end", () => {
-            this.forceData.nodes.savePositions();
-            if (this.backgroundMap) this.forceData.nodes.saveLonLat(this.backgroundMap);
-          });
-        //.start();
-        this.force.stop();
-        this.force.start();
+      this.forceData.nodes.initialize(nodeInfo, this.width, this.height, localStorage);
+      this.forceData.links.initialize(
+        nodeInfo,
+        this.forceData.nodes,
+        this.separateContainers,
+        [],
+        this.height,
+        localStorage
+      );
+      this.force = d3.layout
+        .force()
+        .nodes(this.forceData.nodes.nodes)
+        .links(this.forceData.links.links)
+        .size([this.width, this.height])
+        .linkDistance(d => {
+          return this.forceData.nodes.linkDistance(d, nodeCount);
+        })
+        .charge(d => {
+          return this.forceData.nodes.charge(d, nodeCount);
+        })
+        .friction(0.1)
+        .gravity(d => {
+          return this.forceData.nodes.gravity(d, nodeCount);
+        })
+        .on("tick", this.tick)
+        .on("end", () => {
+          this.forceData.nodes.savePositions();
+          if (this.backgroundMap) this.forceData.nodes.saveLonLat(this.backgroundMap);
+        });
+      //.start();
+      this.force.stop();
+      this.force.start();
+      if (this.backgroundMap) this.forceData.nodes.saveLonLat(this.backgroundMap);
+      this.restart();
+      this.circle.call(this.force.drag);
+      this.legend = new Legend(this.forceData.nodes, this.QDRLog);
+      this.updateLegend();
 
-        if (this.backgroundMap) this.forceData.nodes.saveLonLat(this.backgroundMap);
-        this.restart();
-        this.circle.call(this.force.drag);
-        this.legend = new Legend(this.forceData.nodes, this.QDRLog);
-        this.updateLegend();
-
-        if (this.oldSelectedNode) {
-          d3.selectAll("circle.inter-router").classed("selected", function(d) {
-            if (d.key === this.oldSelectedNode.key) {
-              this.selected_node = d;
-              return true;
-            }
-            return false;
-          });
-        }
-        if (this.oldMouseoverNode && this.selected_node) {
-          d3.selectAll("circle.inter-router").each(function(d) {
-            if (d.key === this.oldMouseoverNode.key) {
-              this.mouseover_node = d;
-              this.topology.ensureAllEntities(
-                [
-                  {
-                    entity: "router.node",
-                    attrs: ["id", "nextHop"]
-                  }
-                ],
-                () => {
-                  nextHopHighlight(
-                    this.selected_node,
-                    d,
-                    this.forceData.nodes,
-                    this.forceData.links,
-                    this.topology.nodeInfo()
-                  );
-                  this.restart();
+      if (this.oldSelectedNode) {
+        d3.selectAll("circle.inter-router").classed("selected", function(d) {
+          if (d.key === this.oldSelectedNode.key) {
+            this.selected_node = d;
+            return true;
+          }
+          return false;
+        });
+      }
+      if (this.oldMouseoverNode && this.selected_node) {
+        d3.selectAll("circle.inter-router").each(function(d) {
+          if (d.key === this.oldMouseoverNode.key) {
+            this.mouseover_node = d;
+            this.topology.ensureAllEntities(
+              [
+                {
+                  entity: "router.node",
+                  attrs: ["id", "nextHop"]
                 }
-              );
-            }
-          });
-        }
+              ],
+              () => {
+                nextHopHighlight(
+                  this.selected_node,
+                  d,
+                  this.forceData.nodes,
+                  this.forceData.links,
+                  this.topology.nodeInfo()
+                );
+                this.restart();
+              }
+            );
+          }
+        });
       }
       resolve();
     });
@@ -581,6 +588,7 @@ class TopologyViewer extends Component {
       .classed("selected", d => d.selected)
       .classed("highlighted", d => d.highlighted)
       .classed("unknown", d => !d.right && !d.left)
+      .classed("dropped", d => d.dropped)
       // reset the markers based on current highlighted/selected
       .attr("marker-end", d => {
         if (!this.showMarker(d)) return null;
@@ -838,38 +846,36 @@ class TopologyViewer extends Component {
 
   reInit = () => {
     return new Promise(resolve => {
-      this.props.service.management.topology
-        .startUpdating(null, this.getEdgeNodes())
-        .then(() => {
-          const nodeInfo = this.topology.nodeInfo();
-          const newNodes = new Nodes(this.QDRLog);
-          const newLinks = new Links(this.QDRLog);
-          newNodes.initialize(nodeInfo, this.width, this.height, localStorage);
-          newLinks.initialize(
-            nodeInfo,
-            newNodes,
-            this.separateContainers,
-            [],
-            this.height,
-            localStorage
-          );
-          reconcileArrays(this.forceData.nodes.nodes, newNodes.nodes);
-          reconcileLinks(
-            this.forceData.links.links,
-            newLinks.links,
-            this.forceData.nodes.nodes
-          );
+      this.topology.startUpdating(null, this.getEdgeNodes()).then(() => {
+        const nodeInfo = this.topology.nodeInfo();
+        const newNodes = new Nodes(this.QDRLog);
+        const newLinks = new Links(this.QDRLog);
+        newNodes.initialize(nodeInfo, this.width, this.height, localStorage);
+        newLinks.initialize(
+          nodeInfo,
+          newNodes,
+          this.separateContainers,
+          [],
+          this.height,
+          localStorage
+        );
+        reconcileArrays(this.forceData.nodes.nodes, newNodes.nodes);
+        reconcileLinks(
+          this.forceData.links.links,
+          newLinks.links,
+          this.forceData.nodes.nodes
+        );
 
-          this.force.nodes(this.forceData.nodes.nodes).links(this.forceData.links.links);
-          this.force.stop();
-          this.force.start();
-          this.restart();
-          this.circle.call(this.force.drag);
-          delete this.legend;
-          this.legend = new Legend(this.forceData.nodes, this.QDRLog);
-          this.updateLegend();
-          resolve();
-        });
+        this.force.nodes(this.forceData.nodes.nodes).links(this.forceData.links.links);
+        this.force.stop();
+        this.force.start();
+        this.restart();
+        this.circle.call(this.force.drag);
+        delete this.legend;
+        this.legend = new Legend(this.forceData.nodes, this.QDRLog);
+        this.updateLegend();
+        resolve();
+      });
     });
   };
 
@@ -1102,14 +1108,14 @@ class TopologyViewer extends Component {
         {this.state.showRouterInfo && (
           <RouterInfoComponent
             d={this.d}
-            topology={this.props.service.management.topology}
+            topology={this.topology}
             handleCloseRouterInfo={this.handleCloseRouterInfo}
           />
         )}
         {this.state.showClientInfo && (
           <ClientInfoComponent
             d={this.d}
-            topology={this.props.service.management.topology}
+            topology={this.topology}
             handleCloseClientInfo={this.handleCloseClientInfo}
             handleSeparate={this.handleSeparate}
           />

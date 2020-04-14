@@ -39,6 +39,7 @@ typedef struct qdr_conn_identifier_t qdr_conn_identifier_t;
 typedef struct qdr_connection_ref_t  qdr_connection_ref_t;
 typedef struct qdr_exchange          qdr_exchange_t;
 typedef struct qdr_edge_t            qdr_edge_t;
+typedef struct qdr_agent_t           qdr_agent_t;
 
 ALLOC_DECLARE(qdr_address_t);
 ALLOC_DECLARE(qdr_address_config_t);
@@ -128,18 +129,13 @@ struct qdr_action_t {
             qdr_field_t         *connection_label;
             qdr_field_t         *container_id;
             qdr_link_t_sp        link;
-            qdr_delivery_t      *delivery;
-            qd_message_t        *msg;
             qd_direction_t       dir;
             qdr_terminus_t      *source;
             qdr_terminus_t      *target;
             qdr_error_t         *error;
             qd_detach_type_t     dt;
             int                  credit;
-            bool                 more;  // true if there are more frames arriving, false otherwise
             bool                 drain;
-            uint8_t              tag[32];
-            int                  tag_length;
         } connection;
 
         //
@@ -147,9 +143,13 @@ struct qdr_action_t {
         //
         struct {
             qdr_delivery_t *delivery;
-            uint64_t        disposition;
-            bool            settled;
             qdr_error_t    *error;
+            uint64_t        disposition;
+            uint8_t         tag[32];
+            int             tag_length;
+            bool            settled;
+            bool            presettled;  // true if remote settles while msg is in flight
+            bool            more;  // true if there are more frames arriving, false otherwise
         } delivery;
 
         //
@@ -231,17 +231,16 @@ typedef void (*qdr_general_work_handler_t) (qdr_core_t *core, qdr_general_work_t
 struct qdr_general_work_t {
     DEQ_LINKS(qdr_general_work_t);
     qdr_general_work_handler_t   handler;
-    qdr_field_t                 *field;
     int                          maskbit;
     int                          inter_router_cost;
     qd_message_t                *msg;
     qdr_receive_t                on_message;
     void                        *on_message_context;
     uint64_t                     in_conn_id;
-    int                          treatment;
+    uint64_t                     mobile_seq;
     qdr_delivery_cleanup_list_t  delivery_cleanup_list;
-    qdr_global_stats_handler_t  stats_handler;
-    void                       *context;
+    qdr_global_stats_handler_t   stats_handler;
+    void                        *context;
 };
 
 ALLOC_DECLARE(qdr_general_work_t);
@@ -260,7 +259,10 @@ qdr_general_work_t *qdr_general_work(qdr_general_work_handler_t handler);
 //
 typedef enum {
     QDR_CONNECTION_WORK_FIRST_ATTACH,
-    QDR_CONNECTION_WORK_SECOND_ATTACH
+    QDR_CONNECTION_WORK_SECOND_ATTACH,
+    QDR_CONNECTION_WORK_TRACING_ON,
+    QDR_CONNECTION_WORK_TRACING_OFF
+
 } qdr_connection_work_type_t;
 
 typedef struct qdr_connection_work_t {
@@ -269,6 +271,7 @@ typedef struct qdr_connection_work_t {
     qdr_link_t                 *link;
     qdr_terminus_t             *source;
     qdr_terminus_t             *target;
+    qd_session_class_t          ssn_class;
 } qdr_connection_work_t;
 
 ALLOC_DECLARE(qdr_connection_work_t);
@@ -349,6 +352,9 @@ struct qdr_node_t {
     uint32_t          ref_count;
     qd_bitmask_t     *valid_origins;
     int               cost;
+    uint64_t          mobile_seq;
+    char             *wire_address_ma;    ///< The address of this router's mobile-sync agent in non-hashed form
+    uint32_t          sync_mask;          ///< Bitmask for mobile-address-sync
 };
 
 DEQ_DECLARE(qdr_node_t, qdr_node_list_t);
@@ -380,9 +386,21 @@ struct qdr_subscription_t {
     qdr_address_t *addr;
     qdr_receive_t  on_message;
     void          *on_message_context;
+    bool           in_core;
 };
 
 DEQ_DECLARE(qdr_subscription_t, qdr_subscription_list_t);
+
+typedef struct qdr_subscription_ref_t {
+    DEQ_LINKS(struct qdr_subscription_ref_t);
+    qdr_subscription_t *sub;
+} qdr_subscription_ref_t;
+
+ALLOC_DECLARE(qdr_subscription_ref_t);
+DEQ_DECLARE(qdr_subscription_ref_t, qdr_subscription_ref_list_t);
+
+void qdr_add_subscription_ref_CT(qdr_subscription_ref_list_t *list, qdr_subscription_t *sub);
+void qdr_del_subscription_ref_CT(qdr_subscription_ref_list_t *list, qdr_subscription_ref_t *ref);
 
 DEQ_DECLARE(qdr_delivery_t, qdr_delivery_list_t);
 
@@ -508,12 +526,18 @@ struct qdr_address_t {
     qdr_link_t                *edge_outlink;  ///< [ref] Out-link to connected Interior router (on edge router)
     qd_address_treatment_t     treatment;
     qdr_forwarder_t           *forwarder;
-    int                        ref_count;     ///< Number of link-routes + auto-links referencing this address
-    bool                       block_deletion;
+    int                        ref_count;     ///< Number of entities referencing this address
     bool                       local;
     bool                       router_control_only; ///< If set, address is only for deliveries arriving on a control link
     uint32_t                   tracked_deliveries;
     uint64_t                   cost_epoch;
+
+    //
+    // State for mobile-address synchronization
+    //
+    DEQ_LINKS_N(SYNC_ADD, qdr_address_t);
+    DEQ_LINKS_N(SYNC_DEL, qdr_address_t);
+    uint32_t sync_mask;
 
     //
     // State for tracking fallback destinations for undeliverable deliveries
@@ -661,6 +685,7 @@ struct qdr_connection_t {
     bool                        closed; // This bit is used in the case where a client is trying to force close this connection.
     uint32_t                    conn_uptime; // Timestamp which can be used to calculate the number of seconds this connection has been up and running.
     uint32_t                    last_delivery_time; // Timestamp which can be used to calculate the number of seconds since the last delivery arrived on this connection.
+    bool                        enable_protocol_trace; // Has trace level logging been turned on for this connection.
 };
 
 DEQ_DECLARE(qdr_connection_t, qdr_connection_list_t);
@@ -780,23 +805,15 @@ struct qdr_core_t {
     qdrc_attach_addr_lookup_t  addr_lookup_handler;
     void                      *addr_lookup_context;
 
-    //
-    // Agent section
-    //
-    qdr_query_list_t       outgoing_query_list;
-    sys_mutex_t           *query_lock;
-    qd_timer_t            *agent_timer;
-    qdr_manage_response_t  agent_response_handler;
-    qdr_subscription_t    *agent_subscription_mobile;
-    qdr_subscription_t    *agent_subscription_local;
+    qdr_agent_t               *mgmt_agent;
 
     //
     // Route table section
     //
-    void                 *rt_context;
-    qdr_mobile_added_t    rt_mobile_added;
-    qdr_mobile_removed_t  rt_mobile_removed;
-    qdr_link_lost_t       rt_link_lost;
+    void                    *rt_context;
+    qdr_set_mobile_seq_t     rt_set_mobile_seq;
+    qdr_set_my_mobile_seq_t  rt_set_my_mobile_seq;
+    qdr_link_lost_t          rt_link_lost;
 
     //
     // Connection section
@@ -814,6 +831,7 @@ struct qdr_core_t {
     qdr_link_get_credit_t     get_credit_handler;
     qdr_delivery_update_t     delivery_update_handler;
     qdr_connection_close_t    conn_close_handler;
+    qdr_connection_trace_t    conn_trace_handler;
 
     //
     // Events section
@@ -821,6 +839,7 @@ struct qdr_core_t {
     qdrc_event_subscription_list_t conn_event_subscriptions;
     qdrc_event_subscription_list_t link_event_subscriptions;
     qdrc_event_subscription_list_t addr_event_subscriptions;
+    qdrc_event_subscription_list_t router_event_subscriptions;
 
     qd_router_mode_t  router_mode;
     const char       *router_area;
@@ -899,7 +918,9 @@ void *router_core_thread(void *arg);
 uint64_t qdr_identifier(qdr_core_t* core);
 void qdr_management_agent_on_message(void *context, qd_message_t *msg, int link_id, int cost, uint64_t in_conn_id);
 void  qdr_route_table_setup_CT(qdr_core_t *core);
-void  qdr_agent_setup_CT(qdr_core_t *core);
+qdr_agent_t *qdr_agent(qdr_core_t *core);
+void qdr_agent_setup_subscriptions(qdr_agent_t *agent, qdr_core_t *core);
+void qdr_agent_free(qdr_agent_t *agent);
 void  qdr_forwarder_setup_CT(qdr_core_t *core);
 qdr_action_t *qdr_action(qdr_action_handler_t action_handler, const char *label);
 void qdr_action_enqueue(qdr_core_t *core, qdr_action_t *action);
@@ -918,8 +939,8 @@ void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_li
 void qdr_in_process_send_to_CT(qdr_core_t *core, qd_iterator_t *address, qd_message_t *msg, bool exclude_inprocess, bool control);
 void qdr_agent_enqueue_response_CT(qdr_core_t *core, qdr_query_t *query);
 
-void qdr_post_mobile_added_CT(qdr_core_t *core, const char *address_hash, qd_address_treatment_t treatment);
-void qdr_post_mobile_removed_CT(qdr_core_t *core, const char *address_hash);
+void qdr_post_set_mobile_seq_CT(qdr_core_t *core, int router_maskbit, uint64_t mobile_seq);
+void qdr_post_set_my_mobile_seq_CT(qdr_core_t *core, uint64_t mobile_seq);
 void qdr_post_link_lost_CT(qdr_core_t *core, int link_maskbit);
 
 void qdr_post_general_work_CT(qdr_core_t *core, qdr_general_work_t *work);
@@ -944,12 +965,13 @@ void qdr_link_enqueue_work_CT(qdr_core_t      *core,
                               qdr_link_t      *conn,
                               qdr_link_work_t *work);
 
-qdr_link_t *qdr_create_link_CT(qdr_core_t       *core,
-                               qdr_connection_t *conn,
-                               qd_link_type_t    link_type,
-                               qd_direction_t    dir,
-                               qdr_terminus_t   *source,
-                               qdr_terminus_t   *target);
+qdr_link_t *qdr_create_link_CT(qdr_core_t        *core,
+                               qdr_connection_t  *conn,
+                               qd_link_type_t     link_type,
+                               qd_direction_t     dir,
+                               qdr_terminus_t    *source,
+                               qdr_terminus_t    *target,
+                               qd_session_class_t ssn_class);
 
 void qdr_link_outbound_detach_CT(qdr_core_t *core, qdr_link_t *link, qdr_error_t *error, qdr_condition_t condition, bool close);
 void qdr_link_outbound_second_attach_CT(qdr_core_t *core, qdr_link_t *link, qdr_terminus_t *source, qdr_terminus_t *target);

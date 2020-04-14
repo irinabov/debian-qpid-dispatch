@@ -178,7 +178,9 @@ static int handle_events(connection_t* c) {
     }
     pn_event_t *e;
     while ((e = pn_connection_driver_next_event(&c->driver))) {
-        qd_connection_handle(c->qd_conn, e);
+        if (!qd_connection_handle(c->qd_conn, e)) {
+            c->qd_conn = 0;  // connection closed
+        }
     }
     if (pn_connection_driver_write_buffer(&c->driver).size) {
         lws_callback_on_writable(c->wsi);
@@ -354,7 +356,11 @@ static void listener_start(qd_http_listener_t *hl, qd_http_server_t *hs) {
 
         info.options |=
             LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT |
+#if LWS_LIBRARY_VERSION_MAJOR > 3 || (LWS_LIBRARY_VERSION_MAJOR == 3 && LWS_LIBRARY_VERSION_MINOR >= 2)
+            (config->ssl_required ? 0 : LWS_SERVER_OPTION_ALLOW_NON_SSL_ON_SSL_PORT | LWS_SERVER_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER) |
+#else
             (config->ssl_required ? 0 : LWS_SERVER_OPTION_ALLOW_NON_SSL_ON_SSL_PORT) |
+#endif
             ((config->requireAuthentication && info.ssl_ca_filepath) ? LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT : 0);
     }
     info.vhost_name = hl->listener->config.host_port;
@@ -476,28 +482,28 @@ static int stats_get_links_blocked(qdr_global_stats_t *stats) { return stats->li
 static int stats_get_deliveries_redirected_to_fallback(qdr_global_stats_t *stats) { return stats->deliveries_redirected_to_fallback; }
 
 static struct metric_definition metrics[] = {
-    {"connections", "gauge", stats_get_connections},
-    {"links", "gauge", stats_get_links},
-    {"addresses", "gauge", stats_get_addrs},
-    {"routers", "gauge", stats_get_routers},
-    {"link_routes", "gauge", stats_get_link_routes},
-    {"auto_links", "gauge", stats_get_auto_links},
-    {"presettled_deliveries", "counter", stats_get_presettled_deliveries},
-    {"dropped_presettled_deliveries", "counter", stats_get_dropped_presettled_deliveries},
-    {"accepted_deliveries", "counter", stats_get_accepted_deliveries},
-    {"released_deliveries", "counter", stats_get_released_deliveries},
-    {"rejected_deliveries", "counter", stats_get_rejected_deliveries},
-    {"modified_deliveries", "counter", stats_get_modified_deliveries},
-    {"deliveries_ingress", "counter", stats_get_deliveries_ingress},
-    {"deliveries_egress", "counter", stats_get_deliveries_egress},
-    {"deliveries_transit", "counter", stats_get_deliveries_transit},
-    {"deliveries_ingress_route_container", "counter", stats_get_deliveries_ingress_route_container},
-    {"deliveries_egress_route_container", "counter", stats_get_deliveries_egress_route_container},
-    {"deliveries_delayed_1sec", "counter", stats_get_deliveries_delayed_1sec},
-    {"deliveries_delayed_10sec", "counter", stats_get_deliveries_delayed_10sec},
-    {"deliveries_stuck", "gauge", stats_get_deliveries_stuck},
-    {"links_blocked", "gauge", stats_get_links_blocked},
-    {"deliveries_redirected_to_fallback", "counter", stats_get_deliveries_redirected_to_fallback}
+    {"qdr_connections_total", "gauge", stats_get_connections},
+    {"qdr_links_total", "gauge", stats_get_links},
+    {"qdr_addresses_total", "gauge", stats_get_addrs},
+    {"qdr_routers_total", "gauge", stats_get_routers},
+    {"qdr_link_routes_total", "gauge", stats_get_link_routes},
+    {"qdr_auto_links_total", "gauge", stats_get_auto_links},
+    {"qdr_presettled_deliveries_total", "counter", stats_get_presettled_deliveries},
+    {"qdr_dropped_presettled_deliveries_total", "counter", stats_get_dropped_presettled_deliveries},
+    {"qdr_accepted_deliveries_total", "counter", stats_get_accepted_deliveries},
+    {"qdr_released_deliveries_total", "counter", stats_get_released_deliveries},
+    {"qdr_rejected_deliveries_total", "counter", stats_get_rejected_deliveries},
+    {"qdr_modified_deliveries_total", "counter", stats_get_modified_deliveries},
+    {"qdr_deliveries_ingress_total", "counter", stats_get_deliveries_ingress},
+    {"qdr_deliveries_egress_total", "counter", stats_get_deliveries_egress},
+    {"qdr_deliveries_transit_total", "counter", stats_get_deliveries_transit},
+    {"qdr_deliveries_ingress_route_container_total", "counter", stats_get_deliveries_ingress_route_container},
+    {"qdr_deliveries_egress_route_container_total", "counter", stats_get_deliveries_egress_route_container},
+    {"qdr_deliveries_delayed_1sec_total", "counter", stats_get_deliveries_delayed_1sec},
+    {"qdr_deliveries_delayed_10sec_total", "counter", stats_get_deliveries_delayed_10sec},
+    {"qdr_deliveries_stuck_total", "gauge", stats_get_deliveries_stuck},
+    {"qdr_links_blocked_total", "gauge", stats_get_links_blocked},
+    {"qdr_deliveries_redirected_to_fallback_total", "counter", stats_get_deliveries_redirected_to_fallback}
 };
 static size_t metrics_length = sizeof(metrics)/sizeof(metrics[0]);
 

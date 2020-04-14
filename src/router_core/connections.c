@@ -19,6 +19,7 @@
 
 #include <qpid/dispatch/router_core.h>
 #include <qpid/dispatch/discriminator.h>
+#include <qpid/dispatch/static_assert.h>
 #include "route_control.h"
 #include <qpid/dispatch/amqp.h>
 #include <stdio.h>
@@ -295,12 +296,21 @@ int qdr_connection_process(qdr_connection_t *conn)
 
         switch (work->work_type) {
         case QDR_CONNECTION_WORK_FIRST_ATTACH :
-            core->first_attach_handler(core->user_context, conn, work->link, work->source, work->target);
+            core->first_attach_handler(core->user_context, conn, work->link, work->source, work->target, work->ssn_class);
             break;
 
         case QDR_CONNECTION_WORK_SECOND_ATTACH :
             core->second_attach_handler(core->user_context, work->link, work->source, work->target);
             break;
+
+        case QDR_CONNECTION_WORK_TRACING_ON :
+            core->conn_trace_handler(core->user_context, conn, true);
+            break;
+
+        case QDR_CONNECTION_WORK_TRACING_OFF :
+            core->conn_trace_handler(core->user_context, conn, false);
+            break;
+
         }
 
         qdr_connection_work_free_CT(work);
@@ -573,6 +583,8 @@ void qdr_link_second_attach(qdr_link_t *link, qdr_terminus_t *source, qdr_termin
 
     set_safe_ptr_qdr_connection_t(link->conn, &action->args.connection.conn);
     set_safe_ptr_qdr_link_t(link, &action->args.connection.link);
+
+    // ownership of source/target passed to core, core must free them when done
     action->args.connection.source = source;
     action->args.connection.target = target;
     qdr_action_enqueue(link->core, action);
@@ -626,7 +638,8 @@ void qdr_connection_handlers(qdr_core_t                *core,
                              qdr_link_deliver_t         deliver,
                              qdr_link_get_credit_t      get_credit,
                              qdr_delivery_update_t      delivery_update,
-                             qdr_connection_close_t     conn_close)
+                             qdr_connection_close_t     conn_close,
+                             qdr_connection_trace_t     conn_trace)
 {
     core->user_context            = context;
     core->first_attach_handler    = first_attach;
@@ -641,6 +654,7 @@ void qdr_connection_handlers(qdr_core_t                *core,
     core->get_credit_handler      = get_credit;
     core->delivery_update_handler = delivery_update;
     core->conn_close_handler      = conn_close;
+    core->conn_trace_handler      = conn_trace;
 }
 
 
@@ -1033,12 +1047,13 @@ static void qdr_link_cleanup_protected_CT(qdr_core_t *core, qdr_connection_t *co
 }
 
 
-qdr_link_t *qdr_create_link_CT(qdr_core_t       *core,
-                               qdr_connection_t *conn,
-                               qd_link_type_t    link_type,
-                               qd_direction_t    dir,
-                               qdr_terminus_t   *source,
-                               qdr_terminus_t   *target)
+qdr_link_t *qdr_create_link_CT(qdr_core_t        *core,
+                               qdr_connection_t  *conn,
+                               qd_link_type_t     link_type,
+                               qd_direction_t     dir,
+                               qdr_terminus_t    *source,
+                               qdr_terminus_t    *target,
+                               qd_session_class_t ssn_class)
 {
     //
     // Create a new link, initiated by the router core.  This will involve issuing a first-attach outbound.
@@ -1080,6 +1095,7 @@ qdr_link_t *qdr_create_link_CT(qdr_core_t       *core,
     work->link      = link;
     work->source    = source;
     work->target    = target;
+    work->ssn_class = ssn_class;
 
     char   source_str[1000];
     char   target_str[1000];
@@ -1249,7 +1265,6 @@ void qdr_check_addr_CT(qdr_core_t *core, qdr_address_t *addr)
         && DEQ_SIZE(addr->inlinks) == 0
         && qd_bitmask_cardinality(addr->rnodes) == 0
         && addr->ref_count == 0
-        && !addr->block_deletion
         && addr->tracked_deliveries == 0
         && addr->core_endpoint == 0
         && addr->fallback_for == 0) {
@@ -1302,12 +1317,15 @@ static void qdr_connection_opened_CT(qdr_core_t *core, qdr_action_t *action, boo
                     // inter-router links:  Two (in and out) for control, 2 * QDR_N_PRIORITIES for
                     // routed-message transfer.
                     //
-                    (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_INCOMING, qdr_terminus_router_control(), qdr_terminus_router_control());
-                    (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_OUTGOING, qdr_terminus_router_control(), qdr_terminus_router_control());
+                    (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_INCOMING, qdr_terminus_router_control(), qdr_terminus_router_control(), QD_SSN_ROUTER_CONTROL);
+                    (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_OUTGOING, qdr_terminus_router_control(), qdr_terminus_router_control(), QD_SSN_ROUTER_CONTROL);
+                    STATIC_ASSERT((QD_SSN_ROUTER_DATA_PRI_9 - QD_SSN_ROUTER_DATA_PRI_0 + 1) == QDR_N_PRIORITIES, PRIORITY_SESSION_NOT_SAME);
 
                     for (int priority = 0; priority < QDR_N_PRIORITIES; ++ priority) {
-                        (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_INCOMING, qdr_terminus_router_data(), qdr_terminus_router_data());
-                        (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_OUTGOING, qdr_terminus_router_data(), qdr_terminus_router_data());
+                        // a session is reserved for each priority link
+                        qd_session_class_t sc = (qd_session_class_t)(QD_SSN_ROUTER_DATA_PRI_0 + priority);
+                        (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_INCOMING, qdr_terminus_router_data(), qdr_terminus_router_data(), sc);
+                        (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_OUTGOING, qdr_terminus_router_data(), qdr_terminus_router_data(), sc);
                     }
                 }
             }
@@ -1648,11 +1666,14 @@ static void qdr_link_inbound_second_attach_CT(qdr_core_t *core, qdr_action_t *ac
 {
     qdr_link_t       *link = safe_deref_qdr_link_t(action->args.connection.link);
     qdr_connection_t *conn = safe_deref_qdr_connection_t(action->args.connection.conn);
-    if (discard || !link || !conn)
-        return;
-
     qdr_terminus_t   *source = action->args.connection.source;
     qdr_terminus_t   *target = action->args.connection.target;
+
+    if (discard || !link || !conn) {
+        qdr_terminus_free(source);
+        qdr_terminus_free(target);
+        return;
+    }
 
     link->oper_status = QDR_LINK_OPER_UP;
     link->attach_count++;
@@ -1757,14 +1778,17 @@ static void qdr_link_inbound_second_attach_CT(qdr_core_t *core, qdr_action_t *ac
 
 static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
 {
-    qdr_connection_t *conn = safe_deref_qdr_connection_t(action->args.connection.conn);
-    qdr_link_t       *link = safe_deref_qdr_link_t(action->args.connection.link);
-    if (discard || !conn || !link)
-        return;
-
+    qdr_connection_t *conn  = safe_deref_qdr_connection_t(action->args.connection.conn);
+    qdr_link_t       *link  = safe_deref_qdr_link_t(action->args.connection.link);
     qdr_error_t      *error = action->args.connection.error;
     qd_detach_type_t  dt    = action->args.connection.dt;
-    qdr_address_t    *addr  = link->owning_addr;
+
+    if (discard || !conn || !link) {
+        qdr_error_free(error);
+        return;
+    }
+
+    qdr_address_t *addr = link->owning_addr;
 
     if (link->detach_received)
         return;
@@ -1836,7 +1860,9 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
                     //
                     // Unbind the address and the link.
                     //
+                    addr->ref_count++;
                     qdr_core_unbind_address_link_CT(core, addr, link);
+                    addr->ref_count--;
 
                     //
                     // If this is an edge data link, raise a link event to indicate its detachment.
@@ -1862,8 +1888,11 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
             switch (link->link_type) {
             case QD_LINK_ENDPOINT:
             case QD_LINK_EDGE_DOWNLINK:
-                if (addr)
+                if (addr) {
+                    addr->ref_count++;
                     qdr_core_unbind_address_link_CT(core, addr, link);
+                    addr->ref_count--;
+                }
                 break;
 
             case QD_LINK_CONTROL:

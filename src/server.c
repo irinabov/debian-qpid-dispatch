@@ -28,6 +28,7 @@
 #include <qpid/dispatch/server.h>
 #include <qpid/dispatch/failoverlist.h>
 #include <qpid/dispatch/alloc.h>
+#include <qpid/dispatch/platform.h>
 
 #include <proton/event.h>
 #include <proton/listener.h>
@@ -58,6 +59,7 @@ struct qd_server_t {
     pn_proactor_t            *proactor;
     qd_container_t           *container;
     qd_log_source_t          *log_source;
+    qd_log_source_t          *protocol_log_source; // Log source for the PROTOCOL module
     void                     *start_context;
     sys_cond_t               *cond;
     sys_mutex_t              *lock;
@@ -101,13 +103,23 @@ static qd_failover_item_t *qd_connector_get_conn_info(qd_connector_t *ct);
 /**
  * This function is set as the pn_transport->tracer and is invoked when proton tries to write the log message to pn_transport->tracer
  */
-static void transport_tracer(pn_transport_t *transport, const char *message)
+void transport_tracer(pn_transport_t *transport, const char *message)
 {
     qd_connection_t *ctx = (qd_connection_t*) pn_transport_get_context(transport);
-    if (ctx)
-        qd_log(ctx->server->log_source, QD_LOG_TRACE, "[%"PRIu64"]:%s", ctx->connection_id, message);
+    if (ctx) {
+        // The PROTOCOL module is used exclusively for logging protocol related tracing. The protocol could be AMQP, HTTP, TCP etc.
+        qd_log(ctx->server->protocol_log_source, QD_LOG_TRACE, "[%"PRIu64"]:%s", ctx->connection_id, message);
+    }
 }
 
+void connection_transport_tracer(pn_transport_t *transport, const char *message)
+{
+    qd_connection_t *ctx = (qd_connection_t*) pn_transport_get_context(transport);
+    if (ctx) {
+        // Unconditionally write the log at TRACE level to the log file.
+        qd_log_impl_v1(ctx->server->protocol_log_source, QD_LOG_TRACE,  __FILE__, __LINE__, "[%"PRIu64"]:%s", ctx->connection_id, message);
+    }
+}
 
 /**
  * Save displayNameService object instance and ImportModule address
@@ -609,9 +621,12 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
 
     //
     // Proton pushes out its trace to transport_tracer() which in turn writes a trace
-    // message to the qdrouter log If trace level logging is enabled on the router set
+    // message to the qdrouter log
+    // If trace level logging is enabled on the PROTOCOL module, set PN_TRACE_FRM as the transport trace
+    // and also set the transport tracer callback.
+    // Note here that if trace level logging is enabled on the DEFAULT module, all modules are logging at trace level too.
     //
-    if (qd_log_enabled(ctx->server->log_source, QD_LOG_TRACE)) {
+    if (qd_log_enabled(ctx->server->protocol_log_source, QD_LOG_TRACE)) {
         pn_transport_trace(tport, PN_TRACE_FRM);
         pn_transport_set_tracer(tport, transport_tracer);
     }
@@ -769,23 +784,27 @@ static void handle_listener(pn_event_t *e, qd_server_t *qd_server) {
         on_accept(e);
         break;
 
-    case PN_LISTENER_CLOSE: {
-        pn_condition_t *cond = pn_listener_condition(li->pn_listener);
-        if (pn_condition_is_set(cond)) {
-            qd_log(log, QD_LOG_ERROR, "Listener error on %s: %s (%s)", host_port,
-                   pn_condition_get_description(cond),
-                   pn_condition_get_name(cond));
-            if (li->exit_on_error) {
-                qd_log(log, QD_LOG_CRITICAL, "Shutting down, required listener failed %s",
-                       host_port);
-                exit(1);
+    case PN_LISTENER_CLOSE:
+        if (li->pn_listener) {
+            pn_condition_t *cond = pn_listener_condition(li->pn_listener);
+            if (pn_condition_is_set(cond)) {
+                qd_log(log, QD_LOG_ERROR, "Listener error on %s: %s (%s)", host_port,
+                       pn_condition_get_description(cond),
+                       pn_condition_get_name(cond));
+                if (li->exit_on_error) {
+                    qd_log(log, QD_LOG_CRITICAL, "Shutting down, required listener failed %s",
+                           host_port);
+                    exit(1);
+                }
+            } else {
+                qd_log(log, QD_LOG_TRACE, "Listener closed on %s", host_port);
             }
-        } else {
-            qd_log(log, QD_LOG_TRACE, "Listener closed on %s", host_port);
+            pn_listener_set_context(li->pn_listener, 0);
+            li->pn_listener = 0;
+            qd_listener_decref(li);
         }
-        qd_listener_decref(li);
         break;
-    }
+
     default:
         break;
     }
@@ -1222,6 +1241,7 @@ qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *containe
 
     qd_server->qd               = qd;
     qd_server->log_source       = qd_log_source("SERVER");
+    qd_server->protocol_log_source = qd_log_source("PROTOCOL");
     qd_server->container_name   = container_name;
     qd_server->sasl_config_path = sasl_config_path;
     qd_server->sasl_config_name = sasl_config_name;
@@ -1253,10 +1273,19 @@ qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *containe
 void qd_server_free(qd_server_t *qd_server)
 {
     if (!qd_server) return;
-    pn_proactor_free(qd_server->proactor);
     qd_connection_t *ctx = DEQ_HEAD(qd_server->conn_list);
     while (ctx) {
+        qd_log(qd_server->log_source, QD_LOG_INFO,
+               "[C%"PRIu64"] Closing connection on shutdown",
+               ctx->connection_id);
         DEQ_REMOVE_HEAD(qd_server->conn_list);
+        if (ctx->pn_conn) {
+            pn_transport_t *tport = pn_connection_transport(ctx->pn_conn);
+            if (tport)
+                pn_transport_set_context(tport, 0); /* for transport_tracer */
+            qd_session_cleanup(ctx);
+            pn_connection_set_context(ctx->pn_conn, 0);
+        }
         if (ctx->free_user_id) free((char*)ctx->user_id);
         sys_mutex_free(ctx->deferred_call_lock);
         free(ctx->name);
@@ -1264,6 +1293,7 @@ void qd_server_free(qd_server_t *qd_server)
         free_qd_connection_t(ctx);
         ctx = DEQ_HEAD(qd_server->conn_list);
     }
+    pn_proactor_free(qd_server->proactor);
     qd_timer_finalize();
     sys_mutex_free(qd_server->lock);
     sys_mutex_free(qd_server->conn_activation_lock);
@@ -1299,6 +1329,27 @@ void qd_server_trace_all_connections()
     }
 }
 
+
+static double normalize_memory_size(const uint64_t bytes, const char **suffix)
+{
+    static const char * const units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+    const int units_ct = 5;
+    const double base = 1024.0;
+
+    double value = (double)bytes;
+    for (int i = 0; i < units_ct; ++i) {
+        if (value < base) {
+            if (suffix)
+                *suffix = units[i];
+            return value;
+        }
+        value /= base;
+    }
+    if (suffix)
+        *suffix = units[units_ct - 1];
+    return value;
+}
+
 void qd_server_run(qd_dispatch_t *qd)
 {
     qd_server_t *qd_server = qd->server;
@@ -1308,6 +1359,19 @@ void qd_server_run(qd_dispatch_t *qd)
     qd_log(qd_server->log_source,
            QD_LOG_NOTICE, "Operational, %d Threads Running (process ID %ld)",
            qd_server->thread_count, (long)getpid());
+
+    const uintmax_t ram_size = qd_platform_memory_size();
+    const uint64_t  vm_size = qd_router_memory_usage();
+    if (ram_size && vm_size) {
+        const char *suffix_vm = 0;
+        const char *suffix_ram = 0;
+        double vm = normalize_memory_size(vm_size, &suffix_vm);
+        double ram = normalize_memory_size(ram_size, &suffix_ram);
+        qd_log(qd_server->log_source, QD_LOG_NOTICE,
+               "Process VmSize %.2f %s (%.2f %s available memory)",
+               vm, suffix_vm, ram, suffix_ram);
+    }
+
 #ifndef NDEBUG
     qd_log(qd_server->log_source, QD_LOG_INFO, "Running in DEBUG Mode");
 #endif
@@ -1578,10 +1642,16 @@ const char* qd_connection_remote_ip(const qd_connection_t *c) {
 }
 
 /* Expose event handling for HTTP connections */
-void qd_connection_handle(qd_connection_t *c, pn_event_t *e) {
+bool qd_connection_handle(qd_connection_t *c, pn_event_t *e) {
     pn_connection_t *pn_conn = pn_event_connection(e);
     qd_connection_t *qd_conn = !!pn_conn ? (qd_connection_t*) pn_connection_get_context(pn_conn) : 0;
     handle(c->server, e, pn_conn, qd_conn);
+    if (qd_conn && pn_event_type(e) == PN_TRANSPORT_CLOSED) {
+        pn_connection_set_context(pn_conn, NULL);
+        qd_connection_free(qd_conn);
+        return false;
+    }
+    return true;
 }
 
 bool qd_connection_strip_annotations_in(const qd_connection_t *c) {

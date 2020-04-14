@@ -255,7 +255,7 @@ export function connectionPopupHTML(d, nodeInfo) {
 
 export function getSizes(id) {
   const gap = 5;
-  const sel = d3.select(`#${id}`);
+  const sel = d3.select(CSS.escape(`#${id}`));
   if (!sel.empty()) {
     const brect = sel.node().getBoundingClientRect();
     return { width: brect.width - gap, height: brect.height - gap };
@@ -292,6 +292,26 @@ export function reconcileArrays(existing, newArray) {
 // to the two nodes that it is linking.
 // So we need to fix the new links' source and target
 export function reconcileLinks(existingLinks, newLinks, existingNodes) {
+  // find links that are mirror images
+  newLinks.forEach(n => {
+    existingLinks.forEach(e => {
+      if (
+        e.suid === n.tuid &&
+        e.tuid === n.suid &&
+        e.left === n.right &&
+        e.right === n.left
+      ) {
+        e.suid = n.suid;
+        e.tuid = n.tuid;
+        e.left = n.left;
+        e.right = n.right;
+        e.uuid = n.uuid;
+        const tmp = e.source;
+        e.source = e.target;
+        e.target = tmp;
+      }
+    });
+  });
   reconcileArrays(existingLinks, newLinks);
   existingLinks.forEach(e => {
     // in new links, the source and target will be a number
@@ -331,7 +351,10 @@ function getNearestRouter(node, nodes, links) {
     if (link) {
       node.highlighted = true;
       link.highlighted = true;
-      d3.select(`path[id='hitpath-${link.uid()}']`).classed("highlighted", true);
+      d3.select(CSS.escape(`path[id='hitpath-${link.uid()}']`)).classed(
+        "highlighted",
+        true
+      );
     }
   }
   return node;
@@ -361,7 +384,10 @@ export function nextHopHighlight(selected_node, d, nodes, links, nodeInfo) {
     selected_node,
     (link, fnode, tnode) => {
       link.highlighted = true;
-      d3.select(`path[id='hitpath-${link.uid()}']`).classed("highlighted", true);
+      d3.select(CSS.escape(`path[id='hitpath-${link.uid()}']`)).classed(
+        "highlighted",
+        true
+      );
       fnode.highlighted = true;
       tnode.highlighted = true;
     }
