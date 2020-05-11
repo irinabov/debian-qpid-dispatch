@@ -31,7 +31,7 @@ from proton.utils import BlockingConnection, SyncRequestResponse
 from proton import VERSION as PROTON_VERSION
 from proton import Terminus
 from proton import Data
-from qpid_dispatch.management.client import Node
+from qpid_dispatch.management.client import Node, BadRequestStatus
 import os, json
 from subprocess import PIPE, STDOUT
 from time import sleep
@@ -58,6 +58,266 @@ class MultiTimeout ( object ):
 
     def on_timer_task(self, event):
         self.parent.timeout ( self.name )
+
+class StandaloneRouterQdManageTest(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super(StandaloneRouterQdManageTest, cls).setUpClass()
+        name = "test-router"
+        config = Qdrouterd.Config([
+            ('router', {'mode': 'standalone', 'id': 'QDR'}),
+            ('listener', {'port': cls.tester.get_port(), 'role': 'normal', 'host': '0.0.0.0'})
+        ])
+        cls.router = cls.tester.qdrouterd(name, config, wait=True)
+
+    def test_49_add_interrouter_connector_to_standalone_router(self):
+        """
+        This test tries adding an inter-router connector to a stanalone router.
+        A standalone router can have a route container connector
+        but never an inter-router connector. Inter router connectors
+        are allowed only with interior routers.
+        """
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        test_pass = False
+        try:
+            out = mgmt.create("org.apache.qpid.dispatch.connector",
+                              {"host": "0.0.0.0",
+                               "port": "77777",
+                               "role":"inter-router"})
+        except Exception as e:
+            if "BadRequestStatus: role='standalone' not allowed to connect to or accept connections from other routers." in str(e):
+                test_pass = True
+
+        self.assertTrue(test_pass)
+
+    def test_50_add_edge_listener_to_standalone_router(self):
+        """
+        This test tries to add an edge listener to a standalone router.
+        Since this is a standalone router, other routers (interior or edge routers)
+        cannot connect to this router.
+        """
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        test_pass = False
+        try:
+            out = mgmt.create("org.apache.qpid.dispatch.listener",
+                              {"host": "0.0.0.0",
+                               "port": "77777",
+                               "role":"edge",
+                               "authenticatePeer": "no"})
+        except Exception as e:
+            if "BadRequestStatus: role='standalone' not allowed to connect to or accept connections from other routers." in str(e):
+                test_pass = True
+
+        self.assertTrue(test_pass)
+
+
+    def test_51_add_interrouter_listener_to_standalone_router(self):
+        """
+        This test tries to add an inter-router listener to a standalone router.
+        Since this is a standalone router, other routers (interior or edge routers)
+        cannot connect to this router.
+        """
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        test_pass = False
+        try:
+            out = mgmt.create("org.apache.qpid.dispatch.listener",
+                              {"host": "0.0.0.0",
+                               "port": "77777",
+                               "role":"inter-router",
+                               "authenticatePeer": "no"})
+        except Exception as e:
+            if "BadRequestStatus: role='standalone' not allowed to connect to or accept connections from other routers." in str(e):
+                test_pass = True
+
+        self.assertTrue(test_pass)
+
+class EdgeRouterQdManageTest(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super(EdgeRouterQdManageTest, cls).setUpClass()
+        name = "test-router"
+        config = Qdrouterd.Config([
+            ('router', {'mode': 'edge', 'id': 'QDR'}),
+            ('listener', {'port': cls.tester.get_port(), 'role': 'normal', 'host': '0.0.0.0'})
+        ])
+        cls.router = cls.tester.qdrouterd(name, config, wait=True)
+
+    def test_52_add_interrouter_connector_to_edge_router(self):
+        """
+        This test tries adding an inter-router connector to an edge router. An edge
+        router can have an edge connector or route container connector
+        but never an inter-router connector. Inter router connectors
+        are allowed only with interior routers.
+        """
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        test_pass = False
+        try:
+            out = mgmt.create("org.apache.qpid.dispatch.connector",
+                              {"host": "0.0.0.0",
+                               "port": "77777",
+                               "role":"inter-router"})
+        except Exception as e:
+            if "BadRequestStatus: role='inter-router' only allowed with router mode='interior'" in str(e):
+                test_pass = True
+
+        self.assertTrue(test_pass)
+
+    def test_53_add_edge_listener_to_edge_router(self):
+        """
+        This test tries to add an edge listener to an edge router which means
+        an edge router can connect to another edge router and that is not
+        allowed.
+        """
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        test_pass = False
+        try:
+            out = mgmt.create("org.apache.qpid.dispatch.listener",
+                              {"host": "0.0.0.0",
+                               "port": "77777",
+                               "role":"edge",
+                               "authenticatePeer": "no"})
+        except Exception as e:
+            if "BadRequestStatus: role='edge' only allowed with router mode='interior'" in str(e):
+                test_pass = True
+
+        self.assertTrue(test_pass)
+
+    def test_54_add_interrouter_listener_to_edge_router(self):
+        """
+        This test tries to add an edge listener to an edge router which means
+        an edge router can connect to another edge router and that is not
+        allowed.
+        """
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        test_pass = False
+        try:
+            out = mgmt.create("org.apache.qpid.dispatch.listener",
+                              {"host": "0.0.0.0",
+                               "port": "77777",
+                               "role":"inter-router",
+                               "authenticatePeer": "no"})
+        except Exception as e:
+            if "BadRequestStatus: role='inter-router' only allowed with router mode='interior'" in str(e):
+                test_pass = True
+
+        self.assertTrue(test_pass)
+
+class StandaloneEdgeRouterConfigTest(TestCase):
+    """
+    Try to start the router with bad config and make sure the router
+    does not start and scan the log files for appropriate error messages.
+    """
+    @classmethod
+    def setUpClass(cls):
+        super(StandaloneEdgeRouterConfigTest, cls).setUpClass()
+        name = "test-router"
+
+        # A standalone router cannot have an edge listener because it cannot accept edge connections.
+        config = Qdrouterd.Config([
+            ('router', {'mode': 'standalone', 'id': 'QDR'}),
+            ('listener', {'port': cls.tester.get_port(), 'role': 'edge', 'host': '0.0.0.0'})
+        ])
+        cls.router = cls.tester.qdrouterd(name, config, wait=False, perform_teardown=False)
+
+        # A standalone router cannot have inter-router connectors.
+        name = "test-router-1"
+        config_1 = Qdrouterd.Config([
+            ('router', {'mode': 'standalone', 'id': 'QDR'}),
+            ('connector', {'port': cls.tester.get_port(), 'role': 'inter-router', 'host': '0.0.0.0'})
+        ])
+        cls.router_1 = cls.tester.qdrouterd(name, config_1, wait=False, perform_teardown=False)
+
+        # An edge router cannot have edge listeners.
+        # Edge routers can have connectors that connect to interior routers
+        # or route-containers. One edge router cannot connect to another edge router.
+        name = "test-router-2"
+        config_2 = Qdrouterd.Config([
+            ('router', {'mode': 'edge', 'id': 'QDR'}),
+            ('listener', {'port': cls.tester.get_port(), 'role': 'edge', 'host': '0.0.0.0'})
+        ])
+        cls.router_2 = cls.tester.qdrouterd(name, config_2, wait=False, perform_teardown=False)
+
+        # Edge routers cannot have inter-router listeners. Only interior
+        # routers can have inter-router listeners.
+        name = "test-router-3"
+        config_3 = Qdrouterd.Config([
+            ('router', {'mode': 'edge', 'id': 'QDR'}),
+            ('listener', {'port': cls.tester.get_port(), 'role': 'inter-router', 'host': '0.0.0.0'})
+        ])
+        cls.router_3 = cls.tester.qdrouterd(name, config_3, wait=False, perform_teardown=False)
+
+        # Edge routers cannot have inter-router connectors
+        # Inter-router connectors are allowed only on interior routers.
+        name = "test-router-4"
+        config_4 = Qdrouterd.Config([
+            ('router', {'mode': 'edge', 'id': 'QDR'}),
+            ('connector', {'port': cls.tester.get_port(), 'role': 'inter-router', 'host': '0.0.0.0'})
+        ])
+        cls.router_4 = cls.tester.qdrouterd(name, config_4, wait=False, perform_teardown=False)
+
+        # A standalone router cannot have an inter-router listener because
+        # it cannot accept inter-router connections.
+        name = "test-router-5"
+        config_5 = Qdrouterd.Config([
+            ('router', {'mode': 'standalone', 'id': 'QDR'}),
+            ('listener', {'port': cls.tester.get_port(), 'role': 'inter-router', 'host': '0.0.0.0'})
+        ])
+        cls.router_5 = cls.tester.qdrouterd(name, config_5, wait=False, perform_teardown=False)
+
+        # Give some time for the test to write to the .out file. Without
+        # this sleep, the tests execute too
+        # fast and find that nothing has yet been written to the .out files.
+        sleep(3)
+
+
+    def test_48_router_in_error(self):
+        test_pass = False
+        with open(self.router.outfile + '.out', 'r') as out_file:
+            for line in out_file:
+                if "Exception: Cannot load configuration file test-router.conf: role='standalone' not allowed to connect to or accept connections from other routers." in line:
+                    test_pass = True
+                    break
+        self.assertTrue(test_pass)
+
+        test_pass = False
+        with open(self.router_1.outfile + '.out', 'r') as out_file:
+            for line in out_file:
+                if "Exception: Cannot load configuration file test-router-1.conf: role='standalone' not allowed to connect to or accept connections from other routers." in line:
+                    test_pass = True
+                    break
+        self.assertTrue(test_pass)
+
+        test_pass = False
+        with open(self.router_2.outfile + '.out', 'r') as out_file:
+            for line in out_file:
+                if "Exception: Cannot load configuration file test-router-2.conf: role='edge' only allowed with router mode='interior'" in line:
+                    test_pass = True
+                    break
+        self.assertTrue(test_pass)
+
+        test_pass = False
+        with open(self.router_3.outfile + '.out', 'r') as out_file:
+            for line in out_file:
+                if "Exception: Cannot load configuration file test-router-3.conf: role='inter-router' only allowed with router mode='interior'" in line:
+                    test_pass = True
+                    break
+        self.assertTrue(test_pass)
+
+        test_pass = False
+        with open(self.router_4.outfile + '.out', 'r') as out_file:
+            for line in out_file:
+                if "Exception: Cannot load configuration file test-router-4.conf: role='inter-router' only allowed with router mode='interior'" in line:
+                    test_pass = True
+                    break
+        self.assertTrue(test_pass)
+
+        test_pass = False
+        with open(self.router_5.outfile + '.out', 'r') as out_file:
+            for line in out_file:
+                if "Exception: Cannot load configuration file test-router-5.conf: role='standalone' not allowed to connect to or accept connections from other routers." in line:
+                    test_pass = True
+                    break
+        self.assertTrue(test_pass)
 
 
 class OneRouterTest(TestCase):
@@ -479,6 +739,17 @@ class OneRouterTest(TestCase):
         test.run()
         self.assertEqual(None, test.error)
 
+    def test_49_unexpected_release_test(self):
+        """
+        Verify that the on_released function is only called once for every
+        released message. Without the fix for DISPATCH-1626, the on_released
+        might be called twice for the same delivery.
+        This test will fail once in five runs without the fix for DISPATCH-1626
+        """
+        test = UnexpectedReleaseTest(self.address)
+        test.run()
+        self.assertEqual(None, test.error)
+
 
 class Entity(object):
     def __init__(self, status_code, status_description, attrs):
@@ -523,6 +794,92 @@ class RouterProxy(object):
     def query_links(self):
         ap = {'operation': 'QUERY', 'type': 'org.apache.qpid.dispatch.router.link'}
         return Message(properties=ap, reply_to=self.reply_addr)
+
+
+class ReleasedChecker(object):
+    def __init__(self, parent):
+        self.parent = parent
+
+    def on_timer_task(self, event):
+        self.parent.released_check_timeout()
+
+class UnexpectedReleaseTest(MessagingHandler):
+    def __init__(self, address):
+        super(UnexpectedReleaseTest, self).__init__(auto_accept=False)
+        self.address = address
+        self.dest = "UnexpectedReleaseTest"
+        self.timer = None
+        self.sender_conn = None
+        self.receiver_conn = None
+        self.sender = None
+        self.receiver = None
+        self.num_messages = 250
+        self.recv_messages_max = 200
+        self.num_sent = 0
+        self.num_received = 0
+        self.num_released = 0
+        self.num_accepted = 0
+        # Send a large message
+        self.body = "123456789" * 8192
+        self.receiver_conn_closed = False
+        self.error = None
+        self.released_checker = None
+
+    def released_check_timeout(self):
+        if not self.receiver_conn_closed:
+            self.receiver_conn.close()
+        self.sender_conn.close()
+        self.timer.cancel()
+
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.sender_conn = event.container.connect(self.address)
+        self.receiver_conn = event.container.connect(self.address)
+        self.receiver = event.container.create_receiver(self.receiver_conn, self.dest)
+
+    def on_link_opened(self, event):
+        if event.receiver == self.receiver:
+            # Wait for the receiver to be created and then create the sender.
+            self.sender = event.container.create_sender(self.sender_conn, self.dest)
+
+    def on_sendable(self, event):
+        if self.num_sent < self.num_messages:
+            msg = Message(body=self.body)
+            self.sender.send(msg)
+            self.num_sent += 1
+
+    def on_released(self, event):
+        self.num_released += 1
+        if self.num_released == self.num_messages - self.recv_messages_max:
+            # We have received the expected number of calls to on_released
+            # but without the fix for DISPATCH-1626 we expect the on_released
+            # to be called an additional one or more times. We will kick off
+            # a 3 second timer after which we will check if we got more
+            # calls to on_released.
+            self.released_checker = event.reactor.schedule(3, ReleasedChecker(self))
+        if self.num_released > self.num_messages - self.recv_messages_max:
+            # This if statement will be true if the client receives a 2 part
+            # dispostion from the router like the following
+            #
+            # [0x562a0083ed80]:0 <- @disposition(21) [role=true, first=981, state=@released(38) []]
+            # [0x562a0083ed80]:0 <- @disposition(21) [role=true, first=981, last=982, settled=true, state=@released(38) []]
+            #
+            self.error = "Expected %d calls to on_released but got %d" % (self.num_messages - self.recv_messages_max, self.num_released)
+
+    def on_accepted(self, event):
+        self.num_accepted +=1
+
+    def on_message(self, event):
+        if event.receiver == self.receiver:
+            self.num_received += 1
+            if self.num_received <= self.recv_messages_max:
+                event.delivery.settle()
+            if self.num_received == self.recv_messages_max:
+                self.receiver_conn.close()
+                self.receiver_conn_closed = True
+
+    def run(self):
+        Container(self).run()
 
 
 class SemanticsClosest(MessagingHandler):
@@ -2650,8 +3007,11 @@ class ConnectionUptimeLastDlvTest(MessagingHandler):
 
             # We have now sent a message that the router must have sent to the
             # receiver. We will wait for 2 seconds and once again check
-            # uptime and lastDlv
-            self.custom_timer = self.reactor.schedule(2, UptimeLastDlvChecker(self, uptime=7, lastDlv=2))
+            # uptime and lastDlv.
+            # Allow for some slop in the calculation of uptime and last delivery:
+            # * reactor.schedule needs leeway in calculating the time delta and delivering the callback
+            # * dispatch needs leeway rounding stats to whole seconds
+            self.custom_timer = self.reactor.schedule(2, UptimeLastDlvChecker(self, uptime=2, lastDlv=1))
 
     def timeout(self):
         self.error = "Timeout Expired:, Test took too long to execute. "
@@ -2667,11 +3027,11 @@ class ConnectionUptimeLastDlvTest(MessagingHandler):
         self.sender = event.container.create_sender(self.sender_conn, self.dest)
         self.receiver = event.container.create_receiver(self.receiver_conn, self.dest)
 
-        # Execute a management query for connections after 5 seconds
+        # Execute a management query for connections after 1 second
         # This will help us check the uptime and lastDlv time
         # No deliveries were sent on any link yet, so the lastDlv must be "-"
         self.reactor = event.reactor
-        self.custom_timer = event.reactor.schedule(5, UptimeLastDlvChecker(self, uptime=5, lastDlv=None))
+        self.custom_timer = event.reactor.schedule(1, UptimeLastDlvChecker(self, uptime=1, lastDlv=None))
 
     def run(self):
         container = Container(self)
