@@ -23,7 +23,7 @@ override_dh_auto_configure:
 
 override_dh_auto_install:
 	dh_auto_install
-	cp -a debian/tmp/usr/lib/python3.8/site-packages debian/tmp/usr/lib/python3.8/dist-packages
+	cp -a debian/tmp/usr/lib/python3.8/site-packages debian/tmp/usr/lib/python3/dist-packages
 
 override_dh_auto_test:
 	# TODO enable them
