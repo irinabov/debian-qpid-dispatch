@@ -47,7 +47,7 @@ Description: Qpid Dispatch Router executable
 
 Package: qdstat
 Architecture: all
-Depends: python3-qpid-proton (>= 0.28.0),
+Depends: python3-qpid-proton (>= 0.31.0),
          python3,
          ${misc:Depends}
 Description: Qpid Dispatch stat tool
@@ -71,7 +71,7 @@ Description: Qpid Dispatch stat tool
 
 Package: qdmanage
 Architecture: all
-Depends: python3-qpid-proton (>= 0.28.0),
+Depends: python3-qpid-proton (>= 0.31.0),
          python3,
          ${misc:Depends}
 Description: Qpid Dispatch manage tool
