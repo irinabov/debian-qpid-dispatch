@@ -178,14 +178,16 @@ static int handle_events(connection_t* c) {
     }
     pn_event_t *e;
     while ((e = pn_connection_driver_next_event(&c->driver))) {
-        if (!qd_connection_handle(c->qd_conn, e)) {
-            c->qd_conn = 0;  // connection closed
+        if (c->qd_conn && e) {
+            if (!qd_connection_handle(c->qd_conn, e)) {
+                c->qd_conn = 0;  // connection closed
+            }
         }
     }
     if (pn_connection_driver_write_buffer(&c->driver).size) {
         lws_callback_on_writable(c->wsi);
     }
-    if (pn_connection_driver_finished(&c->driver)) {
+    if (pn_connection_driver_write_closed(&c->driver)) {
         lws_close_reason(c->wsi, LWS_CLOSE_STATUS_NORMAL, NULL, 0);
         return -1;
     }
