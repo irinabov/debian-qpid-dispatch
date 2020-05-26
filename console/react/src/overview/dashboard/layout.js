@@ -91,8 +91,8 @@ class PageLayout extends React.PureComponent {
       visualizations: [{ name: "topology" }, { name: "flow", title: "Message flow" }],
       details: [{ name: "entities" }, { name: "schema" }]
     };
-    //this.state.connecting = true;
-    //this.tryInitialConnect();
+    this.state.connecting = true;
+    this.tryInitialConnect();
   }
 
   componentDidMount = () => {
@@ -112,19 +112,16 @@ class PageLayout extends React.PureComponent {
   };
 
   tryInitialConnect = () => {
+    const defaultPort = window.location.protocol.startsWith("https") ? "443" : "80";
     const connectOptions = {
       address: window.location.hostname,
-      port: window.location.port,
+      port: window.location.port === "" ? defaultPort : window.location.port,
       timeout: 2000,
-      reconnect: false
+      reconnect: true
     };
     this.service.connect(connectOptions).then(
       () => {
-        this.service.setReconnect(true);
-        this.schema = this.service.schema;
-        this.props.history.replace("/dashboard");
-        this.redirect = true;
-        this.setState({ connecting: false, connected: true });
+        this.handleConnect("/dashboard");
       },
       () => {
         //this.service.disconnect();
@@ -187,7 +184,7 @@ class PageLayout extends React.PureComponent {
 
   handleConnect = (connectPath, result) => {
     if (this.state.connected) {
-      this.setState({ connected: false }, () => {
+      this.setState({ connecting: false, connected: false }, () => {
         this.handleConnectCancel();
         this.service.disconnect();
         this.handleAddNotification("event", "Manually disconnected", new Date(), "info");

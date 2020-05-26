@@ -1041,6 +1041,7 @@ static void *thread_run(void *arg)
 
             /* Free the connection after all other processing is complete */
             if (qd_conn && pn_event_type(e) == PN_TRANSPORT_CLOSED) {
+                qd_conn_event_batch_complete(qd_server->container, qd_conn, true);
                 pn_connection_set_context(pn_conn, NULL);
                 qd_connection_free(qd_conn);
                 qd_conn = 0;
@@ -1290,6 +1291,8 @@ void qd_server_free(qd_server_t *qd_server)
         sys_mutex_free(ctx->deferred_call_lock);
         free(ctx->name);
         free(ctx->role);
+        if (ctx->policy_settings)
+            free_qd_policy_settings_t(ctx->policy_settings);
         free_qd_connection_t(ctx);
         ctx = DEQ_HEAD(qd_server->conn_list);
     }
@@ -1643,6 +1646,8 @@ const char* qd_connection_remote_ip(const qd_connection_t *c) {
 
 /* Expose event handling for HTTP connections */
 bool qd_connection_handle(qd_connection_t *c, pn_event_t *e) {
+    if (!c)
+        return false;
     pn_connection_t *pn_conn = pn_event_connection(e);
     qd_connection_t *qd_conn = !!pn_conn ? (qd_connection_t*) pn_connection_get_context(pn_conn) : 0;
     handle(c->server, e, pn_conn, qd_conn);
@@ -1661,4 +1666,8 @@ bool qd_connection_strip_annotations_in(const qd_connection_t *c) {
 sys_mutex_t *qd_server_get_activation_lock(qd_server_t * server)
 {
     return server->conn_activation_lock;
+}
+
+int qd_connection_max_message_size(const qd_connection_t *c) {
+    return (c && c->policy_settings) ? c->policy_settings->maxMessageSize : 0;
 }
