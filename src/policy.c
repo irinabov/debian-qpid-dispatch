@@ -315,7 +315,7 @@ void qd_policy_socket_close(qd_policy_t *policy, const qd_connection_t *conn)
         qd_policy_denial_counts_t *qpdc = conn->policy_settings->denialCounts;
         qd_log(policy->log_source, QD_LOG_DEBUG,
            "[C%"PRIu64"] Connection '%s' closed with resources n_sessions=%d, n_senders=%d, n_receivers=%d, "
-           "sessions_denied=%ld, senders_denied=%ld, receivers_denied=%ld, max_message_size_denied:%ld, nConnections= %ld.",
+           "sessions_denied=%"PRIu64", senders_denied=%"PRIu64", receivers_denied=%"PRIu64", max_message_size_denied:%"PRIu64", nConnections= %"PRIu64".",
             conn->connection_id, hostname, conn->n_sessions, conn->n_senders, conn->n_receivers,
             qpdc->sessionDenied, qpdc->senderDenied, qpdc->receiverDenied, qpdc->maxSizeMessagesDenied, n_connections);
     }
@@ -405,6 +405,55 @@ qd_parse_tree_t * qd_policy_parse_tree(const char *config_spec)
 // * Evaluate the connection auth and the Open fields to allow or deny the Open. 
 // * If allowed then return the settings from the python vhost database.
 //
+
+/** Look up vhost in python vhost aliases database
+ *  * Return false if the mechanics of calling python fails or if returned name buf is blank.
+ *  * Return true if a name was returned.
+ * @param[in]  policy pointer to policy
+ * @param[in]  vhost application name received in remote AMQP Open.hostname
+ * @param[out] name_buf pointer to return name buffer
+ * @param[in]  name_buf_size size of name_buf
+ **/
+bool qd_policy_lookup_vhost_alias(
+    qd_policy_t *policy,
+    const char *vhost,
+    char       *name_buf,
+    int         name_buf_size)
+{
+    bool res = false;
+    name_buf[0] = 0;
+    qd_python_lock_state_t lock_state = qd_python_lock();
+    {
+        PyObject *lookup_vhost_alias = PyObject_GetAttrString(module, "policy_lookup_vhost_alias");
+        if (lookup_vhost_alias) {
+            PyObject *result = PyObject_CallFunction(lookup_vhost_alias, "(Os)",
+                                                     (PyObject *)policy->py_policy_manager,
+                                                     vhost);
+            if (result) {
+                char *res_string = py_obj_2_c_string(result);
+                const size_t res_len = res_string ? strlen(res_string) : 0;
+                if (res_string && res_len < name_buf_size) {
+                    strcpy(name_buf, res_string);
+                } else {
+                    qd_log(policy->log_source, QD_LOG_ERROR,
+                           "Internal: lookup_vhost_alias: insufficient buffer for name");
+                }
+                Py_XDECREF(result);
+                free(res_string);
+                res = !!name_buf[0]; // settings name returned
+            } else {
+                qd_log(policy->log_source, QD_LOG_DEBUG, "Internal: lookup_vhost_alias: result");
+            }
+            Py_XDECREF(lookup_vhost_alias);
+        } else {
+            qd_log(policy->log_source, QD_LOG_DEBUG, "Internal: lookup_vhost_alias: lookup_vhost_alias");
+        }
+    }
+    qd_python_unlock(lock_state);
+
+    return res;
+}
+
 
 /** Look up user/host/vhost in python vhost database and give the AMQP Open
  *  a go-no_go decision. 
@@ -1241,6 +1290,22 @@ void qd_policy_amqp_open(qd_connection_t *qd_conn) {
                     pn_transport_set_max_frame(pn_trans, qd_conn->policy_settings->maxFrameSize);
                 if (qd_conn->policy_settings->maxSessions > 0)
                     pn_transport_set_channel_max(pn_trans, qd_conn->policy_settings->maxSessions - 1);
+                const qd_server_config_t *cf = qd_connection_config(qd_conn);
+                if (cf && cf->multi_tenant) {
+                    char vhost_name_buf[SETTINGS_NAME_SIZE];
+                    if (qd_policy_lookup_vhost_alias(policy, vhost, vhost_name_buf, SETTINGS_NAME_SIZE)) {
+                        if (pcrh && !strcmp(pcrh, vhost_name_buf)) {
+                            // Default condition: use proton connection value; no action here
+                        } else {
+                            // Policy used a name different from what came in the AMQP Open hostname.
+                            // Memorize it for multitenant namespace
+                            qd_conn->policy_settings->vhost_name = (char*)malloc(strlen(vhost_name_buf) + 1);
+                            strcpy(qd_conn->policy_settings->vhost_name, vhost_name_buf);
+                        }
+                    }
+                } else {
+                    // not multi-tenant: don't look for vhost
+                }
             } else {
                 // failed to fetch settings
                 connection_allowed = false;
@@ -1319,6 +1384,7 @@ void qd_policy_settings_free(qd_policy_settings_t *settings)
     if (settings->targetPattern)   free(settings->targetPattern);
     if (settings->sourceParseTree) qd_parse_tree_free(settings->sourceParseTree);
     if (settings->targetParseTree) qd_parse_tree_free(settings->targetParseTree);
+    if (settings->vhost_name)      free(settings->vhost_name);
     free_qd_policy_settings_t(settings);
 }
 
@@ -1350,21 +1416,19 @@ bool qd_policy_host_pattern_add(qd_policy_t *policy, const char *hostPattern)
 {
     void *payload = strdup(hostPattern);
     sys_mutex_lock(policy->tree_lock);
-    void *oldp = qd_parse_tree_add_pattern_str(policy->hostname_tree, hostPattern, payload);
-    if (oldp) {
-        void *recovered = qd_parse_tree_add_pattern_str(policy->hostname_tree, (char *)oldp, oldp);
-        assert (recovered);
-        (void)recovered;        /* Silence compiler complaints of unused variable */
-    }
+    qd_error_t rc = qd_parse_tree_add_pattern_str(policy->hostname_tree, hostPattern, payload);
     sys_mutex_unlock(policy->tree_lock);
-    if (oldp) {
+
+    if (rc != QD_ERROR_NONE) {
+        const char *err = qd_error_name(rc);
         free(payload);
         qd_log(policy->log_source,
-            QD_LOG_WARNING,
-            "vhost hostname pattern '%s' failed to replace optimized pattern '%s'",
-            hostPattern, (char *)oldp);
+               QD_LOG_WARNING,
+               "vhost hostname pattern '%s' add failed: %s",
+               hostPattern, err ? err : "unknown error");
+        qd_error_clear();  // allow policy agent to raise PolicyError
     }
-    return oldp == 0;
+    return rc == QD_ERROR_NONE;
 }
 
 

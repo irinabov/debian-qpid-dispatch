@@ -353,7 +353,7 @@ static void listener_start(qd_http_listener_t *hl, qd_http_server_t *hs) {
         info.ssl_cert_filepath = config->ssl_certificate_file;
         info.ssl_private_key_filepath = config->ssl_private_key_file;
         info.ssl_private_key_password = config->ssl_password;
-        info.ssl_ca_filepath = config->ssl_trusted_certificates ? config->ssl_trusted_certificates : config->ssl_trusted_certificate_db;
+        info.ssl_ca_filepath = config->ssl_trusted_certificate_db;
         info.ssl_cipher_list = config->ssl_ciphers;
 
         info.options |=
@@ -389,9 +389,9 @@ static void listener_start(qd_http_listener_t *hl, qd_http_server_t *hs) {
 }
 
 static void listener_close(qd_http_listener_t *hl, qd_http_server_t *hs) {
-    /* TODO aconway 2017-04-13: can't easily stop listeners under libwebsockets */
-    qd_log(hs->log, QD_LOG_ERROR, "Cannot close HTTP listener %s",
-           hl->listener->config.host_port);
+    qd_server_config_t *config = &hl->listener->config;
+    qd_log(hs->log, QD_LOG_NOTICE, "Stopped listening for HTTP on %s", config->host_port);
+    lws_vhost_destroy(hl->vhost);
 }
 
 /*

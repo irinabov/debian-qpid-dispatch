@@ -378,9 +378,22 @@ qdr_link_route_t *qdr_route_add_link_route_CT(qdr_core_t             *core,
     }
 
     //
+    // If a name was provided, use that as the key to insert the this link route name into the hashtable so
+    // we can quickly find it later.
+    //
+    if (name) {
+        qd_iterator_view_t iter_view = qd_iterator_get_view(name);
+        qd_iterator_reset_view(name, ITER_VIEW_ADDRESS_HASH);
+        qd_hash_insert(core->addr_lr_al_hash, name, lr, &lr->hash_handle);
+        qd_iterator_reset_view(name, iter_view);
+    }
+
+    //
     // Add the link route to the core list
     //
     DEQ_INSERT_TAIL(core->link_routes, lr);
+
+
     qd_log(core->log, QD_LOG_TRACE, "Link route %spattern added: pattern=%s name=%s",
            is_prefix ? "prefix " : "", lr->pattern, lr->name);
 
@@ -441,6 +454,12 @@ void qdr_route_del_link_route_CT(qdr_core_t *core, qdr_link_route_t *lr)
         }
     }
 
+    if (lr->hash_handle) {
+        qd_hash_remove_by_handle(core->addr_lr_al_hash, lr->hash_handle);
+        qd_hash_handle_free(lr->hash_handle);
+        lr->hash_handle = 0;
+    }
+
     //
     // Remove the link route from the core list.
     //
@@ -499,7 +518,7 @@ qdr_auto_link_t *qdr_route_add_auto_link_CT(qdr_core_t          *core,
         //
         // If we just created an address that needs a fallback, set up the fallback now.
         //
-        if (!!addr_config && addr_config->fallback && dir == QD_INCOMING)
+        if (!!addr_config && addr_config->fallback)
             qdr_setup_fallback_address_CT(core, al->addr);
     }
 
@@ -517,6 +536,17 @@ qdr_auto_link_t *qdr_route_add_auto_link_CT(qdr_core_t          *core,
             qdr_auto_link_activate_CT(core, al, cref->conn);
             cref = DEQ_NEXT(cref);
         }
+    }
+
+    //
+    // If a name was provided, use that as the key to insert the this auto link name into the hashtable so
+    // we can quickly find it later.
+    //
+    if (name) {
+        qd_iterator_view_t iter_view = qd_iterator_get_view(name);
+        qd_iterator_reset_view(name, ITER_VIEW_ADDRESS_HASH);
+        qd_hash_insert(core->addr_lr_al_hash, name, al, &al->hash_handle);
+        qd_iterator_reset_view(name, iter_view);
     }
 
     //
@@ -541,6 +571,12 @@ void qdr_route_del_auto_link_CT(qdr_core_t *core, qdr_auto_link_t *al)
             qdr_auto_link_deactivate_CT(core, al, cref->conn);
             cref = DEQ_NEXT(cref);
         }
+    }
+
+    if (al->hash_handle) {
+        qd_hash_remove_by_handle(core->addr_lr_al_hash, al->hash_handle);
+        qd_hash_handle_free(al->hash_handle);
+        al->hash_handle = 0;
     }
 
     //
@@ -666,20 +702,15 @@ void qdr_link_route_map_pattern_CT(qdr_core_t *core, qd_iterator_t *address, qdr
 {
     qd_direction_t dir;
     char *pattern = qdr_address_to_link_route_pattern(address, &dir);
-    qd_iterator_t *iter = qd_iterator_string(pattern, ITER_VIEW_ALL);
 
-    qdr_address_t *other_addr;
-    bool found = qd_parse_tree_get_pattern(core->link_route_tree[dir], iter, (void **)&other_addr);
-    if (!found) {
-        qd_parse_tree_add_pattern(core->link_route_tree[dir], iter, addr);
-    } else {
+    qd_error_t rc = qd_parse_tree_add_pattern_str(core->link_route_tree[dir], pattern, addr); 
+    if (rc) {
         // the pattern is mapped once when the address is added to the hash
         // table.  It should not be mapped twice
-        qd_log(core->log, QD_LOG_CRITICAL, "Link route %s mapped redundantly!",
-               pattern);
+        qd_log(core->log, QD_LOG_CRITICAL, "Link route %s mapped redundantly: %s!",
+               pattern, qd_error_name(rc));
     }
 
-    qd_iterator_free(iter);
     free(pattern);
 }
 
@@ -691,19 +722,15 @@ void qdr_link_route_unmap_pattern_CT(qdr_core_t *core, qd_iterator_t *address)
 {
     qd_direction_t dir;
     char *pattern = qdr_address_to_link_route_pattern(address, &dir);
-    qd_iterator_t *iter = qd_iterator_string(pattern, ITER_VIEW_ALL);
-    qdr_address_t *addr;
-    bool found = qd_parse_tree_get_pattern(core->link_route_tree[dir], iter, (void **)&addr);
-    if (found) {
-        qd_parse_tree_remove_pattern(core->link_route_tree[dir], iter);
-    } else {
-        // expected that the pattern is removed when the address is deleted.
-        // Attempting to remove it twice is unexpected
+    qdr_address_t *addr = (qdr_address_t *) qd_parse_tree_remove_pattern_str(core->link_route_tree[dir],
+                                                                             pattern);
+    if (!addr) {
+        // expected that the pattern is in the tree.
+        // unexpected if it hasn't been mapped or has already been removed
         qd_log(core->log, QD_LOG_CRITICAL, "link route pattern ummap: Pattern '%s' not found",
                pattern);
     }
 
-    qd_iterator_free(iter);
     free(pattern);
 }
 

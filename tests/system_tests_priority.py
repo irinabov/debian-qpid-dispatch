@@ -24,18 +24,11 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 from proton          import Message, Timeout
-from system_test     import TestCase, Qdrouterd, main_module, Process
-from system_test import unittest
+from system_test     import TestCase, Qdrouterd, main_module, Process, unittest
 from proton.handlers import MessagingHandler
 from proton.reactor  import Container
 
-import time
-import math
 from qpid_dispatch_internal.compat import UNICODE
-
-
-
-
 
 #------------------------------------------------
 # Helper classes for all tests.
@@ -165,7 +158,6 @@ class PriorityTests ( TestCase ):
                            { 'name'             : 'BA_connector',
                              'role'             : 'inter-router',
                              'port'             : A_inter_router_port,
-                             'verifyHostname'   : 'no',
                              'linkCapacity'     : link_cap,
                              'stripAnnotations' : 'no'
                            }
@@ -191,7 +183,6 @@ class PriorityTests ( TestCase ):
                        { 'name'             : 'CB_connector',
                          'role'             : 'inter-router',
                          'port'             : B_inter_router_port,
-                         'verifyHostname'   : 'no',
                          'linkCapacity'     : link_cap,
                          'stripAnnotations' : 'no'
                        }

@@ -23,12 +23,10 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 from proton import Message, Timeout
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT
-from system_test import unittest
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, unittest, TestTimeout, PollTimeout
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, DynamicNodeProperties
 from qpid_dispatch_internal.compat import UNICODE
-from qpid_dispatch.management.client import Node
 
 
 class RouterTest(TestCase):
@@ -69,7 +67,7 @@ class RouterTest(TestCase):
         inter_router_port = cls.tester.get_port()
 
         router('A', ('listener', {'role': 'inter-router', 'port': inter_router_port}))
-        router('B', ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port, 'verifyHostname': 'no'}))
+        router('B', ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port}))
 
         cls.routers[0].wait_router_connected('B')
         cls.routers[1].wait_router_connected('A')
@@ -486,22 +484,6 @@ class RouterProxy(object):
         return Message(properties=ap, reply_to=self.reply_addr)
 
 
-class Timeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.timeout()
-
-
-class PollTimeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.poll_timeout()
-
-
 class MessageTransferTest(MessagingHandler):
     def __init__(self, sender_host, receiver_host, sender_address, receiver_address, lookup_host, lookup_address):
         super(MessageTransferTest, self).__init__()
@@ -536,7 +518,7 @@ class MessageTransferTest(MessagingHandler):
         self.lookup_conn.close()
 
     def on_start(self, event):
-        self.timer          = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer          = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.sender_conn    = event.container.connect(self.sender_host)
         self.receiver_conn  = event.container.connect(self.receiver_host)
         self.lookup_conn    = event.container.connect(self.lookup_host)
@@ -629,7 +611,7 @@ class MessageTransferAnonTest(MessagingHandler):
         self.poll()
 
     def on_start(self, event):
-        self.timer          = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer          = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.poll_timer     = None
         self.sender_conn    = event.container.connect(self.sender_host)
         self.receiver_conn  = event.container.connect(self.receiver_host)
@@ -757,7 +739,7 @@ class LinkRouteTest(MessagingHandler):
 
 
     def on_start(self, event):
-        self.timer          = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer          = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.first_conn     = event.container.connect(self.first_host)
         self.second_conn    = event.container.connect(self.second_host)
         self.lookup_conn    = event.container.connect(self.lookup_host)
@@ -847,6 +829,9 @@ class WaypointTest(MessagingHandler):
         self.waypoint_sender   = None
         self.waypoint_receiver = None
         self.waypoint_queue    = []
+        self.waypoint_sender_opened = False
+        self.waypoint_receiver_opened = False
+        self.firsts_created = False
 
         self.count  = 10
         self.n_sent = 0
@@ -877,34 +862,37 @@ class WaypointTest(MessagingHandler):
             self.waypoint_sender.send(m)
 
     def on_start(self, event):
-        self.timer       = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer       = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.first_conn  = event.container.connect(self.first_host)
         self.second_conn = event.container.connect(self.second_host)
 
-    def on_connection_opened(self, event):
-        if event.connection == self.first_conn:
-            self.first_sender   = event.container.create_sender(self.first_conn, self.first_address)
-            self.first_receiver = event.container.create_receiver(self.first_conn, self.first_address)
-
     def on_link_opening(self, event):
-        if event.sender:
+        if event.sender and not self.waypoint_sender:
             self.waypoint_sender = event.sender
             if event.sender.remote_source.address == self.second_address:
                 event.sender.source.address = self.second_address
                 event.sender.open()
+                self.waypoint_sender_opened = True
             else:
                 self.fail("Incorrect address on incoming sender: got %s, expected %s" %
                           (event.sender.remote_source.address, self.second_address))
 
-        elif event.receiver:
+        elif event.receiver and not self.waypoint_receiver:
             self.waypoint_receiver = event.receiver
             if event.receiver.remote_target.address == self.second_address:
                 event.receiver.target.address = self.second_address
                 event.receiver.open()
+                self.waypoint_receiver_opened = True
             else:
                 self.fail("Incorrect address on incoming receiver: got %s, expected %s" %
                           (event.receiver.remote_target.address, self.second_address))
 
+        if self.waypoint_sender_opened and self.waypoint_receiver_opened and not self.firsts_created:
+            self.firsts_created = True
+            self.first_sender = event.container.create_sender(self.first_conn,
+                                                              self.first_address)
+            self.first_receiver = event.container.create_receiver(self.first_conn,
+                                                                  self.first_address)
 
     def on_sendable(self, event):
         if event.sender == self.first_sender:

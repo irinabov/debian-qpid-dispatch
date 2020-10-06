@@ -105,8 +105,16 @@ void qdr_core_free(qdr_core_t *core)
     // Stop and join the thread
     //
     core->running = false;
+
     sys_cond_signal(core->action_cond);
     sys_thread_join(core->thread);
+
+    //
+    // The char* core->router_id and core->router_area are owned by qd->router_id and qd->router_area respectively
+    // We will set them to zero here just in case anybody tries to use these fields.
+    //
+    core->router_id = 0;
+    core->router_area = 0;
 
     // Drain the general work lists
     qdr_general_handler(core);
@@ -149,7 +157,10 @@ void qdr_core_free(qdr_core_t *core)
     while ( (addr_config = DEQ_HEAD(core->addr_config))) {
         qdr_core_remove_address_config(core, addr_config);
     }
+
     qd_hash_free(core->addr_hash);
+    qd_hash_free(core->addr_lr_al_hash);
+
     qd_parse_tree_free(core->addr_parse_tree);
     qd_parse_tree_free(core->link_route_tree[QD_INCOMING]);
     qd_parse_tree_free(core->link_route_tree[QD_OUTGOING]);
@@ -162,6 +173,10 @@ void qdr_core_free(qdr_core_t *core)
     qdr_link_t *link = DEQ_HEAD(core->open_links);
     while (link) {
         DEQ_REMOVE_HEAD(core->open_links);
+        if (link->in_streaming_pool) {
+            DEQ_REMOVE_N(STREAMING_POOL, link->conn->streaming_link_pool, link);
+            link->in_streaming_pool = false;
+        }
         if (link->core_endpoint)
             qdrc_endpoint_do_cleanup_CT(core, link->core_endpoint);
         qdr_del_link_ref(&link->conn->links, link, QDR_LINK_LIST_CLASS_CONNECTION);
@@ -193,9 +208,15 @@ void qdr_core_free(qdr_core_t *core)
             work = DEQ_HEAD(conn->work_list);
         }
 
+        if (conn->has_streaming_links) {
+            assert(DEQ_IS_EMPTY(conn->streaming_link_pool));  // all links have been released
+            qdr_del_connection_ref(&core->streaming_connections, conn);
+        }
+
         qdr_connection_free(conn);
         conn = DEQ_HEAD(core->open_connections);
     }
+    assert(DEQ_SIZE(core->streaming_connections) == 0);
 
     // at this point all the conn identifiers have been freed
     qd_hash_free(core->conn_id_hash);
@@ -208,6 +229,7 @@ void qdr_core_free(qdr_core_t *core)
     if (core->control_links_by_mask_bit) free(core->control_links_by_mask_bit);
     if (core->data_links_by_mask_bit)    free(core->data_links_by_mask_bit);
     if (core->neighbor_free_mask)        qd_bitmask_free(core->neighbor_free_mask);
+    if (core->rnode_conns_by_mask_bit)   free(core->rnode_conns_by_mask_bit);
 
     free(core);
 }
@@ -456,6 +478,7 @@ void qdr_core_delete_link_route(qdr_core_t *core, qdr_link_route_t *lr)
     free(lr->del_prefix);
     free(lr->name);
     free(lr->pattern);
+    qd_hash_handle_free(lr->hash_handle);
     free_qdr_link_route_t(lr);
 }
 
@@ -472,6 +495,7 @@ void qdr_core_delete_auto_link(qdr_core_t *core, qdr_auto_link_t *al)
 
     free(al->name);
     free(al->external_addr);
+    qd_hash_handle_free(al->hash_handle);
     qdr_core_timer_free_CT(core, al->retry_timer);
     free_qdr_auto_link_t(al);
 }
@@ -480,6 +504,7 @@ static void free_address_config(qdr_address_config_t *addr)
 {
     free(addr->name);
     free(addr->pattern);
+    qd_hash_handle_free(addr->hash_handle);
     free_qdr_address_config_t(addr);
 }
 
@@ -558,14 +583,20 @@ void qdr_core_bind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_li
             qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_TWO_DEST, addr);
     } else {  // link->link_direction == QD_INCOMING
         qdr_add_link_ref(&addr->inlinks, link, QDR_LINK_LIST_CLASS_ADDRESS);
-        if (DEQ_SIZE(addr->inlinks) == 1) {
+        qdr_address_t *fallback_for = addr->fallback_for;
+
+        if (DEQ_SIZE(addr->inlinks) + (!!fallback_for ? DEQ_SIZE(fallback_for->inlinks) : 0) == 1)
             qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_BECAME_SOURCE, addr);
-            if (!!addr->fallback && !link->fallback)
-                qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_BECAME_SOURCE, addr->fallback);
-        } else if (DEQ_SIZE(addr->inlinks) == 2) {
+        else if (DEQ_SIZE(addr->inlinks) + (!!fallback_for ? DEQ_SIZE(fallback_for->inlinks) : 0) == 2)
             qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_TWO_SOURCE, addr);
-            if (!!addr->fallback && !link->fallback)
-                qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_TWO_SOURCE, addr->fallback);
+
+        qdr_address_t *fallback = addr->fallback;
+        if (!!fallback) {
+            size_t combined_in = DEQ_SIZE(addr->inlinks) + DEQ_SIZE(fallback->inlinks);
+            if (combined_in == 1)
+                qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_BECAME_SOURCE, fallback);
+            else if (combined_in == 2)
+                qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_TWO_SOURCE, fallback);
         }
     }
 }
@@ -581,24 +612,23 @@ void qdr_core_unbind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_
             qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_NO_LONGER_LOCAL_DEST, addr);
         } else if (DEQ_SIZE(addr->rlinks) == 1 && qd_bitmask_cardinality(addr->rnodes) == 0)
             qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_ONE_LOCAL_DEST, addr);
-        if (addr->edge_outlink == link) {
-            addr->edge_outlink = 0;
-        }
-    } else {
+    } else {  // link->link_direction == QD_INCOMING
         bool removed = qdr_del_link_ref(&addr->inlinks, link, QDR_LINK_LIST_CLASS_ADDRESS);
         if (removed) {
-            if (DEQ_SIZE(addr->inlinks) == 0) {
+            qdr_address_t *fallback_for = addr->fallback_for;
+            if (DEQ_SIZE(addr->inlinks) + (!!fallback_for ? DEQ_SIZE(fallback_for->inlinks) : 0) == 0)
                 qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_NO_LONGER_SOURCE, addr);
-                if (!!addr->fallback && !link->fallback)
-                    qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_NO_LONGER_SOURCE, addr->fallback);
-            } else if (DEQ_SIZE(addr->inlinks) == 1) {
+            else if (DEQ_SIZE(addr->inlinks) + (!!fallback_for ? DEQ_SIZE(fallback_for->inlinks) : 0) == 1)
                 qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_ONE_SOURCE, addr);
-                if (!!addr->fallback && !link->fallback)
-                    qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_ONE_SOURCE, addr->fallback);
+
+            qdr_address_t *fallback = addr->fallback;
+            if (!!fallback) {
+                size_t combined_in = DEQ_SIZE(addr->inlinks) + DEQ_SIZE(fallback->inlinks);
+                if (combined_in == 0)
+                    qdrc_event_addr_raise(core, QDRC_EVENT_ADDR_NO_LONGER_SOURCE, fallback);
+                else if (combined_in == 1)
+                    ; // Don't do anything in this case.  Raising the event will cause the fallback uplink to be dropped
             }
-        }
-        if (addr->edge_inlink == link) {
-            addr->edge_inlink = 0;
         }
     }
 }
@@ -678,6 +708,11 @@ void qdr_core_remove_address_config(qdr_core_t *core, qdr_address_config_t *addr
     qd_iterator_t *pattern = qd_iterator_string(addr->pattern, ITER_VIEW_ALL);
 
     // Remove the address from the list and the parse tree
+    if (addr->hash_handle) {
+        qd_hash_remove_by_handle(core->addr_lr_al_hash, addr->hash_handle);
+        qd_hash_handle_free(addr->hash_handle);
+        addr->hash_handle = 0;
+    }
     DEQ_REMOVE(core->addr_config, addr);
     qd_parse_tree_remove_pattern(core->addr_parse_tree, pattern);
     addr->ref_count--;

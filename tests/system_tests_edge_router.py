@@ -22,18 +22,21 @@ from __future__ import division
 from __future__ import absolute_import
 from __future__ import print_function
 
+import os
 from time import sleep
 from threading import Event
 from threading import Timer
 
 from proton import Message, Timeout
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, MgmtMsgProxy
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, MgmtMsgProxy, TestTimeout, PollTimeout
 from system_test import AsyncTestReceiver
 from system_test import AsyncTestSender
 from system_test import Logger
 from system_test import QdManager
 from system_test import unittest
+from system_test import Process
 from system_tests_link_routes import ConnLinkRouteService
+from test_broker import FakeBroker
 from test_broker import FakeService
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, DynamicNodeProperties
@@ -1258,7 +1261,7 @@ class RouterTest(TestCase):
         self.assertTrue("Router Statistics" in outs)
         self.assertTrue("Router Id                        EA1" in outs)
 
-        self.assertTrue("Types" in outs)
+        self.assertTrue("Memory Pools" in outs)
 
         outs = self.run_qdstat(['-c', '--all-routers'],
                                address=self.routers[2].addresses[0])
@@ -1279,7 +1282,7 @@ class RouterTest(TestCase):
         self.assertTrue("Router Statistics" in outs)
         self.assertTrue("Router Id                        EA1" in outs)
 
-        self.assertTrue("Types" in outs)
+        self.assertTrue("Memory Pools" in outs)
 
     def test_69_interior_qdstat_all_routers(self):
         # Connects to an interior router and runs "qdstat --all-routers"
@@ -1300,12 +1303,12 @@ class RouterTest(TestCase):
                                address=self.routers[0].addresses[0])
         self.assertEqual(outs.count("Router Links"), 2)
         self.assertEqual(outs.count("Router Addresses"), 2)
-        self.assertEqual(outs.count("Connections"), 4)
+        self.assertEqual(outs.count("Connections"), 12)
         self.assertEqual(outs.count("AutoLinks"), 2)
         self.assertEqual(outs.count("Auto Links"), 2)
         self.assertEqual(outs.count("Link Routes"), 4)
         self.assertEqual(outs.count("Router Statistics"), 2)
-        self.assertEqual(outs.count("Types"), 2)
+        self.assertEqual(outs.count("Memory Pools"), 2)
 
         outs = self.run_qdstat(['--all-routers', '-nv'],
                                address=self.routers[0].addresses[0])
@@ -1874,6 +1877,9 @@ class LinkRouteProxyTest(TestCase):
         self.assertEqual(1, fs.in_count)
         self.assertEqual(1, fs.out_count)
 
+        bc_a.close()
+        bc_b.close()
+
     def test_51_link_route_proxy_configured(self):
         """
         Activate the configured link routes via a FakeService, verify proxies
@@ -1957,22 +1963,6 @@ class LinkRouteProxyTest(TestCase):
         self._wait_address_gone(self.INT_A, "Conn/*/One")
 
 
-class Timeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.timeout()
-
-
-class PollTimeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.poll_timeout()
-
-
 class ConnectivityTest(MessagingHandler):
     def __init__(self, interior_host, edge_host, edge_id):
         super(ConnectivityTest, self).__init__()
@@ -1992,7 +1982,7 @@ class ConnectivityTest(MessagingHandler):
         self.edge_conn.close()
 
     def on_start(self, event):
-        self.timer          = event.reactor.schedule(10.0, Timeout(self))
+        self.timer          = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.interior_conn  = event.container.connect(self.interior_host)
         self.edge_conn      = event.container.connect(self.edge_host)
         self.reply_receiver = event.container.create_receiver(self.interior_conn, dynamic=True)
@@ -2048,7 +2038,7 @@ class DynamicAddressTest(MessagingHandler):
         self.sender_conn.close()
 
     def on_start(self, event):
-        self.timer         = event.reactor.schedule(5.0, Timeout(self))
+        self.timer         = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.receiver_conn = event.container.connect(self.receiver_host)
         self.sender_conn   = event.container.connect(self.sender_host)
         self.receiver      = event.container.create_receiver(self.receiver_conn, dynamic=True)
@@ -2129,7 +2119,7 @@ class MobileAddressAnonymousTest(MessagingHandler):
 
 
     def on_start(self, event):
-        self.timer = event.reactor.schedule(15.0 if self.large_msg else 5.0, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.receiver_conn = event.container.connect(self.receiver_host)
         self.sender_conn   = event.container.connect(self.sender_host)
         self.receiver      = event.container.create_receiver(self.receiver_conn, self.address)
@@ -2259,7 +2249,7 @@ class MobileAddressTest(MessagingHandler):
 
     def on_start(self, event):
         self.logger.log("on_start address=%s" % self.address)
-        self.timer         = event.reactor.schedule(5.0, self)
+        self.timer         = event.reactor.schedule(TIMEOUT, self)
         self.receiver_conn = event.container.connect(self.receiver_host)
         self.sender_conn   = event.container.connect(self.sender_host)
         self.receiver      = event.container.create_receiver(self.receiver_conn, self.address)
@@ -2386,7 +2376,7 @@ class MobileAddressOneSenderTwoReceiversTest(MessagingHandler):
         self.sender_conn.close()
 
     def on_start(self, event):
-        self.timer = event.reactor.schedule(5.0, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
 
         # Create two receivers
         self.receiver1_conn = event.container.connect(self.receiver1_host)
@@ -2549,8 +2539,7 @@ class MobileAddressMulticastTest(MessagingHandler):
                 local_node.close()
 
     def on_start(self, event):
-        self.timer = event.reactor.schedule(20.0 if self.large_msg else 10.0,
-                                            Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         # Create two receivers
         self.receiver1_conn = event.container.connect(self.receiver1_host)
         self.receiver2_conn = event.container.connect(self.receiver2_host)
@@ -2783,7 +2772,7 @@ class MobileAddressEventTest(MessagingHandler):
             self.timeout()
 
     def on_start(self, event):
-        self.timer = event.reactor.schedule(10.0, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
 
         # Create two receivers
         self.receiver1_conn = event.container.connect(self.receiver1_host)
@@ -2889,6 +2878,502 @@ class EdgeListenerSender(TestCase):
         blocking_connection = BlockingConnection(addr)
         blocking_sender = blocking_connection.create_sender(address="multicast")
         self.assertTrue(blocking_sender!=None)
+
+
+class StreamingMessageTest(TestCase):
+    """
+    Test streaming message flows across edge and interior routers
+    """
+
+    SIG_TERM = -15  # Process.terminate() sets this exit value
+    BODY_MAX = 4294967295  # AMQP 1.0 allows types of length 2^32-1
+
+    @classmethod
+    def setUpClass(cls):
+        """Start a router"""
+        super(StreamingMessageTest, cls).setUpClass()
+
+        def router(name, mode, extra):
+            config = [
+                ('router', {'mode': mode, 'id': name}),
+                ('listener', {'role': 'normal',
+                              'port': cls.tester.get_port(),
+                              'maxFrameSize': 65535}),
+
+                ('address', {'prefix': 'closest',   'distribution': 'closest'}),
+                ('address', {'prefix': 'balanced',  'distribution': 'balanced'}),
+                ('address', {'prefix': 'multicast', 'distribution': 'multicast'})
+            ]
+
+            if extra:
+                config.extend(extra)
+            config = Qdrouterd.Config(config)
+            cls.routers.append(cls.tester.qdrouterd(name, config, wait=False))
+            return cls.routers[-1]
+
+        # configuration:
+        # two edge routers connected via 2 interior routers.
+        # fake broker (route-container) on EB1
+        #
+        #  +-------+    +---------+    +---------+    +-------+
+        #  |  EA1  |<==>|  INT.A  |<==>|  INT.B  |<==>|  EB1  |<-- Fake Broker
+        #  +-------+    +---------+    +---------+    +-------+
+        #
+
+        cls.routers = []
+
+        interrouter_port = cls.tester.get_port()
+        cls.INTA_edge_port   = cls.tester.get_port()
+        cls.INTB_edge_port   = cls.tester.get_port()
+
+        router('INT.A', 'interior',
+               [('listener', {'role': 'inter-router', 'port': interrouter_port}),
+                ('listener', {'role': 'edge', 'port': cls.INTA_edge_port})])
+        cls.INT_A = cls.routers[0]
+        cls.INT_A.listener = cls.INT_A.addresses[0]
+
+        router('INT.B', 'interior',
+               [('connector', {'name': 'connectorToA', 'role': 'inter-router',
+                               'port': interrouter_port}),
+                ('listener', {'role': 'edge', 'port': cls.INTB_edge_port})])
+        cls.INT_B = cls.routers[1]
+        cls.INT_B.listener = cls.INT_B.addresses[0]
+
+        router('EA1', 'edge',
+               [('listener', {'name': 'rc', 'role': 'route-container',
+                              'port': cls.tester.get_port()}),
+                ('connector', {'name': 'uplink', 'role': 'edge',
+                               'port': cls.INTA_edge_port})
+               ])
+        cls.EA1 = cls.routers[2]
+        cls.EA1.listener = cls.EA1.addresses[0]
+
+        router('EB1', 'edge',
+               [('connector', {'name': 'uplink', 'role': 'edge',
+                               'port': cls.INTB_edge_port}),
+                # to connect to the fake broker
+                ('connector', {'name': 'broker',
+                               'role': 'route-container',
+                               'host': '127.0.0.1',
+                               'port': cls.tester.get_port(),
+                               'saslMechanisms': 'ANONYMOUS'}),
+                ('linkRoute', {'pattern': 'MyLinkRoute.#', 'containerId':
+                               'FakeBroker', 'direction': 'in'}),
+                ('linkRoute', {'pattern': 'MyLinkRoute.#', 'containerId':
+                               'FakeBroker', 'direction': 'out'})
+               ])
+        cls.EB1 = cls.routers[3]
+        cls.EB1.listener = cls.EB1.addresses[0]
+        cls.EB1.route_container = cls.EB1.connector_addresses[1];
+
+        cls.INT_A.wait_router_connected('INT.B')
+        cls.INT_B.wait_router_connected('INT.A')
+        cls.EA1.wait_connectors()
+
+        cls._container_index = 0
+
+        cls.skip = { 'test_01' : 0,
+                     'test_02' : 0,
+                     'test_03' : 0,
+                     'test_50' : 0,
+                     'test_51' : 0,
+                     'test_52' : 0
+                   }
+
+    def _get_address(self, router, address):
+        """Lookup address in route table"""
+        a_type = 'org.apache.qpid.dispatch.router.address'
+        addrs = router.management.query(a_type).get_dicts()
+        return list(filter(lambda a: a['name'].find(address) != -1,
+                           addrs))
+
+    def _wait_address_gone(self, router, address):
+        """Block until address is removed from the route table"""
+        while self._get_address(router, address):
+            sleep(0.1)
+
+    def _start_broker_EB1(self):
+        # start a new broker on EB1
+        fake_broker = FakeBroker(self.EB1.route_container)
+        # wait until the link route appears on the interior routers
+        self.INT_B.wait_address("MyLinkRoute")
+        self.INT_A.wait_address("MyLinkRoute")
+        return fake_broker
+
+    def spawn_receiver(self, router, count, address, expect=None):
+        if expect is None:
+            expect = Process.EXIT_OK
+        cmd = ["test-receiver",
+               "-i", "TestReceiver-%d" % self._container_index,
+               "-a", router.listener,
+               "-c", str(count),
+               "-s", address]
+        self._container_index += 1
+        env = dict(os.environ, PN_TRACE_FRM="1")
+        return self.popen(cmd, expect=expect, env=env)
+
+    def spawn_sender(self, router, count, address, expect=None, size=None):
+        if expect is None:
+            expect = Process.EXIT_OK
+        if size is None:
+            size = "-sm"
+        cmd = ["test-sender",
+               "-i", "TestSender-%d" % self._container_index,
+               "-a", router.listener,
+               "-c", str(count),
+               "-t", address,
+               size]
+        self._container_index += 1
+        env = dict(os.environ, PN_TRACE_FRM="1")
+        return self.popen(cmd, expect=expect, env=env)
+
+    def spawn_clogger(self, router, count, address,
+                      size, pause_ms, expect=None):
+        if expect is None:
+            expect = Process.EXIT_OK
+        cmd = ["clogger",
+               "-a", router.listener,
+               "-c", str(count),
+               "-t", address,
+               "-s", str(size),
+               "-D",
+               "-P", str(pause_ms)]
+        env = dict(os.environ, PN_TRACE_FRM="1")
+        return self.popen(cmd, expect=expect, env=env)
+
+    def test_01_streaming_link_route(self):
+        """
+        Verify that a streaming message can be delivered over a link route
+        """
+
+        fake_broker = self._start_broker_EB1()
+
+        rx = self.spawn_receiver(self.EB1, count=1,
+                                 address="MyLinkRoute/test-address")
+
+        # sender a streaming message, "-sx" causes the sender to generate a
+        # large streaming message
+        tx = self.spawn_sender(self.EA1, count=1,
+                               address="MyLinkRoute/test-address",
+                               expect=Process.EXIT_OK,
+                               size="-sx")
+
+        out_text, out_error = tx.communicate(timeout=TIMEOUT)
+        if tx.returncode:
+            raise Exception("Sender failed: %s %s" % (out_text, out_error))
+
+        out_text, out_error = rx.communicate(timeout=TIMEOUT)
+        if rx.returncode:
+            raise Exception("Receiver failed: %s %s" % (out_text, out_error))
+
+        fake_broker.join()
+        self.assertEqual(1, fake_broker.in_count)
+        self.assertEqual(1, fake_broker.out_count)
+
+        # cleanup - not EB1 since MyLinkRoute is configured
+        self._wait_address_gone(self.EA1, "MyLinkRoute")
+        self._wait_address_gone(self.INT_A, "MyLinkRoute")
+        self._wait_address_gone(self.INT_B, "MyLinkRoute")
+
+    def _streaming_test(self, address):
+
+        # send a streaming message to address across the routers
+        rx = self.spawn_receiver(self.EB1,
+                                 count=1,
+                                 address=address)
+        self.INT_A.wait_address(address)
+
+        tx = self.spawn_sender(self.EA1,
+                               count=1,
+                               address=address,
+                               expect=Process.EXIT_OK,
+                               size="-sx")
+        out_text, out_error = tx.communicate(timeout=TIMEOUT)
+        if tx.returncode:
+            raise Exception("Sender failed: %s %s" % (out_text, out_error))
+
+        out_text, out_error = rx.communicate(timeout=TIMEOUT)
+        if rx.returncode:
+            raise Exception("receiver failed: %s %s" % (out_text, out_error))
+
+        self._wait_address_gone(self.INT_B, address)
+        self._wait_address_gone(self.INT_A, address)
+        self._wait_address_gone(self.EA1, address)
+        self._wait_address_gone(self.EB1, address)
+
+    def test_02_streaming_closest(self):
+        """
+        Verify that a streaming message with closest treatment is forwarded
+        correctly.
+        """
+        self._streaming_test("closest/test-address")
+
+    def test_03_streaming_multicast(self):
+        """
+        Verify a streaming multicast message is forwarded correctly
+        """
+
+        routers = [self.EB1, self.INT_B, self.INT_A]
+        streaming_rx = [self.spawn_receiver(router,
+                                            count=1,
+                                            address="multicast/test-address")
+                        for router in routers]
+        self.EB1.wait_address("multicast/test-address", subscribers=1)
+        self.INT_B.wait_address("multicast/test-address", subscribers=2, remotes=1)
+        self.INT_A.wait_address("multicast/test-address", subscribers=1, remotes=1)
+
+        # This sender will end up multicasting the message to ALL receivers.
+        tx = self.spawn_sender(self.EA1,
+                               count=1,
+                               address="multicast/test-address",
+                               expect=Process.EXIT_OK,
+                               size="-sx")
+
+        out_text, out_error = tx.communicate(timeout=TIMEOUT)
+        if tx.returncode:
+            raise Exception("sender failed: %s %s" % (out_text, out_error))
+
+        for rx in streaming_rx:
+            out_text, out_error = rx.communicate(timeout=TIMEOUT)
+            if rx.returncode:
+                raise Exception("receiver failed: %s %s" % (out_text, out_error))
+
+        self._wait_address_gone(self.EA1, "multicast/test_address")
+        self._wait_address_gone(self.EB1, "multicast/test_address")
+        self._wait_address_gone(self.INT_A, "multicast/test_address")
+        self._wait_address_gone(self.INT_B, "multicast/test_address")
+
+    def test_04_streaming_balanced(self):
+        """
+        Verify streaming balanced messages are forwarded correctly.
+        """
+        balanced_rx = [self.spawn_receiver(self.EB1,
+                                           count=1,
+                                           address="balanced/test-address")
+                       for _ in range(2)]
+        self.EB1.wait_address("balanced/test-address", subscribers=2)
+
+        tx = self.spawn_sender(self.EA1,
+                               count=2,
+                               address="balanced/test-address")
+        out_text, out_error = tx.communicate(timeout=TIMEOUT)
+        if tx.returncode:
+            raise Exception("sender failed: %s %s" % (out_text, out_error))
+
+        for rx in balanced_rx:
+            out_text, out_error = rx.communicate(timeout=TIMEOUT)
+            if rx.returncode:
+                raise Exception("receiver failed: %s %s" % (out_text, out_error))
+
+        self._wait_address_gone(self.EA1, "balanced/test-address")
+        self._wait_address_gone(self.EB1,  "balanced/test-address")
+        self._wait_address_gone(self.INT_A,  "balanced/test-address")
+        self._wait_address_gone(self.INT_B,  "balanced/test-address")
+
+    def test_10_streaming_link_route_parallel(self):
+        """
+        Ensure that a streaming message sent across a link route does not block other
+        clients sending to the same container address.
+        """
+
+        fake_broker = self._start_broker_EB1()
+
+        clogger = self.spawn_clogger(self.EA1,
+                                     count=1,
+                                     address="MyLinkRoute/clogger",
+                                     size=self.BODY_MAX,
+                                     pause_ms=100,
+                                     expect=self.SIG_TERM)
+        sleep(0.5)  # allow clogger to set up streaming links
+
+        # start a sender in parallel
+        tx = self.spawn_sender(self.EA1, count=100, address="MyLinkRoute/clogger")
+        out_text, out_error = tx.communicate(timeout=TIMEOUT)
+        if tx.returncode:
+            raise Exception("Sender failed: %s %s" % (out_text, out_error))
+
+        clogger.terminate()
+        clogger.wait()
+
+        fake_broker.join()
+        self.assertEqual(100, fake_broker.in_count)
+
+        # cleanup - not EB1 since MyLinkRoute is configured
+        self._wait_address_gone(self.EA1, "MyLinkRoute")
+        self._wait_address_gone(self.INT_A, "MyLinkRoute")
+        self._wait_address_gone(self.INT_B, "MyLinkRoute")
+
+    def test_11_streaming_closest_parallel(self):
+        """
+        Ensure that a streaming message of closest treatment does not block
+        other non-streaming messages.
+        """
+
+        # this receiver should get the streaming message
+        rx1 = self.spawn_receiver(self.EB1,
+                                  count=1,
+                                  address="closest/test-address",
+                                  expect=self.SIG_TERM)
+
+        self.INT_A.wait_address("closest/test-address");
+
+        clogger = self.spawn_clogger(self.EA1,
+                                     count=1,
+                                     address="closest/test-address",
+                                     size=self.BODY_MAX,
+                                     pause_ms=100,
+                                     expect=self.SIG_TERM)
+        sleep(0.5)
+
+        # this receiver has less cost than rx1 since it is 1 less hop from the
+        # sender
+        rx2 = self.spawn_receiver(self.INT_A,
+                                  count=1,
+                                  address="closest/test-address")
+
+        # wait for rx2 to set up links to INT_A:
+        self.INT_A.wait_address("closest/test-address", subscribers=1, remotes=1)
+
+        # start a sender in parallel. Expect the message to arrive at rx1
+        tx = self.spawn_sender(self.EA1, count=1, address="closest/test-address")
+        out_text, out_error = tx.communicate(timeout=TIMEOUT)
+        if tx.returncode:
+            raise Exception("Sender failed: %s %s" % (out_text, out_error))
+
+        out_text, out_error = rx2.communicate(timeout=TIMEOUT)
+        if rx2.returncode:
+            raise Exception("receiver failed: %s %s" % (out_text, out_error))
+
+        rx1.terminate()
+        rx1.wait()
+
+        clogger.terminate()
+        clogger.wait()
+
+        self._wait_address_gone(self.EA1, "closest/test-address")
+        self._wait_address_gone(self.EB1,  "closest/test-address")
+        self._wait_address_gone(self.INT_A,  "closest/test-address")
+        self._wait_address_gone(self.INT_B,  "closest/test-address")
+
+    def test_12_streaming_multicast_parallel(self):
+        """
+        Verify a streaming multicast message does not block other non-streaming
+        multicast messages
+
+        Start a group of receivers to consume the streaming message.  Then
+        start a separate group to consume the non-streaming message.  Ensure
+        that the second group properly receives the non-streaming message.
+        """
+
+        routers = [self.EB1, self.INT_A, self.INT_B]
+        streaming_rx = [self.spawn_receiver(router,
+                                            count=1,
+                                            address="multicast/test-address",
+                                            expect=self.SIG_TERM)
+                        for router in routers]
+
+        self.EB1.wait_address("multicast/test-address", subscribers=1)
+        self.INT_B.wait_address("multicast/test-address", subscribers=2, remotes=1)
+        self.INT_A.wait_address("multicast/test-address", subscribers=1, remotes=1)
+
+        # this will block all of the above receivers with a streaming message
+
+        clogger = self.spawn_clogger(self.EA1,
+                                     count=1,
+                                     address="multicast/test-address",
+                                     size=self.BODY_MAX,
+                                     pause_ms=100,
+                                     expect=self.SIG_TERM)
+        sleep(0.5)
+
+        # this second set of receivers should be able to receive multicast
+        # messages sent _after_ the clogger's streaming message
+
+        blocking_rx = [self.spawn_receiver(router,
+                                           count=1,
+                                           address="multicast/test-address")
+                       for router in routers]
+
+        self.EB1.wait_address("multicast/test-address", subscribers=2)
+        self.INT_B.wait_address("multicast/test-address", subscribers=3, remotes=1)
+        self.INT_A.wait_address("multicast/test-address", subscribers=2, remotes=1)
+
+        # This sender will end up multicasting the message to ALL receivers.
+        # Expect it to block since the first set of receivers will never get
+        # around to acking the message
+        tx = self.spawn_sender(self.EA1,
+                               count=1,
+                               address="multicast/test-address",
+                               expect=self.SIG_TERM)
+
+        # however the second set of receivers _should_ end up getting the
+        # message, acking it and exit (count=1)
+        for rx in blocking_rx:
+            out_text, out_error = rx.communicate(timeout=TIMEOUT)
+            if rx.returncode:
+                raise Exception("receiver failed: %s %s" % (out_text, out_error))
+
+        tx.terminate()
+        tx.wait()
+
+        for rx in streaming_rx:
+            rx.terminate()
+            rx.wait()
+
+        clogger.terminate()
+        clogger.wait()
+
+        self._wait_address_gone(self.EA1, "multicast/test-address")
+        self._wait_address_gone(self.EB1,  "multicast/test-address")
+        self._wait_address_gone(self.INT_A,  "multicast/test-address")
+        self._wait_address_gone(self.INT_B,  "multicast/test-address")
+
+    def test_13_streaming_balanced_parallel(self):
+        """
+        Verify streaming does not block other balanced traffic.
+        """
+
+        # create 2 consumers on the balanced address. Since our Process class
+        # requires the exit code to be known when the process is spawned and we
+        # cannot predict which receiver will get the streaming message use
+        # count=2 to force the receivers to run until we force termination
+        balanced_rx = [self.spawn_receiver(self.EB1,
+                                           count=2,
+                                           address="balanced/test-address",
+                                           expect=self.SIG_TERM)
+                       for _ in range(2)]
+        self.EB1.wait_address("balanced/test-address", subscribers=2)
+
+        # this will block one of the above receivers with a streaming message
+
+        clogger = self.spawn_clogger(self.EA1,
+                                     count=1,
+                                     address="balanced/test-address",
+                                     size=self.BODY_MAX,
+                                     pause_ms=100,
+                                     expect=self.SIG_TERM)
+        sleep(0.5)
+
+        # This sender should get its message through to the other receiver
+        tx = self.spawn_sender(self.EA1,
+                               count=1,
+                               address="balanced/test-address")
+        out_text, out_error = tx.communicate(timeout=TIMEOUT)
+        if tx.returncode:
+            raise Exception("sender failed: %s %s" % (out_text, out_error))
+
+        for rx in balanced_rx:
+            rx.terminate()
+            rx.wait()
+
+        clogger.terminate()
+        clogger.wait()
+
+        self._wait_address_gone(self.EA1, "balanced/test-address")
+        self._wait_address_gone(self.EB1,  "balanced/test-address")
+        self._wait_address_gone(self.INT_A,  "balanced/test-address")
+        self._wait_address_gone(self.INT_B,  "balanced/test-address")
+
 
 if __name__== '__main__':
     unittest.main(main_module())

@@ -27,15 +27,10 @@ import os, json, re, signal
 import sys
 import time
 
-from system_test import TestCase, Qdrouterd, main_module, Process, TIMEOUT, DIR, QdManager, Logger
-from subprocess import PIPE, STDOUT
-from proton import ConnectionException, Timeout, Url, symbol, Message
+from system_test import TestCase, Qdrouterd, main_module, Process, TIMEOUT, DIR, QdManager, Logger, TestTimeout
+from proton import Timeout, Message
 from proton.handlers import MessagingHandler
-from proton.reactor import Container, ReceiverOption
-from proton.utils import BlockingConnection, LinkDetached, SyncRequestResponse
-from qpid_dispatch_internal.policy.policy_util import is_ipv6_enabled
-from qpid_dispatch_internal.compat import dict_iteritems
-from test_broker import FakeBroker
+from proton.reactor import Container
 
 # How many worker threads?
 W_THREADS = 2
@@ -43,18 +38,6 @@ W_THREADS = 2
 # Define oversize denial condition
 OVERSIZE_CONDITION_NAME = "amqp:connection:forced"
 OVERSIZE_CONDITION_DESC = "Message size exceeded"
-
-# Internal test timeout
-TEST_TIMEOUT_SECONDS = 60
-
-
-class Timeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.timeout()
-
 
 #
 # DISPATCH-975 Detect that an oversize message is blocked.
@@ -114,7 +97,7 @@ class OversizeMessageTransferTest(MessagingHandler):
 
     def on_start(self, event):
         self.logger.log("on_start")
-        self.timer = event.reactor.schedule(TEST_TIMEOUT_SECONDS, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.logger.log("on_start: opening receiver connection to %s" % (self.receiver_host.addresses[0]))
         self.receiver_conn = event.container.connect(self.receiver_host.addresses[0])
         self.logger.log("on_start: opening   sender connection to %s" % (self.sender_host.addresses[0]))
@@ -262,6 +245,11 @@ INTA_MAX_SIZE = 100000
 INTB_MAX_SIZE = 150000
 EB1_MAX_SIZE = 200000
 
+# DISPATCH-1645 S32 max size is chosen to expose signed 32-bit
+# wraparound bug. Sizes with bit 31 set look negative when used as
+# C 'int' and prevent any message from passing policy checks.
+S32_MAX_SIZE = 2**31
+
 # Interior routers enforce max size directly.
 # Edge routers are also checked by the attached interior router.
 
@@ -301,20 +289,21 @@ class MaxMessageSizeBlockOversize(TestCase):
                               'port': cls.tester.get_port()}),
                 ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
                 ('policy', {'maxConnections': 100, 'enableVhostPolicy': 'true', 'maxMessageSize': max_size, 'defaultVhost': '$default'}),
-                ('vhost', {'hostname': '$default', 'allowUnknownUser': 'true',
-                    'groups': [(
-                        '$default', {
-                            'users': '*',
-                            'maxConnections': 100,
-                            'remoteHosts': '*',
-                            'sources': '*',
-                            'targets': '*',
-                            'allowAnonymousSender': 'true',
-                            'allowWaypointLinks': 'true',
-                            'allowDynamicSource': 'true'
-                        }
-                    )]}
-                )
+                ('vhost', {'hostname': '$default',
+                           'allowUnknownUser': 'true',
+                           'groups': {
+                               '$default': {
+                                   'users': '*',
+                                   'maxConnections': 100,
+                                   'remoteHosts': '*',
+                                   'sources': '*',
+                                   'targets': '*',
+                                   'allowAnonymousSender': 'true',
+                                   'allowWaypointLinks': 'true',
+                                   'allowDynamicSource': 'true'
+                               }
+                           }
+                })
             ]
 
             if extra:
@@ -378,6 +367,10 @@ class MaxMessageSizeBlockOversize(TestCase):
                               'port': cls.tester.get_port()})])
         cls.EB1 = cls.routers[3]
         cls.EB1.listener = cls.EB1.addresses[0]
+
+        router('S32', 'standalone', S32_MAX_SIZE, [])
+        cls.S32 = cls.routers[4]
+        cls.S32.listener = cls.S32.addresses[0]
 
         cls.INT_A.wait_router_connected('INT.B')
         cls.INT_B.wait_router_connected('INT.A')
@@ -787,6 +780,19 @@ class MaxMessageSizeBlockOversize(TestCase):
         test.run()
         if test.error is not None:
             test.logger.log("test_5f test error: %s" % (test.error))
+            test.logger.dump()
+        self.assertTrue(test.error is None)
+
+
+    def test_s32_allow_gt_signed_32bit_max(self):
+        test = OversizeMessageTransferTest(MaxMessageSizeBlockOversize.S32,
+                                           MaxMessageSizeBlockOversize.S32,
+                                           "s32",
+                                           message_size=200,
+                                           expect_block=False)
+        test.run()
+        if test.error is not None:
+            test.logger.log("test_s32 test error: %s" % (test.error))
             test.logger.dump()
         self.assertTrue(test.error is None)
 
