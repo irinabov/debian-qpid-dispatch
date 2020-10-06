@@ -29,6 +29,7 @@
 #include <qpid/dispatch/failoverlist.h>
 #include <qpid/dispatch/alloc.h>
 #include <qpid/dispatch/platform.h>
+#include <qpid/dispatch/proton_utils.h>
 
 #include <proton/event.h>
 #include <proton/listener.h>
@@ -97,7 +98,7 @@ char *COMPONENT_SEPARATOR = ";";
 
 static const int BACKLOG = 50;  /* Listening backlog */
 
-static void setup_ssl_sasl_and_open(qd_connection_t *ctx);
+static bool setup_ssl_sasl_and_open(qd_connection_t *ctx); // true if ssl, sasl, and open succeeded
 static qd_failover_item_t *qd_connector_get_conn_info(qd_connector_t *ct);
 
 /**
@@ -403,8 +404,6 @@ static qd_error_t listener_setup_ssl(qd_connection_t *ctx, const qd_server_confi
     }
 
     const char *trusted = config->ssl_trusted_certificate_db;
-    if (config->ssl_trusted_certificates)
-        trusted = config->ssl_trusted_certificates;
 
     // do we force the peer to send a cert?
     if (config->ssl_require_peer_authentication) {
@@ -432,17 +431,36 @@ static qd_error_t listener_setup_ssl(qd_connection_t *ctx, const qd_server_confi
 
 static void decorate_connection(qd_server_t *qd_server, pn_connection_t *conn, const qd_server_config_t *config)
 {
-    size_t clen = strlen(QD_CAPABILITY_ANONYMOUS_RELAY);
-
     //
     // Set the container name
     //
     pn_connection_set_container(conn, qd_server->container_name);
 
     //
-    // Offer ANONYMOUS_RELAY capability
+    // Advertise our container capabilities.
     //
-    pn_data_put_symbol(pn_connection_offered_capabilities(conn), pn_bytes(clen, (char*) QD_CAPABILITY_ANONYMOUS_RELAY));
+    {
+        // offered: extension capabilities this router supports
+        pn_data_t *ocaps = pn_connection_offered_capabilities(conn);
+        pn_data_put_array(ocaps, false, PN_SYMBOL);
+        pn_data_enter(ocaps);
+        pn_data_put_symbol(ocaps, pn_bytes(strlen(QD_CAPABILITY_ANONYMOUS_RELAY), (char*) QD_CAPABILITY_ANONYMOUS_RELAY));
+        pn_data_put_symbol(ocaps, pn_bytes(strlen(QD_CAPABILITY_STREAMING_LINKS), (char*) QD_CAPABILITY_STREAMING_LINKS));
+        pn_data_exit(ocaps);
+
+        // The desired-capability list defines which extension capabilities the
+        // sender MAY use if the receiver offers them (i.e., they are in the
+        // offered-capabilities list received by the sender of the
+        // desired-capabilities). The sender MUST NOT attempt to use any
+        // capabilities it did not declare in the desired-capabilities
+        // field.
+        ocaps = pn_connection_desired_capabilities(conn);
+        pn_data_put_array(ocaps, false, PN_SYMBOL);
+        pn_data_enter(ocaps);
+        pn_data_put_symbol(ocaps, pn_bytes(strlen(QD_CAPABILITY_ANONYMOUS_RELAY), (char*) QD_CAPABILITY_ANONYMOUS_RELAY));
+        pn_data_put_symbol(ocaps, pn_bytes(strlen(QD_CAPABILITY_STREAMING_LINKS), (char*) QD_CAPABILITY_STREAMING_LINKS));
+        pn_data_exit(ocaps);
+    }
 
     //
     // Create the connection properties map
@@ -508,6 +526,31 @@ static void decorate_connection(qd_server_t *qd_server, pn_connection_t *conn, c
                 pn_data_exit(pn_connection_properties(conn));
             }
             pn_data_exit(pn_connection_properties(conn));
+        }
+
+        // Append any user-configured properties. conn_props is a pn_data_t PN_MAP
+        // type. Append the map elements - not the map itself!
+        //
+        if (config->conn_props) {
+            pn_data_t *outp = pn_connection_properties(conn);
+
+            pn_data_rewind(config->conn_props);
+            pn_data_next(config->conn_props);
+            assert(pn_data_type(config->conn_props) == PN_MAP);
+            const size_t count = pn_data_get_map(config->conn_props);
+            pn_data_enter(config->conn_props);
+            for (size_t i = 0; i < count / 2; ++i) {
+                // key: the key must be of type Symbol.  The python agent has
+                // validated the keys as ASCII strings, but the JSON converter does
+                // not provide a Symbol type so all the keys in conn_props are
+                // PN_STRING.
+                pn_data_next(config->conn_props);
+                assert(pn_data_type(config->conn_props) == PN_STRING);
+                pn_data_put_symbol(outp, pn_data_get_string(config->conn_props));
+                // put value
+                pn_data_next(config->conn_props);
+                qdpn_data_insert(outp, config->conn_props);
+            }
         }
     }
 
@@ -710,7 +753,13 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
                ctx->connection_id, name, ctx->rhost_port);
     } else if (ctx->connector) { /* Establishing an outgoing connection */
         config = &ctx->connector->config;
-        setup_ssl_sasl_and_open(ctx);
+        if (!setup_ssl_sasl_and_open(ctx)) {
+            qd_log(ctx->server->log_source, QD_LOG_ERROR, "[C%"PRIu64"] Connection aborted due to internal setup error",
+               ctx->connection_id);
+            pn_transport_close_tail(tport);
+            pn_transport_close_head(tport);
+            return;
+        }
 
     } else {                    /* No connector and no listener */
         connect_fail(ctx, QD_AMQP_COND_INTERNAL_ERROR, "unknown Connection");
@@ -1125,7 +1174,7 @@ static void try_open_lh(qd_connector_t *ct)
     pn_proactor_connect(ct->server->proactor, ctx->pn_conn, host_port);
 }
 
-static void setup_ssl_sasl_and_open(qd_connection_t *ctx)
+static bool setup_ssl_sasl_and_open(qd_connection_t *ctx)
 {
     qd_connector_t *ct = ctx->connector;
     const qd_server_config_t *config = &ct->config;
@@ -1138,31 +1187,31 @@ static void setup_ssl_sasl_and_open(qd_connection_t *ctx)
         pn_ssl_domain_t *domain = pn_ssl_domain(PN_SSL_MODE_CLIENT);
 
         if (!domain) {
-            qd_error(QD_ERROR_RUNTIME, "SSL domain failed for connection to %s:%s",
-                     ct->config.host, ct->config.port);
-            return;
+            qd_error(QD_ERROR_RUNTIME, "SSL domain allocation failed for connection [C%"PRIu64"] to %s:%s",
+                     ctx->connection_id, config->host, config->port);
+            return false;
         }
+
+        bool failed = false;
 
         // set our trusted database for checking the peer's cert:
         if (config->ssl_trusted_certificate_db) {
             if (pn_ssl_domain_set_trusted_ca_db(domain, config->ssl_trusted_certificate_db)) {
                 qd_log(ct->server->log_source, QD_LOG_ERROR,
-                       "SSL CA configuration failed for %s:%s",
-                       ct->config.host, ct->config.port);
+                       "SSL CA configuration failed for connection [C%"PRIu64"] to %s:%s",
+                       ctx->connection_id, config->host, config->port);
+                failed = true;
             }
         }
-        // should we force the peer to provide a cert?
-        if (config->ssl_require_peer_authentication) {
-            const char *trusted = (config->ssl_trusted_certificates)
-                ? config->ssl_trusted_certificates
-                : config->ssl_trusted_certificate_db;
-            if (pn_ssl_domain_set_peer_authentication(domain,
-                                                      PN_SSL_VERIFY_PEER,
-                                                      trusted)) {
-                qd_log(ct->server->log_source, QD_LOG_ERROR,
-                       "SSL peer auth configuration failed for %s:%s",
-                       config->host, config->port);
-            }
+
+        // peer must provide a cert
+        if (pn_ssl_domain_set_peer_authentication(domain,
+                                                  PN_SSL_VERIFY_PEER,
+                                                  config->ssl_trusted_certificate_db)) {
+            qd_log(ct->server->log_source, QD_LOG_ERROR,
+                    "SSL peer auth configuration failed for connection [C%"PRIu64"] to %s:%s",
+                    ctx->connection_id, config->host, config->port);
+                failed = true;
         }
 
         // configure our certificate if the peer requests one:
@@ -1172,39 +1221,54 @@ static void setup_ssl_sasl_and_open(qd_connection_t *ctx)
                                               config->ssl_private_key_file,
                                               config->ssl_password)) {
                 qd_log(ct->server->log_source, QD_LOG_ERROR,
-                       "SSL local configuration failed for %s:%s",
-                       config->host, config->port);
+                       "SSL local certificate configuration failed for connection [C%"PRIu64"] to %s:%s",
+                       ctx->connection_id, config->host, config->port);
+                failed = true;
             }
         }
 
         if (config->ssl_ciphers) {
             if (pn_ssl_domain_set_ciphers(domain, config->ssl_ciphers)) {
                 qd_log(ct->server->log_source, QD_LOG_ERROR,
-                       "SSL cipher configuration failed for %s:%s",
-                       config->host, config->port);
+                       "SSL cipher configuration failed for connection [C%"PRIu64"] to %s:%s",
+                       ctx->connection_id, config->host, config->port);
+                failed = true;
             }
         }
 
         if (config->ssl_protocols) {
             if (pn_ssl_domain_set_protocols(domain, config->ssl_protocols)) {
                 qd_log(ct->server->log_source, QD_LOG_ERROR,
-                       "Permitted TLS protocols configuration failed %s:%s",
-                       config->host, config->port);
+                       "Permitted TLS protocols configuration failed for connection [C%"PRIu64"] to %s:%s",
+                       ctx->connection_id, config->host, config->port);
+                failed = true;
             }
         }
 
         //If ssl is enabled and verify_host_name is true, instruct proton to verify peer name
         if (config->verify_host_name) {
             if (pn_ssl_domain_set_peer_authentication(domain, PN_SSL_VERIFY_PEER_NAME, NULL)) {
-                    qd_log(ct->server->log_source, QD_LOG_ERROR,
-                           "SSL peer host name verification failed for %s:%s",
-                           config->host, config->port);
+                qd_log(ct->server->log_source, QD_LOG_ERROR,
+                        "SSL peer host name verification configuration failed for connection [C%"PRIu64"] to %s:%s",
+                        ctx->connection_id, config->host, config->port);
+                failed = true;
             }
         }
 
-        ctx->ssl = pn_ssl(tport);
-        pn_ssl_init(ctx->ssl, domain, 0);
+        if (!failed) {
+            ctx->ssl = pn_ssl(tport);
+            if (pn_ssl_init(ctx->ssl, domain, 0) != 0) {
+                 qd_log(ct->server->log_source, QD_LOG_ERROR,
+                        "SSL domain internal initialization failed for connection [C%"PRIu64"] to %s:%s",
+                        ctx->connection_id, config->host, config->port);
+                failed = true;
+            }
+        }
         pn_ssl_domain_free(domain);
+        if (failed) {
+            return false;
+        }
+
     }
 
     //
@@ -1218,6 +1282,7 @@ static void setup_ssl_sasl_and_open(qd_connection_t *ctx)
     sys_mutex_unlock(ct->server->lock);
 
     pn_connection_open(ctx->pn_conn);
+    return true;
 }
 
 static void try_open_cb(void *context) {
@@ -1668,6 +1733,6 @@ sys_mutex_t *qd_server_get_activation_lock(qd_server_t * server)
     return server->conn_activation_lock;
 }
 
-int qd_connection_max_message_size(const qd_connection_t *c) {
+uint64_t qd_connection_max_message_size(const qd_connection_t *c) {
     return (c && c->policy_settings) ? c->policy_settings->maxMessageSize : 0;
 }

@@ -22,16 +22,13 @@ from __future__ import division
 from __future__ import absolute_import
 from __future__ import print_function
 
+import os
 from time import sleep, time
 from threading import Event
 from subprocess import PIPE, STDOUT
 
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, Process
-from system_test import AsyncTestSender
-from system_test import AsyncTestReceiver
-from system_test import QdManager
-from system_test import MgmtMsgProxy
-from system_test import unittest, QdManager
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, Process, TestTimeout, \
+    AsyncTestSender, AsyncTestReceiver, MgmtMsgProxy, unittest, QdManager
 from test_broker import FakeBroker
 from test_broker import FakeService
 
@@ -848,13 +845,6 @@ class LinkRouteTest(TestCase):
                                       'containerId': 'FakeBroker'})
 
 
-class Timeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.timeout()
-
 class DeliveryTagsTest(MessagingHandler):
     def __init__(self, sender_address, listening_address, qdstat_address):
         super(DeliveryTagsTest, self).__init__()
@@ -885,7 +875,7 @@ class DeliveryTagsTest(MessagingHandler):
             self.sender_connection.close()
 
     def on_start(self, event):
-        self.timer               = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer               = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.receiver_connection = event.container.connect(self.listening_address)
 
     def on_connection_remote_open(self, event):
@@ -957,7 +947,7 @@ class CloseWithUnsettledTest(MessagingHandler):
         self.conn_route.close()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.conn_route = event.container.connect(self.route_addr)
 
     def on_connection_opened(self, event):
@@ -1005,7 +995,7 @@ class DynamicSourceTest(MessagingHandler):
         self.conn_route.close()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.conn_route = event.container.connect(self.route_addr)
 
     def on_connection_opened(self, event):
@@ -1062,7 +1052,7 @@ class DynamicTargetTest(MessagingHandler):
         self.conn_route.close()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.conn_route = event.container.connect(self.route_addr)
 
     def on_connection_opened(self, event):
@@ -1117,7 +1107,7 @@ class DetachNoCloseTest(MessagingHandler):
         self.timer.cancel()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.conn_route = event.container.connect(self.route_addr)
 
     def on_connection_opened(self, event):
@@ -1180,7 +1170,7 @@ class DetachMixedCloseTest(MessagingHandler):
         self.timer.cancel()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.conn_route = event.container.connect(self.route_addr)
 
     def on_connection_opened(self, event):
@@ -1253,7 +1243,7 @@ class EchoDetachReceived(MessagingHandler):
                   % (self.msgs_sent, self.msgs_received, self.num_detaches_echoed))
 
     def on_start(self, event):
-        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
 
         # Create two separate connections for sender and receivers
         self.receiver_conn = event.container.connect(self.recv_address)
@@ -1508,7 +1498,7 @@ class MultiLinkSendReceive(MessagingHandler):
         self.timer.cancel()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         event.container.container_id = None
         for u in self.send_urls:
             s = self.SendState(event.container.create_sender(u, name=self.name))
@@ -1676,7 +1666,7 @@ class DrainReceiver(MessagingHandler):
                 # Step 4: The response drain received from the FakeBroker
                 # Step 5: Send second flow of 1000 credits. This is forwarded to the FakeBroker
                 self.receiver.flow(1000)
-                self.timer = event.reactor.schedule(3, Timeout(self))
+                self.timer = event.reactor.schedule(3, TestTimeout(self))
             elif self.num_flows == 2:
                 if not self.fake_broker.success:
                     self.error = "The FakeBroker did not receive correct credit of 1000"
@@ -1859,12 +1849,8 @@ class ConnectionLinkRouteTest(TestCase):
         ]
 
         cfg = Qdrouterd.Config(config)
-        router = self.tester.qdrouterd("X", cfg, wait=False)
         # we expect the router to fail
-        while router.poll() is None:
-            sleep(0.1)
-        self.assertRaises(RuntimeError, router.teardown)
-        self.assertNotEqual(0, router.returncode)
+        router = self.tester.qdrouterd("X", cfg, wait=False, expect=Process.EXIT_FAIL)
 
     def test_mgmt(self):
         # test create, delete, and query
@@ -2179,7 +2165,7 @@ class InvalidTagTest(MessagingHandler):
             self.test_conn.close()
 
     def on_start(self, event):
-        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.test_conn = event.container.connect(self.test_address)
         rx = event.container.create_receiver(self.test_conn, "org.apache.foo")
 
@@ -2319,13 +2305,6 @@ class Dispatch1428(TestCase):
         third.run()
         self.assertEqual(None, third.error)
 
-class Timeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.timeout()
-
 
 class SendReceive(MessagingHandler):
     def __init__(self, send_url, recv_url, message=None):
@@ -2351,7 +2330,7 @@ class SendReceive(MessagingHandler):
         self.timer.cancel()
 
     def on_start(self, event):
-        self.timer      = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer      = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         event.container.container_id = "SendReceiveTestClient"
         self.sender = event.container.create_sender(self.send_url)
         self.receiver = event.container.create_receiver(self.recv_url)
@@ -2461,6 +2440,8 @@ class LinkRoute3Hop(TestCase):
         cls.QDR_B.wait_router_connected('QDR.A')
         cls.QDR_B.wait_router_connected('QDR.C')
         cls.QDR_C.wait_router_connected('QDR.B')
+        cls.QDR_C.wait_router_connected('QDR.A')
+        cls.QDR_A.wait_router_connected('QDR.C')
 
         cls.fake_service = FakeService(cls.QDR_A.addresses[1],
                                        container_id="FakeService")
@@ -2473,37 +2454,42 @@ class LinkRoute3Hop(TestCase):
         same session.
         """
         send_clients = 10
-        send_batch = 25
+        send_batch = 10
         total = send_clients * send_batch
 
         start_in = self.fake_service.in_count
         start_out = self.fake_service.out_count
 
+        env = dict(os.environ, PN_TRACE_FRM="1")
+
         rx = self.popen(["test-receiver",
                          "-a", self.QDR_C.addresses[0],
                          "-c", str(total),
                          "-s", "closest/test-client"],
+                        env=env,
                         expect=Process.EXIT_OK)
 
         def _spawn_sender(x):
-            return self.popen( ["test-sender",
-                                "-a", self.QDR_C.addresses[0],
-                                "-c", str(send_batch),
-                                "-i", "TestSender-%s" % x,
-                                "-sx",   # huge message size to trigger Q2/Q3
-                                "-t", "closest/test-client"],
-                               expect=Process.EXIT_OK)
+            return self.popen(["test-sender",
+                               "-a", self.QDR_C.addresses[0],
+                               "-c", str(send_batch),
+                               "-i", "TestSender-%s" % x,
+                               "-sx",   # huge message size to trigger Q2/Q3
+                               "-t", "closest/test-client"],
+                              env=env,
+                              expect=Process.EXIT_OK)
 
         senders = [_spawn_sender(s) for s in range(send_clients)]
+
+        for tx in senders:
+            out_text, out_err = tx.communicate(timeout=TIMEOUT)
+            if tx.returncode:
+                raise Exception("Sender failed: %s %s" % (out_text, out_err))
 
         if rx.wait(timeout=TIMEOUT):
             raise Exception("Receiver failed to consume all messages in=%s out=%s",
                             self.fake_service.in_count,
                             self.fake_service.out_count)
-        for tx in senders:
-            out_text, out_err = tx.communicate(timeout=TIMEOUT)
-            if tx.returncode:
-                raise Exception("Sender failed: %s %s" % (out_text, out_err))
 
         self.assertEqual(start_in + total, self.fake_service.in_count)
         self.assertEqual(start_out + total, self.fake_service.out_count)

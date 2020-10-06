@@ -17,17 +17,15 @@
 # under the License
 #
 
-sudo: true
 language: c
 cache: ccache
-matrix:
+jobs:
   fast_finish: true
   allow_failures:
     - os: osx
   include:
   - name: "apache-rat:check"
     os: linux
-    sudo: false
     env: []
     language: java
     addons:
@@ -45,16 +43,39 @@ matrix:
     after_script:
     - cat target/rat.txt || true
   # prepending /usr/bin to PATH to avoid mismatched python interpreters in /opt
-  - os: linux
+  - name: "qdrouterd:Debug"
+    os: linux
     env:
     - PATH="/usr/bin:$PATH" PROTON_VERSION=master BUILD_TYPE=Debug
-  - os: linux
-    env:
-    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.30.0 BUILD_TYPE=Coverage
-  - os: linux
-    env:
-    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.30.0 BUILD_TYPE=RelWithDebInfo
     - DISPATCH_CMAKE_ARGS='-DRUNTIME_CHECK=asan'
+  - name: "qdrouterd:Coverage"
+    os: linux
+    env:
+    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.31.0 BUILD_TYPE=Coverage
+  - name: "qdrouterd:RelWithDebInfo+MemoryDebug (gcc on xenial)"
+    os: linux
+    env:
+    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.31.0 BUILD_TYPE=RelWithDebInfo
+    - DISPATCH_CMAKE_ARGS='-DRUNTIME_CHECK=asan -DCMAKE_C_FLAGS=-DQD_MEMORY_DEBUG'
+  - name: "qdrouterd:RelWithDebInfo+MemoryDebug (clang on focal)"
+    os: linux
+    dist: focal
+    compiler: clang
+    before_install:
+    - sudo apt-get install clang-10 llvm-10-dev
+    # https://github.com/pypa/virtualenv/issues/1740
+    # https://github.com/pypa/virtualenv/issues/1873
+    - python -m pip install --user --upgrade pip
+    - python -m pip install --user --upgrade tox virtualenv==20.0.23
+    env:
+    - CC=clang-10
+    - CXX=clang++-10
+    - PATH="/usr/bin:$PATH" PROTON_VERSION=master BUILD_TYPE=RelWithDebInfo
+    - DISPATCH_CMAKE_ARGS='-DRUNTIME_CHECK=asan -DCMAKE_C_FLAGS=-DQD_MEMORY_DEBUG'
+  - name: "qdrouterd:Default Build"
+    os: linux
+    env:
+    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.31.0
   - os: osx
     osx_image: xcode11
     env:
@@ -94,6 +115,7 @@ install:
 - NPROC=2
 - PREFIX=$PWD/install
 - git clone --depth=10 --branch=$PROTON_VERSION https://github.com/apache/qpid-proton.git
+- cmake -version
 
 # Build and install proton from source.
 - mkdir qpid-proton/build
@@ -107,7 +129,8 @@ before_script:
 - mkdir build
 - pushd build
 - cmake .. -DCMAKE_INSTALL_PREFIX=$PREFIX -DCMAKE_BUILD_TYPE=${BUILD_TYPE} ${DISPATCH_CMAKE_ARGS}
-- cmake --build . --target install -- -j $NPROC
+- . config.sh
+- make -j $NPROC
 
 script:
 - pushd ../qpid-proton
