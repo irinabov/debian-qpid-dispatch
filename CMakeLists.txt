@@ -18,7 +18,7 @@
 ##
 
 cmake_minimum_required(VERSION 2.8.12)
-project(qpid-dispatch C)
+project(qpid-dispatch C CXX)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
@@ -43,6 +43,7 @@ include(CheckLibraryExists)
 include(CheckSymbolExists)
 include(CheckFunctionExists)
 include(CheckIncludeFiles)
+include(CMakeDependentOption)
 
 ##
 ## Find dependencies
@@ -59,11 +60,26 @@ find_package(Threads REQUIRED)
 find_package(Proton 0.23 REQUIRED COMPONENTS Core Proactor)
 message(STATUS "Found Proton: ${Proton_LIBRARIES} (found version \"${Proton_VERSION}\")" )
 
+##
 ## Optional dependencies
-find_package(LibWebSockets)
-option(USE_LIBWEBSOCKETS "Use libwebsockets for WebSocket support" ${LIBWEBSOCKETS_FOUND})
+##
 
+# Web Sockets
+find_package(LibWebSockets 2.4.2)
+CMAKE_DEPENDENT_OPTION(USE_LIBWEBSOCKETS "Use libwebsockets for WebSocket support" ON
+                         "LIBWEBSOCKETS_FOUND" OFF)
+if (LIBWEBSOCKETS_FOUND AND LIBWEBSOCKETS_VERSION_STRING)
+  # This is a fix for DISPATCH-1513. libwebsockets versions 3.2.0 introduces a new flag called LWS_SERVER_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER
+  # The new flag allows (as the flag says) HTTP pver HTTPS listeners. Since this flag is not available before lws 3.2.0 we need
+  # to selectively comment out a test.
+  set(TEST_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER "#")
+  set(LWS_VERSION_WITH_SSL_FIX "3.2.0")
+  if ((LIBWEBSOCKETS_VERSION_STRING STREQUAL LWS_VERSION_WITH_SSL_FIX) OR (LIBWEBSOCKETS_VERSION_STRING STRGREATER  LWS_VERSION_WITH_SSL_FIX))
+    set(TEST_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER "")
+  endif()
+endif(LIBWEBSOCKETS_FOUND AND LIBWEBSOCKETS_VERSION_STRING)
 
+# Python
 if (PYTHON_VERSION_MAJOR STREQUAL 3)
     set(PY_STRING "python3")
 elseif(PYTHON_VERSION_MAJOR STREQUAL 2)
@@ -145,7 +161,7 @@ endif (NOT COMMAND add_compile_options)
 
 # Set up runtime checks (valgrind, sanitizers etc.)
 include(cmake/RuntimeChecks.cmake)
-
+SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SANITIZE_FLAGS}")
 
 ##
 ## Include directories used by all sub-directories.
@@ -166,7 +182,7 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
  if (HAS_PEDANTIC_FLAG)
     add_compile_options(-Wpedantic)
  endif(HAS_PEDANTIC_FLAG)
- add_compile_options(-std=gnu99)
+ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99")
  if (CMAKE_BUILD_TYPE MATCHES "Coverage")
    set (CMAKE_C_FLAGS_COVERAGE "-g -O0 --coverage")
    set (CMAKE_EXE_LINKER_FLAGS_COVERAGE "--coverage")

@@ -33,7 +33,6 @@ from proton import Message, Timeout
 from proton.reactor import AtMostOnce, AtLeastOnce
 from proton.utils import BlockingConnection, SendException
 
-#TIMEOUT=5
 _EXCHANGE_TYPE = "org.apache.qpid.dispatch.router.config.exchange"
 _BINDING_TYPE  = "org.apache.qpid.dispatch.router.config.binding"
 
@@ -568,8 +567,7 @@ class ExchangeBindingsTest(TestCase):
         router(self, 'B',
                [('connector', {'name': 'connectorToA',
                                'role': 'inter-router',
-                               'port': self.inter_router_port,
-                               'verifyHostname': 'no'}),
+                               'port': self.inter_router_port}),
                 ('address', {'pattern': 'nextHop1/#',
                              'distribution': 'multicast'}),
                 ('address', {'pattern': 'nextHop2/#',

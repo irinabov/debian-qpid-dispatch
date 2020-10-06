@@ -16,9 +16,8 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-import os
 
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, DIR, Process
+from system_test import TestCase, Qdrouterd, TIMEOUT
 from system_test import QdManager
 from proton.utils import BlockingConnection
 from proton import Message
@@ -247,8 +246,7 @@ class EnableConnectionLevelInterRouterTraceTest(TestCase):
                ('listener', {'role': 'inter-router', 'port': inter_router_port}))
 
         router('B',
-               ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port,
-                              'verifyHostname': 'no'}))
+               ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port}))
 
         cls.routers[0].wait_router_connected('QDR.B')
         cls.routers[1].wait_router_connected('QDR.A')

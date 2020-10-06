@@ -19,8 +19,10 @@
 
 #include <qpid/dispatch/amqp.h>
 #include <errno.h>
+#include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 const char * const QD_MA_PREFIX  = "x-opt-qd.";
 const char * const QD_MA_INGRESS = "x-opt-qd.ingress";
@@ -47,6 +49,7 @@ const char * const QD_CAPABILITY_WAYPOINT8        = "qd.waypoint.8";
 const char * const QD_CAPABILITY_WAYPOINT9        = "qd.waypoint.9";
 const char * const QD_CAPABILITY_FALLBACK         = "qd.fallback";
 const char * const QD_CAPABILITY_ANONYMOUS_RELAY  = "ANONYMOUS-RELAY";
+const char * const QD_CAPABILITY_STREAMING_LINKS  = "qd.streaming-links";
 
 const char * const QD_DYNAMIC_NODE_PROPERTY_ADDRESS = "x-opt-qd.address";
 
@@ -86,15 +89,69 @@ const char * const QD_AMQP_COND_RESOURCE_DELETED = "amqp:resource-deleted";
 const char * const QD_AMQP_COND_ILLEGAL_STATE = "amqp:illegal-state";
 const char * const QD_AMQP_COND_FRAME_SIZE_TOO_SMALL = "amqp:frame-size-too-small";
 const char * const QD_AMQP_COND_CONNECTION_FORCED = "amqp:connection:forced";
+const char * const QD_AMQP_COND_MESSAGE_SIZE_EXCEEDED = "amqp:link:message-size-exceeded";
 
 const char * const QD_AMQP_PORT_STR = "5672";
 const char * const QD_AMQPS_PORT_STR = "5671";
 
-int qd_port_int(const char* port_str) {
-    if (!strcmp(port_str, QD_AMQP_PORT_STR)) return QD_AMQP_PORT_INT;
-    if (!strcmp(port_str, QD_AMQPS_PORT_STR)) return QD_AMQPS_PORT_INT;
+const char * const QD_AMQP_DFLT_PROTO = "tcp";
+
+/// Wrapper for getservbyname/getservbyname_r macOS compatibility.
+/// Needed because getservbyname is thread safe on macOS, and getservbyname_r is not defined there.
+static inline int qd_getservbyname(const char *name, const char *proto);
+
+#ifdef __APPLE__
+static inline int qd_getservbyname(const char *name, const char *proto) {
+    struct servent *serv_info = getservbyname(name, proto);
+    if (serv_info) {
+        return ntohs(serv_info->s_port);
+    } else {
+        return -1;
+    }
+}
+#else
+static inline int qd_getservbyname(const char *name, const char *proto) {
+    struct servent  serv_info;
+    struct servent *serv_info_res;
+    enum { buf_len = 4096 };
+    char buf[buf_len];
+
+    int r = getservbyname_r(name, proto, &serv_info, buf, buf_len, &serv_info_res);
+    if (r == 0 && serv_info_res != NULL) {
+        return ntohs(serv_info.s_port);
+    } else {
+        return -1;
+    }
+}
+#endif
+
+int qd_port_int(const char *port_str) {
+    char *endptr;
+    unsigned long n;
+
+    // empty string?
+    if (*port_str == '\0') return -1;
+
+    // digits from beginning to end?
     errno = 0;
-    unsigned long n = strtoul(port_str, NULL, 10);
-    if (errno || n > 0xFFFF) return -1;
-    return n;
+    n = strtoul(port_str, &endptr, 10);
+    if (*endptr == '\0') {
+        if (!errno && n >= 0 && n <= 0xFFFF)
+            return n;
+        else
+            return -1;
+    }
+
+    // digits halfway?
+    if (endptr != port_str) return -1;
+
+    // resolve service port
+    const int r = qd_getservbyname(port_str, QD_AMQP_DFLT_PROTO);
+    if (r != -1) return r;
+
+    // amqp(s) not defined in /etc/services?
+    if (!strcmp(port_str, "amqp")) return QD_AMQP_PORT_INT;
+    if (!strcmp(port_str, "amqps")) return QD_AMQPS_PORT_INT;
+
+    return -1;
 }

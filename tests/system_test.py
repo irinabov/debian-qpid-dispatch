@@ -68,7 +68,9 @@ from proton.utils import BlockingConnection
 from proton.reactor import AtLeastOnce, Container
 from proton.reactor import AtMostOnce
 from qpid_dispatch.management.client import Node
-from qpid_dispatch_internal.compat import dict_iteritems
+from qpid_dispatch_internal.compat import dict_iteritems, PY_STRING_TYPE
+from qpid_dispatch_internal.compat import PY_TEXT_TYPE
+
 
 # Optional modules
 MISSING_MODULES = []
@@ -344,7 +346,25 @@ class Qdrouterd(Process):
 
     class Config(list, Config):
         """
-        List of ('section', {'name':'value', ...}).
+        A router configuration.
+
+        The Config class is a list of tuples in the following format:
+
+        [ ('section-name', {attribute-map}), ...]
+
+        where attribute-map is a dictionary of key+value pairs.  Key is an
+        attribute name (string), value can be any of [scalar | string | dict]
+
+        When written to a configuration file to be loaded by the router:
+        o) there is no ":' between the section-name and the opening brace
+        o) attribute keys are separated by a ":" from their values
+        o) attribute values that are scalar or string follow the ":" on the
+        same line.
+        o) attribute values do not have trailing commas
+        o) The section-name and attribute keywords are written
+        without enclosing quotes
+        o) string type attribute values are not enclosed in quotes
+        o) attribute values of type dict are written in their JSON representation.
 
         Fills in some default values automatically, see Qdrouterd.DEFAULTS
         """
@@ -373,21 +393,33 @@ class Qdrouterd(Process):
         def __str__(self):
             """Generate config file content. Calls default() first."""
             def tabs(level):
-                return "    " * level
+                if level:
+                    return "    " * level
+                return ""
 
-            def sub_elem(l, level):
-                return "".join(["%s%s: {\n%s%s}\n" % (tabs(level), n, props(p, level + 1), tabs(level)) for n, p in l])
+            def value(item, level):
+                if isinstance(item, dict):
+                    result = "{\n"
+                    result += "".join(["%s%s: %s,\n" % (tabs(level + 1),
+                                                        json.dumps(k),
+                                                        json.dumps(v))
+                                       for k,v in item.items()])
+                    result += "%s}" % tabs(level)
+                    return result
+                return "%s" %  item
 
-            def child(v, level):
-                return "{\n%s%s}" % (sub_elem(v, level), tabs(level - 1))
-
-            def props(p, level):
-                return "".join(
-                    ["%s%s: %s\n" % (tabs(level), k, v if not isinstance(v, list) else child(v, level + 1)) for k, v in
-                     dict_iteritems(p)])
+            def attributes(e, level):
+                assert(isinstance(e, dict))
+                # k = attribute name
+                # v = string | scalar | dict
+                return "".join(["%s%s: %s\n" % (tabs(level),
+                                                k,
+                                                value(v, level + 1))
+                                for k, v in dict_iteritems(e)])
 
             self.defaults()
-            return "".join(["%s {\n%s}\n"%(n, props(p, 1)) for n, p in self])
+            # top level list of tuples ('section-name', dict)
+            return "".join(["%s {\n%s}\n"%(n, attributes(p, 1)) for n, p in self])
 
     def __init__(self, name=None, config=Config(), pyinclude=None, wait=True,
                  perform_teardown=True, cl_args=None, expect=Process.RUNNING):
@@ -406,8 +438,12 @@ class Qdrouterd(Process):
         self.config.sections('router')[0]['debugDumpFile'] = self.dumpfile
         default_log = [l for l in config if (l[0] == 'log' and l[1]['module'] == 'DEFAULT')]
         if not default_log:
+            self.logfile = "%s.log" % name
             config.append(
-                ('log', {'module':'DEFAULT', 'enable':'trace+', 'includeSource': 'true', 'outputFile':name+'.log'}))
+                ('log', {'module':'DEFAULT', 'enable':'trace+',
+                         'includeSource': 'true', 'outputFile': self.logfile}))
+        else:
+            self.logfile = default_log[0][1].get('outputfile')
         args = ['qdrouterd', '-c', config.write(name)] + cl_args
         env_home = os.environ.get('QPID_DISPATCH_HOME')
         if pyinclude:
@@ -439,21 +475,67 @@ class Qdrouterd(Process):
         if not self.perform_teardown:
             return
 
-        super(Qdrouterd, self).teardown()
+        teardown_exc = None
+        try:
+            super(Qdrouterd, self).teardown()
+        except Exception as exc:
+            # re-raise _after_ dumping all the state we can
+            teardown_exc = exc
 
         # check router's debug dump file for anything interesting (should be
         # empty) and dump it to stderr for perusal by organic lifeforms
         try:
             if os.stat(self.dumpfile).st_size > 0:
                 with open(self.dumpfile) as f:
-                    sys.stderr.write("\nRouter %s debug dump file:\n" % self.config.router_id)
+                    sys.stderr.write("\nRouter %s debug dump file:\n>>>>\n" %
+                                     self.config.router_id)
                     sys.stderr.write(f.read())
+                    sys.stderr.write("\n<<<<\n")
                     sys.stderr.flush()
         except OSError:
             # failed to open file.  This can happen when an individual test
             # spawns a temporary router (i.e. not created as part of the
             # TestCase setUpClass method) that gets cleaned up by the test.
             pass
+
+        if teardown_exc:
+            # teardown failed - possible router crash?
+            # dump extra stuff (command line, output, log)
+
+            def tail_file(fname, line_count=50):
+                "Tail a file to a list"
+                out = []
+                with open(fname) as f:
+                    line = f.readline()
+                    while line:
+                        out.append(line)
+                        if len(out) > line_count:
+                            out.pop(0)
+                        line = f.readline()
+                return out
+
+            try:
+                for fname in [("output", self.outfile + '.out'),
+                              ("command", self.outfile + '.cmd')]:
+                    with open(fname[1]) as f:
+                        sys.stderr.write("\nRouter %s %s file:\n>>>>\n" %
+                                         (self.config.router_id, fname[0]))
+                        sys.stderr.write(f.read())
+                        sys.stderr.write("\n<<<<\n")
+
+                if self.logfile:
+                    sys.stderr.write("\nRouter %s log file tail:\n>>>>\n" %
+                                     self.config.router_id)
+                    tail = tail_file(os.path.join(self.outdir, self.logfile))
+                    for ln in tail:
+                        sys.stderr.write("%s" % ln);
+                    sys.stderr.write("\n<<<<\n")
+                sys.stderr.flush()
+            except OSError:
+                # ignore file not found in case test never opens these
+                pass
+
+            raise teardown_exc
 
     @property
     def ports_family(self):
@@ -833,7 +915,7 @@ class AsyncTestReceiver(MessagingHandler):
             raise Exception("Timed out waiting for receiver start")
 
     def _main(self):
-        self._container.timeout = 5.0
+        self._container.timeout = 0.5
         self._container.start()
         while self._container.process():
             if self._stop_thread:
@@ -918,7 +1000,7 @@ class AsyncTestSender(MessagingHandler):
         self._thread.start()
 
     def _main(self):
-        self._container.timeout = 5.0
+        self._container.timeout = 0.5
         self._container.start()
         while self._container.process():
             self._check_if_done()

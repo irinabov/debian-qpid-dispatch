@@ -807,7 +807,7 @@
                 },
                 "trustedCertsFile": {
                     "type": "path",
-                    "description": "This optional setting can be used to reduce the set of available CAs for client authentication.  If used, this setting must provide the absolute path to a PEM file that contains the trusted certificates.",
+                    "description": "(DEPRECATED) Use sslProfile caCertFile instead.",
                     "deprecationName": "trustedCerts",
                     "create": true
                 },
@@ -910,6 +910,12 @@
                     "type": "string",
                     "required": false,
                     "description": "A listener may optionally define a virtual host to index to a specific policy to restrict the remote container to access only specific resources. This attribute defines the name of the policy vhost for this listener.  If multi-tenancy is enabled for the listener, this vhost will override the peer-supplied vhost for the purposes of identifying the desired policy settings for the connections.",
+                    "create": true
+                },
+                "openProperties": {
+                    "description": "A JSON map containing connection properties.  These will be sent to the peer on connection open.  All map keys are restricted to strings containing only valid ASCII characters, Keys must not start with prefixes 'qd.' or 'x-opt-qd.'.  The following key values are also reserved: 'product', 'version', 'failover-server-list', 'network-host', 'port', 'scheme' 'hostname'",
+                    "type": "properties",
+                    "required": false,
                     "create": true
                 }
             }
@@ -1060,6 +1066,12 @@
                     "type": "string",
                     "required": false,
                     "description": "A connector may optionally define a policy to restrict the remote container to access only specific resources. This attribute defines the name of the policy vhost for this connector. Within the vhost the connector will use the vhost policy settings from user group '$connector'. If the vhost policy is absent or if the user group '$connector' within that policy is absent then the connector will fail to start.  In policy specified via connector attribute 'policyVhost' the following vhostUserGroupSettings attributes are unused:  'users', 'remoteHosts', 'maxFrameSize', 'maxSessionWindow', 'maxSessions'.",
+                    "create": true
+                },
+                "openProperties": {
+                    "description": "A JSON map containing connection properties.  These will be sent to the peer on connection open.  All map keys are restricted to strings containing only valid ASCII characters, Keys must not start with prefixes 'qd.' or 'x-opt-qd.'.  The following key values are also reserved: 'product', 'version', 'failover-server-list', 'network-host', 'port', 'scheme' 'hostname'",
+                    "type": "properties",
+                    "required": false,
                     "create": true
                 }
             }
@@ -1652,7 +1664,7 @@
                 },
                 "transitOutstanding": {
                     "type": "list",
-                    "description": "List of numbers of outstanding deliveries across a transit (inter-router) link for this address.  This is for balanced distribution only."
+                    "description": "List of numbers of outstanding deliveries across a transit (inter-router) connection for this address.  This is for balanced distribution only."
                 },
                 "trackedDeliveries": {
                     "type": "integer",
@@ -1872,7 +1884,7 @@
                 "maxMessageSize": {
                     "type": "integer",
                     "default": 0,
-                    "description": "The maximum size in bytes of AMQP message transfers allowed for this router. This limit is applied only to transfers over user connections and is not applied to interrouter or edge router connections. This limit may be overridden by vhost or by vhost user group settings. A value of zero disables this limit.",
+                    "description": "The maximum size in bytes of AMQP message transfers allowed for this router as messages enter the router network. This limit is applied to transfers over user connections and to transfers to interior routers from edge routers. This limit is not applied to interior-to-interior router connections. This limit may be overridden by vhost or by vhost user group settings. A value of zero disables this limit. Administrators are advised not set interior router maximum message sizes so low that edge router management requests or responses are blocked. Administrators are also advised to set edge router maximum message sizes lower than the attached interior router maximum message size.",
                     "required": false,
                     "create": true
                 },
@@ -1933,6 +1945,13 @@
                     "required": true,
                     "create": true
                 },
+                "aliases": {
+                    "type": "string",
+                    "description": "Alternate hostnames that share this vhost configuation. Hosts named in this attribute are treated as if this vhost was defined with the alias name in the vhost 'hostname' attribute. This attribute is implemented to help with multitenant configurations where multiple vhosts share a common configuration. The string is a comma- or space-separated list of literal hostnames or hostname patterns. A vhost aliases hostname must be unique across all vhost hostnames and all of their aliases.",
+                    "required": false,
+                    "create": true,
+                    "update": true
+                },
                 "maxConnections": {
                     "type": "integer",
                     "default": 65535,
@@ -1972,7 +1991,7 @@
                 },
                 "groups": {
                     "type": "map",
-                    "description": "A map where each key is a vhost name and each value is a map of the settings for users of that vhost.",
+                    "description": "A map where the key is a vhost user group name and the value is a vhostUserGroupSettings object that holds the settings for that vhost user group.",
                     "required": false,
                     "create": true,
                     "update": true

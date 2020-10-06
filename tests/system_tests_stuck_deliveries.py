@@ -27,7 +27,7 @@ from threading import Event
 from threading import Timer
 
 from proton import Message, Timeout, symbol
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, MgmtMsgProxy
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, MgmtMsgProxy, TestTimeout, PollTimeout
 from system_test import AsyncTestReceiver
 from system_test import AsyncTestSender
 from system_test import QdManager
@@ -164,22 +164,6 @@ class RouterTest(TestCase):
         self.assertEqual(None, test.error)
 
 
-class Timeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.timeout()
-
-
-class PollTimeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.poll_timeout()
-
-
 class DelayedSettlementTest(MessagingHandler):
     def __init__(self, sender_host, receiver_host, query_host, addr, dlv_count, stuck_list, close_link):
         super(DelayedSettlementTest, self).__init__(auto_accept = False)
@@ -220,20 +204,30 @@ class DelayedSettlementTest(MessagingHandler):
         self.timer.cancel()
 
     def on_start(self, event):
-        self.timer          = event.reactor.schedule(30.0, Timeout(self))
+        self.timer          = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.poll_timer     = None
-        self.sender_conn    = event.container.connect(self.sender_host)
         self.receiver_conn  = event.container.connect(self.receiver_host)
         self.query_conn     = event.container.connect(self.query_host)
-        self.sender         = event.container.create_sender(self.sender_conn, self.addr)
         self.receiver       = event.container.create_receiver(self.receiver_conn, self.addr)
         self.reply_receiver = event.container.create_receiver(self.query_conn, None, dynamic=True)
         self.query_sender   = event.container.create_sender(self.query_conn, "$management")
+        self.proxy          = None
 
     def on_link_opened(self, event):
         if event.receiver == self.reply_receiver:
             self.reply_addr = event.receiver.remote_source.address
             self.proxy      = MgmtMsgProxy(self.reply_addr)
+
+            # Create the sender only after the self.proxy is populated.
+            # If the sender was created in the on_start, in some cases, the on_sendable
+            # is called before the on_link_opened and the self.proxy remains empty.
+            # see DISPATCH-1675.
+            # The second error in test_04_delayed_settlement_different_edges_check_interior
+            # is caused due to the first test failure, so this fix will
+            # fix the second failure
+            self.sender_conn = event.container.connect(self.sender_host)
+            self.sender = event.container.create_sender(self.sender_conn,
+                                                        self.addr)
 
     def on_sendable(self, event):
         if event.sender == self.sender:
@@ -254,7 +248,7 @@ class DelayedSettlementTest(MessagingHandler):
             response = self.proxy.response(event.message)
             self.accept(event.delivery)
             self.last_stuck = response.results[0].deliveriesStuck
-            if response.results[0].deliveriesStuck == self.expected_stuck:
+            if self.last_stuck == self.expected_stuck:
                 if self.close_link:
                     self.receiver.close()
                 else:
@@ -310,7 +304,7 @@ class RxLinkCreditTest(MessagingHandler):
         self.timer.cancel()
 
     def on_start(self, event):
-        self.timer          = event.reactor.schedule(30.0, Timeout(self))
+        self.timer          = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.poll_timer     = None
         self.receiver_conn  = event.container.connect(self.host)
         self.query_conn     = event.container.connect(self.host)
@@ -441,7 +435,7 @@ class TxLinkCreditTest(MessagingHandler):
         self.timer.cancel()
 
     def on_start(self, event):
-        self.timer          = event.reactor.schedule(30.0, Timeout(self))
+        self.timer          = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.poll_timer     = None
         self.sender_conn    = event.container.connect(self.host)
         self.query_conn     = event.container.connect(self.host)

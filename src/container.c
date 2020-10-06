@@ -19,6 +19,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 #include "dispatch_private.h"
 #include "policy.h"
 #include <qpid/dispatch/container.h>
@@ -58,11 +59,13 @@ struct qd_link_t {
     qd_direction_t              direction;
     void                       *context;
     qd_node_t                  *node;
+    qd_alloc_safe_ptr_t         incoming_msg;  // DISPATCH-1690: for cleanup
     pn_snd_settle_mode_t        remote_snd_settle_mode;
     qd_link_ref_list_t          ref_list;
     bool                        q2_limit_unbounded;
     bool                        q3_blocked;
     DEQ_LINKS_N(Q3, qd_link_t); ///< Q3 blocked links
+    uint64_t                    link_id;
 };
 
 ALLOC_DEFINE(qd_link_t);
@@ -159,7 +162,7 @@ static void setup_outgoing_link(qd_container_t *container, pn_link_t *pn_link)
 }
 
 
-static void setup_incoming_link(qd_container_t *container, pn_link_t *pn_link, int max_size)
+static void setup_incoming_link(qd_container_t *container, pn_link_t *pn_link, uint64_t max_size)
 {
     qd_node_t *node = container->default_node;
 
@@ -192,7 +195,7 @@ static void setup_incoming_link(qd_container_t *container, pn_link_t *pn_link, i
     link->remote_snd_settle_mode = pn_link_remote_snd_settle_mode(pn_link);
 
     if (max_size) {
-        pn_link_set_max_message_size(pn_link, (uint64_t)max_size);
+        pn_link_set_max_message_size(pn_link, max_size);
     }
     pn_link_set_context(pn_link, link);
     node->ntype->incoming_handler(node->context, link);
@@ -346,6 +349,11 @@ static void cleanup_link(qd_link_t *link)
             link->pn_link = 0;
         }
         link->pn_sess = 0;
+
+        // cleanup any inbound message that has not been forwarded
+        qd_message_t *msg = link->incoming_msg.ptr;
+        if (msg && qd_alloc_sequence(msg) == link->incoming_msg.seq)
+            qd_message_free(msg);
     }
 }
 
@@ -1154,6 +1162,18 @@ void qd_link_q3_unblock(qd_link_t *link)
 }
 
 
+uint64_t qd_link_link_id(const qd_link_t *link)
+{
+    return link->link_id;
+}
+
+
+void qd_link_set_link_id(qd_link_t *link, uint64_t link_id)
+{
+    link->link_id = link_id;
+}
+
+
 qd_session_t *qd_session(pn_session_t *pn_ssn)
 {
     assert(pn_ssn);
@@ -1214,5 +1234,16 @@ void qd_session_cleanup(qd_connection_t *qd_conn)
         qd_session_t *qd_ssn = qd_session_from_pn(pn_ssn);
         qd_session_free(qd_ssn);
         pn_ssn = pn_session_next(pn_ssn, 0);
+    }
+}
+
+
+void qd_link_set_incoming_msg(qd_link_t *link, qd_message_t *msg)
+{
+    if (msg) {
+        link->incoming_msg.ptr = (void*) msg;
+        link->incoming_msg.seq = qd_alloc_sequence(msg);
+    } else {
+        qd_nullify_safe_ptr(&link->incoming_msg);
     }
 }

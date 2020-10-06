@@ -20,21 +20,17 @@
     <parent>
       <groupId>org.apache</groupId>
       <artifactId>apache</artifactId>
-      <version>18</version>
+      <version>23</version>
     </parent>
   
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.apache.qpid</groupId>
     <artifactId>qpid-dispatch</artifactId>
-    <version>1.12.0</version>
+    <version>1.14.0</version>
     <name>QpidDispatch</name>
     <inceptionYear>2018</inceptionYear>
     <url>https://qpid.apache.org</url>   
     
-    <prerequisites>
-        <maven>3.0.4</maven>
-    </prerequisites>
-  
     <description>
       Qpid Dispatch Router
     </description>
@@ -51,7 +47,7 @@
                 <plugin>
                     <groupId>org.apache.rat</groupId>
                     <artifactId>apache-rat-plugin</artifactId>
-                    <version>0.12</version>
+                    <version>0.13</version>
                     <executions>
                       <execution>
                         <phase>verify</phase>
@@ -123,6 +119,7 @@
                       <exclude>libuv/**</exclude>
                       <exclude>libwebsockets/**</exclude>
                       <exclude>tools/scraper/test_data/**</exclude>
+                      <exclude>**/doctest.h</exclude>
                 </excludes>
         </configuration>            
             </plugin>
