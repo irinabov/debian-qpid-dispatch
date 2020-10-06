@@ -1,36 +1,48 @@
 {
   "name": "dispatch-console",
-  "version": "0.2.0",
+  "version": "1.13.0",
   "private": true,
   "dependencies": {
-    "@patternfly/patternfly": "^2.13.0",
+    "@patternfly/patternfly": "^2.71.6",
     "@patternfly/react-charts": "^5.1.6",
     "@patternfly/react-core": "^3.38.1",
     "@patternfly/react-icons": "^3.10.4",
-    "@patternfly/react-styles": "^3.3.3",
+    "@patternfly/react-styles": "^4.5.0",
     "@patternfly/react-table": "^2.11.1",
     "@patternfly/react-topology": "^2.7.31",
     "d3": "^3.5.17",
     "d3-queue": "^3.0.7",
     "express": "^4.17.1",
-    "patternfly": "^3.59.4",
+    "font-awesome": "^4.7.0",
     "prop-types": "^15.7.2",
     "react": "^16.12.0",
     "react-dom": "^16.12.0",
     "react-fontawesome": "^1.7.1",
     "react-router-dom": "^5.0.1",
-    "react-scripts": "^3.3.0",
-    "rhea": "^1.0.20",
+    "rhea": "^1.0.23",
     "topojson-client": "^3.0.1"
   },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
-    "test": "react-scripts test",
+    "test": "react-scripts test --env=jest-environment-jsdom-sixteen",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {
-    "extends": "react-app"
+    "extends": "react-app",
+    "ignorePatterns": [
+      "build/**"
+    ],
+    "overrides": [
+      {
+        "files": [
+          "test_data/schema.js"
+        ],
+        "rules": {
+          "no-template-curly-in-string": "off"
+        }
+      }
+    ]
   },
   "browserslist": {
     "production": [
@@ -46,12 +58,14 @@
   },
   "devDependencies": {
     "@react-mock/localstorage": "^0.1.2",
-    "@testing-library/jest-dom": "^4.2.3",
-    "@testing-library/react": "^9.3.2",
+    "@testing-library/jest-dom": "^5.11.3",
+    "@testing-library/react": "^10.4.8",
+    "@types/jest": "^26.0.10",
     "body-parser": "^1.19.0",
-    "browserslist": "^4.7.3",
-    "eslint-plugin-patternfly-react": "^0.2.3",
-    "jest-axe": "^3.2.0",
-    "prettier": "^1.19.1"
+    "browserslist": "^4.14.0",
+    "jest-axe": "^3.5.0",
+    "prettier": "^2.0.5",
+    "react-scripts": "^3.4.3",
+    "jest-environment-jsdom-sixteen": "^1.0.3"
   }
 }

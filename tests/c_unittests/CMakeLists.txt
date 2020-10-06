@@ -14,21 +14,18 @@
 ## "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 ## KIND, either express or implied.  See the License for the
 ## specific language governing permissions and limitations
-## under the License
+## under the License.
 ##
-[
-    ["vhost", {
-        "hostname": "nousers",
-        "allowUnknownUser": false,
-        "groups" : {
-             "nousers": {
-                "badAttribute": true,
-                "remoteHosts": "*",
-                "allowDynamicSource": true,
-                "allowAnonymousSender": true,
-                "sources": "*",
-                "targets": "*"
-            }
-       }
-    }]
-]
+
+file(GLOB unittest_SOURCES
+    "*.cpp"
+)
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SANITIZE_FLAGS} -std=c++11")
+add_executable(c_unittests ${unittest_SOURCES})
+target_link_libraries(c_unittests pthread qpid-dispatch)
+
+add_test(
+    NAME c_unittests
+    COMMAND ${TEST_WRAP} $<TARGET_FILE:c_unittests>
+)

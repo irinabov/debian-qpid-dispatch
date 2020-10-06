@@ -36,10 +36,12 @@ set(unit_test_SOURCES
     parse_tree_tests.c
     proton_utils_tests.c
     alloc_test.c
+    hash_test.c
+    thread_test.c
     )
 
 add_executable(unit_tests ${unit_test_SOURCES})
-target_link_libraries(unit_tests qpid-dispatch)
+target_link_libraries(unit_tests  qpid-dispatch)
 
 set(unit_test_size_SOURCES
     field_test.c
@@ -58,8 +60,21 @@ target_link_libraries(test-sender ${Proton_LIBRARIES} qpid-dispatch)
 add_executable(test-receiver test-receiver.c)
 target_link_libraries(test-receiver ${Proton_LIBRARIES})
 
+add_executable(clogger clogger.c)
+target_link_libraries(clogger ${Proton_LIBRARIES})
 
-set(TEST_WRAP ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/run.py)
+# Bubblewrap is an unprivileged sandboxing tool for Linux. Setting --unshare-net allows
+# running tests in parallel (the ctest -j option) without port clashes
+set(USE_BWRAP OFF CACHE BOOL "Wrap test executions with bwrap (https://github.com/containers/bubblewrap)")
+if(USE_BWRAP)
+  # Inaccessible DNS servers produce "proton:io Temporary failure in name resolution".
+  # For system_tests_bad_configuration we need to get "proton:io Name or service not known",
+  # so blank /etc/nsswitch.conf to achieve that.
+  set(BWRAP_ARGS bwrap --bind / / --bind /dev/zero /etc/nsswitch.conf --unshare-net --dev /dev --die-with-parent --)
+else()
+  set(BWRAP_ARGS "")
+endif()
+set(TEST_WRAP ${BWRAP_ARGS} ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/run.py)
 
 add_test(unit_tests_size_10000 ${TEST_WRAP} unit_tests_size 10000)
 add_test(unit_tests_size_512   ${TEST_WRAP} unit_tests_size 512)
@@ -112,6 +127,7 @@ foreach(py_test_module
     system_tests_interior_sync_up
     system_tests_distribution
     system_tests_multi_tenancy
+    system_tests_multi_tenancy_policy
     system_tests_dynamic_terminus
     system_tests_log_message_components
     system_tests_failover_list
@@ -142,6 +158,7 @@ foreach(py_test_module
     system_tests_stuck_deliveries
     system_tests_log_level_update
     system_tests_routing_protocol
+    system_tests_open_properties
     )
 
   add_test(${py_test_module} ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v ${py_test_module})
@@ -232,3 +249,7 @@ install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/config-2
 
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ssl_certs
         DESTINATION ${QPID_DISPATCH_HOME_INSTALLED}/tests)
+
+if(NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "4.8.5"))
+  add_subdirectory(c_unittests)
+endif()

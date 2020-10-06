@@ -26,12 +26,13 @@ from __future__ import print_function
 import json
 from threading import Timer
 from proton import Message
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, Process
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, Process, TestTimeout
 from system_test import unittest
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
 from subprocess import PIPE, STDOUT
 from qpid_dispatch.management.client import Node
+from system_test import QdManager
 
 CONNECTION_PROPERTIES = {u'connection': u'properties', u'int_property': 6451}
 
@@ -54,7 +55,7 @@ class AutoLinkDetachAfterAttachTest(MessagingHandler):
         self.conn.close()
 
     def on_start(self, event):
-        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.conn = event.container.connect(self.address)
 
     def on_link_opened(self, event):
@@ -91,6 +92,119 @@ class AutoLinkDetachAfterAttachTest(MessagingHandler):
 
     def run(self):
         Container(self).run()
+
+class NameCollisionTest(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super(NameCollisionTest, cls).setUpClass()
+        name = "test-router"
+
+        config = Qdrouterd.Config([
+
+            ('router', {'mode': 'standalone', 'id': 'A'}),
+            ('listener', {'host': '127.0.0.1', 'role': 'normal',
+                          'port': cls.tester.get_port()}),
+            ('autoLink', {'name': 'autoLink',
+                          'address': 'autoLink1',
+                          'connection': 'brokerConnection',
+                          'direction': 'in'}),
+            ('linkRoute', {'name': 'linkRoute',
+                          'prefix': 'linkRoute',
+                           'connection': 'brokerConnection',
+                           'direction': 'in'}),
+            ('address',   {'name': 'address',
+                           'prefix': 'address.1',
+                           'waypoint': 'yes'}),
+        ])
+
+        cls.router = cls.tester.qdrouterd(name, config)
+        cls.router.wait_ready()
+        cls.address = cls.router.addresses[0]
+
+    def test_name_collision(self):
+        args = {"name": "autoLink", "address": "autoLink1", "connection": "broker", "dir": "in"}
+        # Add autoLink with the same name as the one already present.
+        al_long_type = 'org.apache.qpid.dispatch.router.config.autoLink'
+        addr_long_type = 'org.apache.qpid.dispatch.router.config.address'
+        lr_long_type = 'org.apache.qpid.dispatch.router.config.linkRoute'
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        test_pass = False
+        try:
+            mgmt.create(al_long_type, args)
+        except Exception as e:
+            if "BadRequestStatus: Name conflicts with an existing entity" in str(e):
+                test_pass = True
+        self.assertTrue(test_pass)
+
+        # Try to add duplicate linkRoute and make sure it fails
+        args = {"name": "linkRoute", "prefix": "linkRoute",
+                "connection": "broker", "dir": "in"}
+
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        test_pass = False
+        try:
+            mgmt.create(lr_long_type, args)
+        except Exception as e:
+            if "BadRequestStatus: Name conflicts with an existing entity" in str(e):
+                test_pass = True
+        self.assertTrue(test_pass)
+
+        args = {"name": "address", "prefix": "address.1",
+                "waypoint": "yes"}
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        test_pass = False
+        try:
+            mgmt.create(addr_long_type, args)
+        except Exception as e:
+            if "BadRequestStatus: Name conflicts with an existing entity" in str(e):
+                test_pass = True
+        self.assertTrue(test_pass)
+
+        # The linkRoutes, autoLinks and addrConfigs share the same hashtable
+        # but with a prefix.
+        # The following tests make sure that same names used on
+        # different entities are allowed.
+
+        # insert a linkRoute with the name of an existing autoLink and make
+        # sure that is ok
+        args = {"name": "autoLink", "prefix": "linkRoute",
+                "connection": "broker", "dir": "in"}
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        mgmt.create(lr_long_type, args)
+
+        # insert a linkRoute with the name of an existing addr config and make
+        # sure that is ok
+        args = {"name": "address", "prefix": "linkRoute",
+                "connection": "broker", "dir": "in"}
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        mgmt.create(lr_long_type, args)
+
+        # insert an autoLink with the name of an existing linkRoute and make
+        # sure that is ok
+        args = {"name": "linkRoute", "address": "autoLink1", "connection": "broker", "dir": "in"}
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        mgmt.create(al_long_type, args)
+
+        # insert an autoLink with the name of an existing address and make
+        # sure that is ok
+        args = {"name": "address", "address": "autoLink1", "connection": "broker", "dir": "in"}
+        al_long_type = 'org.apache.qpid.dispatch.router.config.autoLink'
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        mgmt.create(al_long_type, args)
+
+        # insert an address with the name of an existing autoLink and make
+        # sure that is ok
+        args = {"name": "autoLink", "prefix": "address.2",
+                "waypoint": "yes"}
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        mgmt.create(addr_long_type, args)
+
+        # insert an autoLink with the name of an existing linkRoute and make
+        # sure that is ok
+        args = {"name": "linkRoute", "prefix": "address.3",
+                "waypoint": "yes"}
+        mgmt = QdManager(self, address=self.router.addresses[0])
+        mgmt.create(addr_long_type, args)
 
 
 class DetachAfterAttachTest(TestCase):
@@ -281,7 +395,7 @@ class WaypointReceiverPhaseTest(TestCase):
                         ('router', {'mode': 'interior', 'id': 'B'}),
                         ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.tester.get_port()}),
                         ('connector', {'name': 'connectorToB', 'role': 'inter-router',
-                                       'port': cls.inter_router_port, 'verifyHostname': 'no'}),
+                                       'port': cls.inter_router_port}),
                         ('address', {'prefix': '0.0.0.0/queue', 'waypoint': 'yes'}),
                     ])
 
@@ -319,7 +433,7 @@ class WaypointTest(MessagingHandler):
         self.second_conn.close()
 
     def on_start(self, event):
-        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.first_conn = event.container.connect(self.first_host)
         self.second_conn = event.container.connect(self.second_host)
         self.receiver1 = event.container.create_receiver(self.first_conn, self.dest, name="AAA")
@@ -569,14 +683,6 @@ class AutolinkTest(TestCase):
         self.assertEqual(None, test.error)
 
 
-class Timeout(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def on_timer_task(self, event):
-        self.parent.timeout()
-
-
 class AutolinkAttachTestWithListenerName(MessagingHandler):
     def __init__(self, address, node_addr):
         super(AutolinkAttachTestWithListenerName, self).__init__(prefetch=0)
@@ -598,7 +704,7 @@ class AutolinkAttachTestWithListenerName(MessagingHandler):
         self.conn1.close()
 
     def on_start(self, event):
-        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
 
         # We create teo connections to the same listener here and we expect attaches to be sent on both connections
         self.conn = event.container.connect(self.address)
@@ -656,7 +762,7 @@ class AutolinkAttachTest(MessagingHandler):
         self.conn.close()
 
     def on_start(self, event):
-        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.conn  = event.container.connect(self.address)
 
     def on_connection_closed(self, event):
@@ -708,7 +814,7 @@ class AutolinkCreditTest(MessagingHandler):
             self.route_conn.close()
 
     def on_start(self, event):
-        self.timer       = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer       = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.normal_conn = event.container.connect(self.normal_address)
         self.sender      = event.container.create_sender(self.normal_conn, self.dest)
         self.last_action = "Attached normal sender"
@@ -771,7 +877,7 @@ class AutolinkSenderTest(MessagingHandler):
             self.route_conn.close()
 
     def on_start(self, event):
-        self.timer       = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer       = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.route_conn  = event.container.connect(self.route_address)
         self.last_action = "Connected route container"
 
@@ -837,7 +943,7 @@ class AutolinkReceiverTest(MessagingHandler):
             self.route_conn.close()
 
     def on_start(self, event):
-        self.timer       = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer       = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.route_conn  = event.container.connect(self.route_address)
         self.last_action = "Connected route container"
 
@@ -913,7 +1019,7 @@ class AutolinkMultipleReceiverUsingMyListenerTest(MessagingHandler):
         if self.count % 2 != 0:
             self.error = "Count must be a multiple of 2"
             return
-        self.timer = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.normal_conn = event.container.connect(self.normal_address)
         self.route_conn1 = event.container.connect(self.route_address)
         self.route_conn2 = event.container.connect(self.route_address)
@@ -979,7 +1085,7 @@ class InterContainerTransferTest(MessagingHandler):
         self.conn_2.close()
 
     def on_start(self, event):
-        self.timer  = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer  = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         event.container.container_id = 'container.2'
         self.conn_1 = event.container.connect(self.route_address)
         event.container.container_id = 'container.3'
@@ -1036,7 +1142,7 @@ class ManageAutolinksTest(MessagingHandler):
         self.route_conn.close()
 
     def on_start(self, event):
-        self.timer  = event.reactor.schedule(TIMEOUT, Timeout(self))
+        self.timer  = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         event.container.container_id = 'container.new'
         self.route_conn  = event.container.connect(self.route_address)
         self.normal_conn = event.container.connect(self.normal_address)

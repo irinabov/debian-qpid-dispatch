@@ -617,6 +617,7 @@ const char *qdr_link_name(const qdr_link_t *link);
  * @param target Target terminus of the attach
  * @param name - name of the link
  * @param terminus_addr - terminus address if any
+ * @param link_id - set to the management id of the new link
  * @return A pointer to a new qdr_link_t object to track the link
  */
 qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
@@ -624,7 +625,8 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
                                   qdr_terminus_t   *source,
                                   qdr_terminus_t   *target,
                                   const char       *name,
-                                  const char       *terminus_addr);
+                                  const char       *terminus_addr,
+                                  uint64_t         *link_id);
 
 /**
  * qdr_link_second_attach
@@ -676,16 +678,23 @@ void qdr_link_delete(qdr_link_t *link);
  *                       to send this message.  This bitmask is created by the trace_mask module and
  *                       it built on the trace header from a received message.
  * @param ingress_index The bitmask index of the router that this delivery entered the network through.
+ * @param remote_disposition as set by sender on the transfer
+ * @param remote_disposition_state as set by sender on the transfer
  * @return Pointer to the qdr_delivery that will track the lifecycle of this delivery on this link.
  */
 qdr_delivery_t *qdr_link_deliver(qdr_link_t *link, qd_message_t *msg, qd_iterator_t *ingress,
-                                 bool settled, qd_bitmask_t *link_exclusion, int ingress_index);
+                                 bool settled, qd_bitmask_t *link_exclusion, int ingress_index,
+                                 uint64_t remote_disposition,
+                                 pn_data_t *remote_extension_state);
 qdr_delivery_t *qdr_link_deliver_to(qdr_link_t *link, qd_message_t *msg,
                                     qd_iterator_t *ingress, qd_iterator_t *addr,
-                                    bool settled, qd_bitmask_t *link_exclusion, int ingress_index);
+                                    bool settled, qd_bitmask_t *link_exclusion, int ingress_index,
+                                    uint64_t remote_disposition,
+                                    pn_data_t *remote_extension_state);
 qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *msg, bool settled,
                                                 const uint8_t *tag, int tag_length,
-                                                uint64_t disposition, pn_data_t* disposition_state);
+                                                uint64_t remote_disposition,
+                                                pn_data_t *remote_extension_state);
 int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit);
 
 void qdr_link_flow(qdr_core_t *core, qdr_link_t *link, int credit, bool drain_mode);
@@ -699,6 +708,16 @@ void qdr_link_flow(qdr_core_t *core, qdr_link_t *link, int credit, bool drain_mo
  * @param link - the link that has been drained
  */
 void qdr_link_set_drained(qdr_core_t *core, qdr_link_t *link);
+
+/**
+ * Write the disposition and state data that has arrived from the remote endpoint to the delivery
+ */
+void qdr_delivery_set_remote_extension_state(qdr_delivery_t *dlv, uint64_t remote_dispo, pn_data_t *remote_ext_state);
+
+/**
+ * Extract the disposition and state data that is to be sent to the remote endpoint via the delivery
+ */
+pn_data_t *qdr_delivery_take_local_extension_state(qdr_delivery_t *dlv, uint64_t *dispo);
 
 typedef void (*qdr_link_first_attach_t)  (void *context, qdr_connection_t *conn, qdr_link_t *link,
                                           qdr_terminus_t *source, qdr_terminus_t *target,
@@ -863,7 +882,9 @@ qdr_connection_info_t *qdr_connection_info(bool             is_encrypted,
                                            const char      *container,
                                            pn_data_t       *connection_properties,
                                            int              ssl_ssf,
-                                           bool             ssl);
+                                           bool             ssl,
+                                           const char      *version_str,  // if remote is a router
+                                           bool             streaming_links);
 
 
 typedef struct {

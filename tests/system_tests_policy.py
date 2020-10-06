@@ -27,7 +27,8 @@ import os, json, re, signal
 import sys
 import time
 
-from system_test import TestCase, Qdrouterd, main_module, Process, TIMEOUT, DIR
+from system_test import TestCase, Qdrouterd, main_module, Process, TIMEOUT, DIR, TestTimeout
+from system_test import Logger
 from subprocess import PIPE, STDOUT
 from proton import ConnectionException, Timeout, Url, symbol
 from proton.handlers import MessagingHandler
@@ -344,6 +345,18 @@ class SenderReceiverLimits(TestCase):
             print("system_tests_policy, SenderReceiverLimits, test_verify_z_connection_stats: delay to wait for log to be written")
             sys.stdout.flush()
             time.sleep(1)
+        if not verified:
+            deny_lines = [s for s in log_lines if "DENY" in s]
+            resources_lines = [s for s in log_lines if "closed with resources" in s]
+            logger = Logger(title="Policy SenderReceiverLimits test_verify_z_connection_stats")
+            logger.log("Did not see log line containing: 'senders_denied=1, receivers_denied=1'")
+            logger.log("Policy DENY events")
+            for dl in deny_lines:
+                logger.log("  " + dl)
+            logger.log("Policy resources report")
+            for rl in resources_lines:
+                logger.log("  " + rl)
+            logger.dump()
         self.assertTrue(verified, msg='Policy did not log sender and receiver denials.')
 
 
@@ -498,7 +511,7 @@ class InterrouterLinksAllowed(TestCase):
             config = [
                 ('router', {'mode': 'interior', 'id': name}),
                 ('listener', {'port': cls.tester.get_port()}),
-                ('log', {'module': 'DEFAULT', 'enable': 'trace+'}),
+
                 ('policy', {'enableVhostPolicy': 'yes', 'policyDir': policy_config_path}),
                 connection
             ]
@@ -512,7 +525,7 @@ class InterrouterLinksAllowed(TestCase):
         inter_router_port = cls.tester.get_port()
 
         router('A', ('listener', {'role': 'inter-router', 'port': inter_router_port}))
-        router('B', ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port, 'verifyHostname': 'no'}))
+        router('B', ('connector', {'name': 'connectorToA', 'role': 'inter-router', 'port': inter_router_port}))
 
         # With these configs before DISPATCH-920 the routers never connect
         # because the links are disallowed by policy. Before the wait_ready
@@ -745,36 +758,6 @@ class VhostPolicyNameField(TestCase):
                 isoFound = True
                 break
         self.assertFalse(isoFound)
-
-
-class PolicyWarnings(TestCase):
-    """
-    Verify that specifying a policy that generates a warning does
-    not cause the router to exit without showing the warning.
-    """
-    @classmethod
-    def setUpClass(cls):
-        """Start the router"""
-        super(PolicyWarnings, cls).setUpClass()
-        listen_port = cls.tester.get_port()
-        policy_config_path = os.path.join(DIR, 'policy-6')
-        config = Qdrouterd.Config([
-            ('router', {'mode': 'standalone', 'id': 'QDR.Policy'}),
-            ('listener', {'port': listen_port}),
-            ('policy', {'maxConnections': 2, 'policyDir': policy_config_path, 'enableVhostPolicy': 'true'})
-        ])
-
-        cls.router = cls.tester.qdrouterd('PolicyWarnings', config, wait=False)
-        try:
-            cls.router.wait_ready(timeout = 5)
-        except Exception as e:
-            pass
-
-    def test_03_policy_warnings(self):
-        with  open('../setUpClass/PolicyWarnings.log', 'r') as router_log:
-            log_lines = router_log.read().split("\n")
-            critical_lines = [s for s in log_lines if "'PolicyManager' object has no attribute 'log_warning'" in s]
-            self.assertTrue(len(critical_lines) == 0, msg='Policy manager does not forward policy warnings and shuts down instead.')
 
 
 class PolicyLinkNamePatternTest(TestCase):
@@ -1099,21 +1082,23 @@ class VhostPolicyFromRouterConfig(TestCase):
             ('vhost', {
                 'hostname': '0.0.0.0', 'maxConnections': 2,
                 'allowUnknownUser': 'true',
-                'groups': [(
-                    '$default', {
-                        'users': '*', 'remoteHosts': '*',
-                        'sources': '*', 'targets': '*',
-                        'allowDynamicSource': 'true'
-                    }
-                ), (
-                    'anonymous', {
-                        'users': 'anonymous', 'remoteHosts': '*',
+                'groups': {
+                    '$default': {
+                        'users': '*',
+                        'remoteHosts': '*',
+                        'sources': '*',
+                        'targets': '*',
+                        'allowDynamicSource': True
+                    },
+                    'anonymous': {
+                        'users': 'anonymous',
+                        'remoteHosts': '*',
                         'sourcePattern': 'addr/*/queue/*, simpleaddress, queue.${user}',
                         'targets': 'addr/*, simpleaddress, queue.${user}',
-                        'allowDynamicSource': 'true',
-                        'allowAnonymousSender': 'true'
+                        'allowDynamicSource': True,
+                        'allowAnonymousSender': True
                     }
-                )]
+                }
             })
         ])
 
@@ -1202,23 +1187,25 @@ class VhostPolicyConnLimit(TestCase):
                 'hostname': '0.0.0.0', 'maxConnections': 100,
                 'maxConnectionsPerUser': 2,
                 'allowUnknownUser': 'true',
-                'groups': [(
-                    '$default', {
-                        'users': '*', 'remoteHosts': '*',
-                        'sources': '*', 'targets': '*',
-                        'allowDynamicSource': 'true',
+                'groups': {
+                    '$default': {
+                        'users': '*',
+                        'remoteHosts': '*',
+                        'sources': '*',
+                        'targets': '*',
+                        'allowDynamicSource': True,
                         'maxConnectionsPerUser': 3
-                    }
-                ), (
-                    'anonymous', {
-                        'users': 'anonymous', 'remoteHosts': '*',
+                    },
+                    'anonymous': {
+                        'users': 'anonymous',
+                        'remoteHosts': '*',
                         'sourcePattern': 'addr/*/queue/*, simpleaddress, queue.${user}',
                         'targets': 'addr/*, simpleaddress, queue.${user}',
-                        'allowDynamicSource': 'true',
-                        'allowAnonymousSender': 'true',
+                        'allowDynamicSource': True,
+                        'allowAnonymousSender': True,
                         'maxConnectionsPerUser': 3
                     }
-                )]
+                }
             })
         ])
 
@@ -1383,7 +1370,7 @@ class ConnectorPolicyMisconfiguredClient(FakeBroker):
             self._thread.join(timeout=5)
 
     def on_start(self, event):
-        self.timer          = event.reactor.schedule(10.0, Timeout(self))        
+        self.timer          = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.acceptor = event.container.listen(self.url)
 
     def timeout(self):
@@ -1417,7 +1404,7 @@ class ConnectorPolicyMisconfigured(TestCase):
             ('router', {'mode': 'standalone', 'id': 'QDR.Policy'}),
             ('listener', {'port': cls.tester.get_port()}),
             ('policy', {'maxConnections': 100, 'enableVhostPolicy': 'true'}),
-            ('connector', {'verifyHostname': 'false', 'name': 'novhost',
+            ('connector', {'name': 'novhost',
                            'idleTimeoutSeconds': 120, 'saslMechanisms': 'ANONYMOUS',
                            'host': '127.0.0.1', 'role': 'normal',
                            'port': cls.remoteListenerPort, 'policyVhost': 'nosuch'
@@ -1426,21 +1413,23 @@ class ConnectorPolicyMisconfigured(TestCase):
             ('vhost', {
                 'hostname': '0.0.0.0', 'maxConnections': 2,
                 'allowUnknownUser': 'true',
-                'groups': [(
-                    '$default', {
-                        'users': '*', 'remoteHosts': '*',
-                        'sources': '*', 'targets': '*',
-                        'allowDynamicSource': 'true'
-                    }
-                ), (
-                    'anonymous', {
-                        'users': 'anonymous', 'remoteHosts': '*',
+                'groups': {
+                    '$default': {
+                        'users': '*',
+                        'remoteHosts': '*',
+                        'sources': '*',
+                        'targets': '*',
+                        'allowDynamicSource': True
+                    },
+                    'anonymous': {
+                        'users': 'anonymous',
+                        'remoteHosts': '*',
                         'sourcePattern': 'addr/*/queue/*, simpleaddress, queue.${user}',
                         'targets': 'addr/*, simpleaddress, queue.${user}',
-                        'allowDynamicSource': 'true',
-                        'allowAnonymousSender': 'true'
+                        'allowDynamicSource': True,
+                        'allowAnonymousSender': True
                     }
-                )]
+                }
             })
         ])
 
@@ -1529,7 +1518,7 @@ class ConnectorPolicyClient(FakeBroker):
             self._thread.join(timeout=5)
 
     def on_start(self, event):
-        self.timer    = event.reactor.schedule(60, Timeout(self))        
+        self.timer    = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.acceptor = event.container.listen(self.url)
 
     def timeout(self):
@@ -1609,7 +1598,7 @@ class ConnectorPolicySrcTgt(TestCase):
             ('router', {'mode': 'standalone', 'id': 'QDR.Policy'}),
             ('listener', {'port': cls.tester.get_port()}),
             ('policy', {'maxConnections': 100, 'enableVhostPolicy': 'true'}),
-            ('connector', {'verifyHostname': 'false', 'name': 'novhost',
+            ('connector', {'name': 'novhost',
                            'idleTimeoutSeconds': 120, 'saslMechanisms': 'ANONYMOUS',
                            'host': '127.0.0.1', 'role': 'normal',
                            'port': cls.remoteListenerPort, 'policyVhost': 'test'
@@ -1621,12 +1610,12 @@ class ConnectorPolicySrcTgt(TestCase):
             ('autoLink', {'address': 'node.1', 'containerId': 'container.1', 'direction': 'out'}),
             ('vhost', {
                 'hostname': 'test',
-                'groups': [(
-                    '$connector', {
+                'groups': {
+                    '$connector': {
                         'sources': 'test,examples,work*',
                         'targets': 'examples,$management,play*',
                     }
-                )]
+                }
             })
         ])
 
@@ -1706,7 +1695,7 @@ class ConnectorPolicyNSndrRcvr(TestCase):
             ('router', {'mode': 'standalone', 'id': 'QDR.Policy'}),
             ('listener', {'port': cls.tester.get_port()}),
             ('policy', {'maxConnections': 100, 'enableVhostPolicy': 'true'}),
-            ('connector', {'verifyHostname': 'false', 'name': 'novhost',
+            ('connector', {'name': 'novhost',
                            'idleTimeoutSeconds': 120, 'saslMechanisms': 'ANONYMOUS',
                            'host': '127.0.0.1', 'role': 'normal',
                            'port': cls.remoteListenerPort, 'policyVhost': 'test'
@@ -1718,16 +1707,16 @@ class ConnectorPolicyNSndrRcvr(TestCase):
             ('autoLink', {'address': 'node.1', 'containerId': 'container.1', 'direction': 'out'}),
             ('vhost', {
                 'hostname': 'test',
-                'groups': [(
-                    '$connector', {
+                'groups': {
+                    '$connector': {
                         'sources': '*',
                         'targets': '*',
                         'maxSenders': cls.MAX_SENDERS,
                         'maxReceivers': cls.MAX_RECEIVERS,
-                        'allowAnonymousSender': 'true',
-                        'allowWaypointLinks': 'true'
+                        'allowAnonymousSender': True,
+                        'allowWaypointLinks': True
                     }
-                )]
+                }
             })
         ])
 
@@ -1824,6 +1813,241 @@ class ConnectorPolicyNSndrRcvr(TestCase):
             except:
                 res = False
             self.assertFalse(res)
+
+
+class VhostPolicyConfigHashPattern(TestCase):
+    """
+    Verify that a vhost with a '#' symbol in the hostname does
+    not crash the router.
+    """
+    @classmethod
+    def setUpClass(cls):
+        """Start the router"""
+        super(VhostPolicyConfigHashPattern, cls).setUpClass()
+        config = Qdrouterd.Config([
+            ('router', {'mode': 'standalone', 'id': 'QDR.Policy'}),
+            ('listener', {'port': cls.tester.get_port()}),
+            ('policy', {'maxConnections': 100, 'enableVhostPolicy': 'true', 'enableVhostNamePatterns': 'true'}),
+            ('vhost', {
+                'hostname': '#.example.com', 'maxConnections': 2,
+                'allowUnknownUser': 'true',
+                'groups': {
+                    '$default': {
+                        'users': '*',
+                        'remoteHosts': '*',
+                        'sources': '*',
+                        'targets': '*',
+                        'allowDynamicSource': True
+                    }
+                }
+            })
+        ])
+
+        cls.router = cls.tester.qdrouterd('vhost-policy-config-hash-pattern', config, wait=False)
+        cls.timed_out = False
+        try:
+            cls.router.wait_ready(timeout = 5)
+        except Exception:
+            cls.timed_out = True
+
+    def address(self):
+        return self.router.addresses[0]
+
+    def test_vhost_created(self):
+        # If the test fails then the router does not start
+        self.assertEqual(False, VhostPolicyConfigHashPattern.timed_out)
+
+
+class PolicyConnectionAliasTest(MessagingHandler):
+    """
+    This test tries to send an AMQP Open with a selectable hostname.
+    The hostname is expected to be an alias for a vhost. When the alias selects
+    the vhost then the connection is allowed.
+    """
+    def __init__(self, test_host, target_hostname, send_address, print_to_console=False):
+        super(PolicyConnectionAliasTest, self).__init__()
+        self.test_host = test_host # router listener
+        self.target_hostname = target_hostname # vhost name for AMQP Open
+        self.send_address = send_address # dummy address allowed by policy
+
+        self.test_conn = None
+        self.dummy_sender = None
+        self.dummy_receiver = None
+        self.error = None
+        self.shut_down = False
+        self.connection_open_seen = False
+
+        self.logger = Logger(title=("PolicyConnectionAliasTest - use virtual_host '%s'" % (self.target_hostname)), print_to_console=print_to_console)
+        self.log_unhandled = False
+
+    def timeout(self):
+        self.error = "Timeout Expired"
+        self.logger.log("self.timeout " + self.error)
+        self._shut_down_test()
+
+    def on_start(self, event):
+        self.logger.log("on_start")
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
+        self.test_conn = event.container.connect(self.test_host.addresses[0],
+                                                 virtual_host=self.target_hostname)
+        self.logger.log("on_start: done")
+
+    def on_connection_opened(self, event):
+        # This happens even if the connection is rejected.
+        #  If the connection is rejected then it is immediately closed.
+        # Create a sender and receiver.
+        #  If the sender gets on_sendable then the connection stayed up as expected.
+        self.logger.log("on_connection_opened")
+        self.connection_open_seen = True
+        self.dummy_sender = event.container.create_sender(self.test_conn, self.send_address)
+        self.dummy_receiver = event.container.create_receiver(self.test_conn, self.send_address)
+
+    def on_sendable(self, event):
+        # Success
+        self.logger.log("on_sendable: test is a success")
+        self._shut_down_test()
+
+    def on_connection_remote_close(self, event):
+        self.logger.log("on_connection_remote_close")
+        if self.connection_open_seen and not self.shut_down:
+            self.error = "Policy enforcement fail: expected connection was denied."
+            self._shut_down_test()
+
+    def on_unhandled(self, method, *args):
+        pass # self.logger.log("on_unhandled %s" % (method))
+
+    def _shut_down_test(self):
+        self.shut_down = True
+        if self.timer:
+            self.timer.cancel()
+            self.timer = None
+        if self.test_conn:
+            self.test_conn.close()
+            self.test_conn = None
+
+    def run(self):
+        try:
+            Container(self).run()
+        except Exception as e:
+            self.error = "Container run exception: %s" % (e)
+            self.logger.log(self.error)
+            self.logger.dump()
+
+
+class PolicyVhostAlias(TestCase):
+    """
+    Verify vhost aliases.
+     * A policy defines vhost A with alias B.
+     * A client opens a connection with hostname B in the AMQP Open.
+     * The test expects the connection to succeed using vhost A policy settings.
+    """
+    @classmethod
+    def setUpClass(cls):
+        """Start the router"""
+        super(PolicyVhostAlias, cls).setUpClass()
+
+        def router(name, mode, extra=None):
+            config = [
+                ('router', {'mode': mode,
+                            'id': name}),
+                ('listener', {'role': 'normal',
+                              'port': cls.tester.get_port()}),
+                ('policy', {'enableVhostPolicy': 'true'}),
+                ('vhost', {'hostname': 'A',
+                           'allowUnknownUser': 'true',
+                           'aliases': 'B',
+                           'groups': {
+                               '$default': {
+                                   'users': '*',
+                                   'maxConnections': 100,
+                                   'remoteHosts': '*',
+                                   'sources': '*',
+                                   'targets': '*',
+                                   'allowAnonymousSender': 'true',
+                                   'allowWaypointLinks': 'true',
+                                   'allowDynamicSource': 'true'
+                               }
+                           }
+                })
+            ]
+
+            config = Qdrouterd.Config(config)
+            cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
+            return cls.routers[-1]
+
+        cls.routers = []
+
+        router('A', 'interior')
+        cls.INT_A = cls.routers[0]
+        cls.INT_A.listener = cls.INT_A.addresses[0]
+
+    def test_100_policy_aliases(self):
+        test = PolicyConnectionAliasTest(PolicyVhostAlias.INT_A,
+                                         "B",
+                                         "address-B")
+        test.run()
+        if test.error is not None:
+            test.logger.log("test_100 test error: %s" % (test.error))
+            test.logger.dump()
+        self.assertTrue(test.error is None)
+
+
+class PolicyVhostMultiTenantBlankHostname(TestCase):
+    """
+    DISPATCH-1732: verify that a multitenant listener can handle an Open
+    with no hostname field.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        """Start the router"""
+        super(PolicyVhostMultiTenantBlankHostname, cls).setUpClass()
+
+        def router(name, mode, extra=None):
+            config = [
+                ('router', {'mode': mode,
+                            'id': name}),
+                ('listener', {'role': 'normal',
+                              'multiTenant': 'true',
+                              'port': cls.tester.get_port(),
+                              'policyVhost': 'myhost'}),
+                ('policy', {'enableVhostPolicy': 'true'}),
+                ('vhost', {'hostname': 'myhost',
+                           'allowUnknownUser': 'true',
+                           'groups': {
+                               '$default': {
+                                   'users': '*',
+                                   'maxConnections': 100,
+                                   'remoteHosts': '*',
+                                   'sources': '*',
+                                   'targets': '*',
+                                   'allowAnonymousSender': 'true',
+                                   'allowWaypointLinks': 'true',
+                                   'allowDynamicSource': 'true'
+                               }
+                           }
+                           })
+            ]
+
+            config = Qdrouterd.Config(config)
+            cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
+            return cls.routers[-1]
+
+        cls.routers = []
+
+        router('A', 'interior')
+        cls.INT_A = cls.routers[0]
+        cls.INT_A.listener = cls.INT_A.addresses[0]
+
+    def test_101_policy_alias_blank_vhost(self):
+        test = PolicyConnectionAliasTest(PolicyVhostMultiTenantBlankHostname.INT_A,
+                                         "",
+                                         "address-blank-101")
+        test.run()
+        if test.error is not None:
+            test.logger.log("test_101 test error: %s" % (test.error))
+            test.logger.dump()
+        self.assertTrue(test.error is None)
 
 
 if __name__ == '__main__':

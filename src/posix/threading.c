@@ -26,6 +26,7 @@
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/ctools.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <pthread.h>
 #include <assert.h>
 
@@ -150,26 +151,53 @@ void sys_rwlock_unlock(sys_rwlock_t *lock)
 
 struct sys_thread_t {
     pthread_t thread;
+    void *(*f)(void *);
+    void *arg;
 };
+
+// initialize the per-thread _self to a non-zero value.  This dummy value will
+// be returned when sys_thread_self() is called from the process's main thread
+// of execution (which is not a pthread).  Using a non-zero value provides a
+// way to distinguish a thread id from a zero (unset) value.
+//
+static sys_thread_t  _main_thread_id;
+static __thread sys_thread_t *_self = &_main_thread_id;
+
+
+// bootstrap _self before calling thread's main function
+//
+static void *_thread_init(void *arg)
+{
+    _self = (sys_thread_t*) arg;
+    return _self->f(_self->arg);
+}
+
 
 sys_thread_t *sys_thread(void *(*run_function) (void *), void *arg)
 {
     sys_thread_t *thread = NEW(sys_thread_t);
-    pthread_create(&(thread->thread), 0, run_function, arg);
+    thread->f = run_function;
+    thread->arg = arg;
+    pthread_create(&(thread->thread), 0, _thread_init, (void*) thread);
     return thread;
 }
 
-long sys_thread_id(sys_thread_t *thread) {
-    return (long) thread->thread;
+
+sys_thread_t *sys_thread_self()
+{
+    return _self;
 }
+
 
 void sys_thread_free(sys_thread_t *thread)
 {
+    assert(thread != &_main_thread_id);
     free(thread);
 }
 
 
 void sys_thread_join(sys_thread_t *thread)
 {
+    assert(thread != &_main_thread_id);
     pthread_join(thread->thread, 0);
 }

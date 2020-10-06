@@ -105,6 +105,7 @@ qdr_connection_t *qdr_connection_opened(qdr_core_t            *core,
     conn->oper_status           = QDR_CONN_OPER_UP;
     DEQ_INIT(conn->links);
     DEQ_INIT(conn->work_list);
+    DEQ_INIT(conn->streaming_link_pool);
     conn->connection_info->role = conn->role;
     conn->work_lock = sys_mutex();
     conn->conn_uptime = core->uptime_ticks;
@@ -161,7 +162,9 @@ qdr_connection_info_t *qdr_connection_info(bool             is_encrypted,
                                            const char      *container,
                                            pn_data_t       *connection_properties,
                                            int              ssl_ssf,
-                                           bool             ssl)
+                                           bool             ssl,
+                                           const char      *version,
+                                           bool             streaming_links)
 {
     qdr_connection_info_t *connection_info = new_qdr_connection_info_t();
     ZERO(connection_info);
@@ -182,6 +185,8 @@ qdr_connection_info_t *qdr_connection_info(bool             is_encrypted,
         connection_info->ssl_cipher = strdup(ssl_cipher);
     if (user)
         connection_info->user = strdup(user);
+    if (version)
+        connection_info->version = strdup(version);
 
     pn_data_t *qdr_conn_properties = pn_data(0);
     pn_data_copy(qdr_conn_properties, connection_properties);
@@ -189,7 +194,7 @@ qdr_connection_info_t *qdr_connection_info(bool             is_encrypted,
     connection_info->connection_properties = qdr_conn_properties;
     connection_info->ssl_ssf = ssl_ssf;
     connection_info->ssl     = ssl;
-
+    connection_info->streaming_links = streaming_links;
     return connection_info;
 }
 
@@ -202,6 +207,7 @@ static void qdr_connection_info_free(qdr_connection_info_t *ci)
     free(ci->ssl_proto);
     free(ci->ssl_cipher);
     free(ci->user);
+    free(ci->version);
     pn_data_free(ci->connection_properties);
     free_qdr_connection_info_t(ci);
 }
@@ -520,7 +526,8 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
                                   qdr_terminus_t   *source,
                                   qdr_terminus_t   *target,
                                   const char       *name,
-                                  const char       *terminus_addr)
+                                  const char       *terminus_addr,
+                                  uint64_t         *link_id)
 {
     qdr_action_t   *action         = qdr_action(qdr_link_inbound_first_attach_CT, "link_first_attach");
     qdr_link_t     *link           = new_qdr_link_t();
@@ -529,6 +536,7 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
     ZERO(link);
     link->core = conn->core;
     link->identity = qdr_identifier(conn->core);
+    *link_id = link->identity;
     link->conn = conn;
     link->name = (char*) malloc(strlen(name) + 1);
 
@@ -834,7 +842,7 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
 
         if (!qdr_delivery_receive_complete(dlv)) {
             qdr_delivery_set_aborted(dlv, true);
-            qdr_deliver_continue_peers_CT(core, dlv);
+            qdr_deliver_continue_peers_CT(core, dlv, false);
         }
 
         if (dlv->multicast) {
@@ -883,7 +891,7 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
 
         if (!qdr_delivery_receive_complete(dlv)) {
             qdr_delivery_set_aborted(dlv, true);
-            qdr_deliver_continue_peers_CT(core, dlv);
+            qdr_deliver_continue_peers_CT(core, dlv, false);
         }
 
         peer = qdr_delivery_first_peer_CT(dlv);
@@ -927,7 +935,8 @@ static void qdr_link_abort_undelivered_CT(qdr_core_t *core, qdr_link_t *link)
 static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link, const char *log_text)
 {
     //
-    // Remove the link from the master list of links
+    // Remove the link from the master list of links and possibly the streaming
+    // link pool
     //
     DEQ_REMOVE(core->open_links, link);
 
@@ -953,8 +962,10 @@ static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_li
     if (qd_bitmask_valid_bit_value(conn->mask_bit)) {
         if (link->link_type == QD_LINK_CONTROL)
             core->control_links_by_mask_bit[conn->mask_bit] = 0;
-        if (link->link_type == QD_LINK_ROUTER)
-            core->data_links_by_mask_bit[conn->mask_bit].links[link->priority] = 0;
+        if (link->link_type == QD_LINK_ROUTER) {
+            if (link == core->data_links_by_mask_bit[conn->mask_bit].links[link->priority])
+                core->data_links_by_mask_bit[conn->mask_bit].links[link->priority] = 0;
+        }
     }
 
     //
@@ -997,6 +1008,11 @@ static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_li
                          ? &link->owning_addr->rlinks
                          : &link->owning_addr->inlinks,
                          link,  QDR_LINK_LIST_CLASS_ADDRESS);
+    }
+
+    if (link->in_streaming_pool) {
+        DEQ_REMOVE_N(STREAMING_POOL, conn->streaming_link_pool, link);
+        link->in_streaming_pool = false;
     }
 
     //
@@ -1120,6 +1136,19 @@ qdr_link_t *qdr_create_link_CT(qdr_core_t        *core,
 
 void qdr_link_outbound_detach_CT(qdr_core_t *core, qdr_link_t *link, qdr_error_t *error, qdr_condition_t condition, bool close)
 {
+    //
+    // Ensure a pooled link is no longer available for streaming messages
+    //
+    if (link->streaming) {
+        if (link->in_streaming_pool) {
+            DEQ_REMOVE_N(STREAMING_POOL, link->conn->streaming_link_pool, link);
+            link->in_streaming_pool = false;
+        }
+    }
+
+    //
+    // tell the I/O thread to do the detach
+    //
     qdr_link_work_t *work = new_qdr_link_work_t();
     ZERO(work);
     work->work_type  = ++link->detach_count == 1 ? QDR_LINK_WORK_FIRST_DETACH : QDR_LINK_WORK_SECOND_DETACH;
@@ -1283,72 +1312,80 @@ void qdr_check_addr_CT(qdr_core_t *core, qdr_address_t *addr)
 
 static void qdr_connection_opened_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
 {
-
     qdr_connection_t *conn = safe_deref_qdr_connection_t(action->args.connection.conn);
-    if (!discard && conn) {
 
-        do {
-            DEQ_ITEM_INIT(conn);
-            DEQ_INSERT_TAIL(core->open_connections, conn);
+    if (!conn || discard) {
+        qdr_field_free(action->args.connection.connection_label);
+        qdr_field_free(action->args.connection.container_id);
 
-            if (conn->role == QDR_ROLE_NORMAL) {
-                //
-                // No action needed for NORMAL connections
-                //
+        if (conn)
+            qdr_connection_free(conn);
+        return;
+    }
+
+    do {
+        DEQ_ITEM_INIT(conn);
+        DEQ_INSERT_TAIL(core->open_connections, conn);
+
+        if (conn->role == QDR_ROLE_NORMAL) {
+            //
+            // No action needed for NORMAL connections
+            //
+            break;
+        }
+
+        if (conn->role == QDR_ROLE_INTER_ROUTER) {
+            //
+            // Assign a unique mask-bit to this connection as a reference to be used by
+            // the router module
+            //
+            if (qd_bitmask_first_set(core->neighbor_free_mask, &conn->mask_bit)) {
+                qd_bitmask_clear_bit(core->neighbor_free_mask, conn->mask_bit);
+                assert(core->rnode_conns_by_mask_bit[conn->mask_bit] == 0);
+                core->rnode_conns_by_mask_bit[conn->mask_bit] = conn;
+            } else {
+                qd_log(core->log, QD_LOG_CRITICAL, "Exceeded maximum inter-router connection count");
+                conn->role = QDR_ROLE_NORMAL;
                 break;
             }
 
-            if (conn->role == QDR_ROLE_INTER_ROUTER) {
+            if (!conn->incoming) {
                 //
-                // Assign a unique mask-bit to this connection as a reference to be used by
-                // the router module
+                // The connector-side of inter-router connections is responsible for setting up the
+                // inter-router links:  Two (in and out) for control, 2 * QDR_N_PRIORITIES for
+                // routed-message transfer.
                 //
-                if (qd_bitmask_first_set(core->neighbor_free_mask, &conn->mask_bit))
-                    qd_bitmask_clear_bit(core->neighbor_free_mask, conn->mask_bit);
-                else {
-                    qd_log(core->log, QD_LOG_CRITICAL, "Exceeded maximum inter-router connection count");
-                    conn->role = QDR_ROLE_NORMAL;
-                    break;
-                }
+                (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_INCOMING, qdr_terminus_router_control(), qdr_terminus_router_control(), QD_SSN_ROUTER_CONTROL);
+                (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_OUTGOING, qdr_terminus_router_control(), qdr_terminus_router_control(), QD_SSN_ROUTER_CONTROL);
+                STATIC_ASSERT((QD_SSN_ROUTER_DATA_PRI_9 - QD_SSN_ROUTER_DATA_PRI_0 + 1) == QDR_N_PRIORITIES, PRIORITY_SESSION_NOT_SAME);
 
-                if (!conn->incoming) {
-                    //
-                    // The connector-side of inter-router connections is responsible for setting up the
-                    // inter-router links:  Two (in and out) for control, 2 * QDR_N_PRIORITIES for
-                    // routed-message transfer.
-                    //
-                    (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_INCOMING, qdr_terminus_router_control(), qdr_terminus_router_control(), QD_SSN_ROUTER_CONTROL);
-                    (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_OUTGOING, qdr_terminus_router_control(), qdr_terminus_router_control(), QD_SSN_ROUTER_CONTROL);
-                    STATIC_ASSERT((QD_SSN_ROUTER_DATA_PRI_9 - QD_SSN_ROUTER_DATA_PRI_0 + 1) == QDR_N_PRIORITIES, PRIORITY_SESSION_NOT_SAME);
-
-                    for (int priority = 0; priority < QDR_N_PRIORITIES; ++ priority) {
-                        // a session is reserved for each priority link
-                        qd_session_class_t sc = (qd_session_class_t)(QD_SSN_ROUTER_DATA_PRI_0 + priority);
-                        (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_INCOMING, qdr_terminus_router_data(), qdr_terminus_router_data(), sc);
-                        (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_OUTGOING, qdr_terminus_router_data(), qdr_terminus_router_data(), sc);
-                    }
+                for (int priority = 0; priority < QDR_N_PRIORITIES; ++ priority) {
+                    // a session is reserved for each priority link
+                    qd_session_class_t sc = (qd_session_class_t)(QD_SSN_ROUTER_DATA_PRI_0 + priority);
+                    (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_INCOMING, qdr_terminus_router_data(), qdr_terminus_router_data(), sc);
+                    (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_OUTGOING, qdr_terminus_router_data(), qdr_terminus_router_data(), sc);
                 }
             }
+        }
 
-            if (conn->role == QDR_ROLE_ROUTE_CONTAINER) {
-                //
-                // Notify the route-control module that a route-container connection has opened.
-                // There may be routes that need to be activated due to the opening of this connection.
-                //
+        if (conn->role == QDR_ROLE_ROUTE_CONTAINER) {
+            //
+            // Notify the route-control module that a route-container connection has opened.
+            // There may be routes that need to be activated due to the opening of this connection.
+            //
 
-                //
-                // If there's a connection label, use it as the identifier.  Otherwise, use the remote
-                // container id.
-                //
-                qdr_field_t *cid = action->args.connection.connection_label ?
-                    action->args.connection.connection_label : action->args.connection.container_id;
-                if (cid)
-                    qdr_route_connection_opened_CT(core, conn, action->args.connection.container_id, action->args.connection.connection_label);
-            }
-        } while (false);
+            //
+            // If there's a connection label, use it as the identifier.  Otherwise, use the remote
+            // container id.
+            //
+            qdr_field_t *cid = action->args.connection.connection_label ?
+                action->args.connection.connection_label : action->args.connection.container_id;
+            if (cid)
+                qdr_route_connection_opened_CT(core, conn, action->args.connection.container_id, action->args.connection.connection_label);
+        }
+    } while (false);
 
-        qdrc_event_conn_raise(core, QDRC_EVENT_CONN_OPENED, conn);
-    }
+    qdrc_event_conn_raise(core, QDRC_EVENT_CONN_OPENED, conn);
 
     qdr_field_free(action->args.connection.connection_label);
     qdr_field_free(action->args.connection.container_id);
@@ -1361,6 +1398,38 @@ void qdr_connection_free(qdr_connection_t *conn)
     qdr_error_free(conn->error);
     qdr_connection_info_free(conn->connection_info);
     free_qdr_connection_t(conn);
+}
+
+
+// create a new outoing link for streaming messages
+qdr_link_t *qdr_connection_new_streaming_link_CT(qdr_core_t *core, qdr_connection_t *conn)
+{
+    qdr_link_t *out_link = 0;
+
+    switch (conn->role) {
+    case QDR_ROLE_INTER_ROUTER:
+        out_link = qdr_create_link_CT(core, conn, QD_LINK_ROUTER, QD_OUTGOING,
+                                      qdr_terminus_router_data(), qdr_terminus_router_data(),
+                                      QD_SSN_LINK_STREAMING);
+        break;
+    case QDR_ROLE_EDGE_CONNECTION:
+        out_link = qdr_create_link_CT(core, conn, QD_LINK_ENDPOINT, QD_OUTGOING,
+                                      qdr_terminus(0), qdr_terminus(0),
+                                      QD_SSN_LINK_STREAMING);
+        break;
+    default:
+        assert(false);
+        break;
+    }
+
+    if (out_link) {
+        out_link->streaming = true;
+        if (!conn->has_streaming_links) {
+            qdr_add_connection_ref(&core->streaming_connections, conn);
+            conn->has_streaming_links = true;
+        }
+    }
+    return out_link;
 }
 
 
@@ -1379,8 +1448,10 @@ static void qdr_connection_closed_CT(qdr_core_t *core, qdr_action_t *action, boo
     // Give back the router mask-bit.
     //
     if (conn->role == QDR_ROLE_INTER_ROUTER) {
+        assert(qd_bitmask_valid_bit_value(conn->mask_bit));
         qdr_reset_sheaf(core, conn->mask_bit);
         qd_bitmask_set_bit(core->neighbor_free_mask, conn->mask_bit);
+        core->rnode_conns_by_mask_bit[conn->mask_bit] = 0;
     }
 
     //
@@ -1411,6 +1482,11 @@ static void qdr_connection_closed_CT(qdr_core_t *core, qdr_action_t *action, boo
         //
         qdr_link_cleanup_CT(core, conn, link, "Link closed due to connection loss"); // link_cleanup disconnects and frees the ref.
         link_ref = DEQ_HEAD(conn->links);
+    }
+
+    if (conn->has_streaming_links) {
+        assert(DEQ_IS_EMPTY(conn->streaming_link_pool));  // all links have been released
+        qdr_del_connection_ref(&core->streaming_connections, conn);
     }
 
     //
@@ -1484,8 +1560,10 @@ static void qdr_attach_link_data_CT(qdr_core_t *core, qdr_connection_t *conn, qd
 
 static void qdr_detach_link_data_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link)
 {
+    // if this link is in the priority sheaf it needs to be removed
     if (conn->role == QDR_ROLE_INTER_ROUTER)
-        core->data_links_by_mask_bit[conn->mask_bit].links[link->priority] = 0;
+        if (link == core->data_links_by_mask_bit[conn->mask_bit].links[link->priority])
+            core->data_links_by_mask_bit[conn->mask_bit].links[link->priority] = 0;
 }
 
 
@@ -1796,6 +1874,17 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
         return;
 
     } else {
+
+        //
+        // ensure a pooled link is no longer available for use
+        //
+        if (link->streaming) {
+            if (link->in_streaming_pool) {
+                DEQ_REMOVE_N(STREAMING_POOL, conn->streaming_link_pool, link);
+                link->in_streaming_pool = false;
+            }
+        }
+
         //
         // For routed links, propagate the detach
         //
@@ -1841,6 +1930,7 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
         }
 
         if (link->link_direction == QD_INCOMING) {
+            qdrc_event_link_raise(core, QDRC_EVENT_LINK_IN_DETACHED, link);
             //
             // Handle incoming link cases
             //
@@ -1880,6 +1970,7 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
             //
             // Handle outgoing link cases
             //
+            qdrc_event_link_raise(core, QDRC_EVENT_LINK_OUT_DETACHED, link);
             switch (link->link_type) {
             case QD_LINK_ENDPOINT:
             case QD_LINK_EDGE_DOWNLINK:

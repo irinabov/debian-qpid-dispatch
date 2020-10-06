@@ -325,7 +325,7 @@ class BusManager(Node):
         rows.append(('Mode',           router.mode))
         rows.append(('Router Id',      router.id))
         try:
-            rows.append(('Worker Threads', router.workerThreads))
+            rows.append(('Worker Threads', PlainNum(router.workerThreads)))
         except:
             pass
 
@@ -739,7 +739,7 @@ class BusManager(Node):
             # router built w/o memory pools:
             print("No memory statistics available")
             return
-        title = "Types"
+        title = "Memory Pools"
         sorter = Sorter(heads, rows, 'type', 0, True)
         dispRows = sorter.getSorted()
         disp.formattedTable(title, heads, dispRows)
@@ -762,10 +762,235 @@ class BusManager(Node):
 
         rows.append(pooled_total)
 
-        disp.formattedTable("\nSummary",
+        disp.formattedTable("\nMemory Summary",
                             [Header("VmSize", hdr_format),
                              Header("Pooled", Header.KiMiGi)],
                             [rows])
+
+
+    def displayPolicy(self, show_date_id=True):
+        disp = Display(prefix="  ", bodyFormat=self.bodyFormat)
+        heads = []
+        heads.append(Header("attr"))
+        heads.append(Header("value"))
+        rows = []
+
+        objects = self.query('org.apache.qpid.dispatch.policy')
+
+        policy = objects[0]
+
+        if show_date_id:
+            self.display_datetime_router_id()
+
+        rows.append(('Maximum Concurrent Connections', PlainNum(policy.maxConnections)))
+        if 'maxMessageSize' in policy:
+            rows.append(('Maximum Message Size',           PlainNum(policy.maxMessageSize)))
+        rows.append(('Enable Vhost Policy',            policy.enableVhostPolicy))
+        rows.append(('Enable Vhost Name Patterns',     policy.enableVhostNamePatterns))
+        rows.append(('Policy Directory',               policy.policyDir if len(policy.policyDir) > 0 else '(nil)'))
+        rows.append(('Default Vhost',                  policy.defaultVhost if len(policy.defaultVhost) > 0 else '(nil)'))
+        disp.formattedTable("Policy Configuration", heads, rows)
+
+        heads = []
+        heads.append(Header("attr"))
+        heads.append(Header("value"))
+        rows = []
+
+        rows.append(('Connections Processed',       PlainNum(policy.connectionsProcessed)))
+        rows.append(('Connections Denied',          PlainNum(policy.connectionsDenied)))
+        rows.append(('Connections Current',         PlainNum(policy.connectionsCurrent)))
+        rows.append(('Links Denied',                PlainNum(policy.linksDenied)))
+        if 'maxMessageSizeDenied' in policy:
+            rows.append(('Maximum Message Size Denied', PlainNum(policy.maxMessageSizeDenied)))
+        rows.append(('Total Denials',               PlainNum(policy.totalDenials)))
+
+        disp.formattedTable("\nPolicy Status", heads, rows)
+
+    def showNodefaultString(self, dict, key, schema):
+        return dict[key] if key in dict else schema[key]['default'] if 'default' in schema[key] else '(nil)'
+
+    def showNodefaultBool(self, dict, key, schema):
+        return dict[key] if key in dict else schema[key]['default'] if 'default' in schema[key] else 'False'
+
+    def showNodefaultInt(self, dict, key, schema):
+        return PlainNum(dict[key]) if key in dict else PlainNum(schema[key]['default']) if 'default' in schema[key] else '(nil)'
+
+    def displayVhosts(self, show_date_id=True):
+        disp = Display(prefix="  ", bodyFormat=self.bodyFormat)
+
+        vhosts = self.query('org.apache.qpid.dispatch.vhost')
+
+        if len(vhosts) == 0:
+            print("No Vhosts")
+            return
+        heads = []
+        heads.append(Header("hostname"))
+        heads.append(Header("maxConnections"))
+
+        have_max_message_size = False
+        if 'maxMessageSize' in vhosts[0]:
+            have_max_message_size = True
+            heads.append(Header('maxMessageSize'))
+
+        heads.append(Header("maxConnectionsPerUser"))
+        heads.append(Header("maxConnectionsPerHost"))
+        heads.append(Header("allowUnknownUser"))
+        heads.append(Header("groups"))
+
+        rows = []
+        for vhost in vhosts:
+            row = []
+            row.append(vhost.hostname)
+            row.append(PlainNum(vhost.maxConnections))
+            if have_max_message_size:
+                row.append(PlainNum(vhost.maxMessageSize))
+            row.append(PlainNum(vhost.maxConnectionsPerUser))
+            row.append(PlainNum(vhost.maxConnectionsPerHost))
+            row.append(vhost.allowUnknownUser)
+            row.append(PlainNum(len(vhost.groups)))
+            rows.append(tuple(row))
+
+        disp.formattedTable("Vhosts", heads, rows)
+
+    def displayVhostgroups(self, show_date_id=True):
+        disp = Display(prefix="  ", bodyFormat=self.bodyFormat)
+
+        vhosts = self.query('org.apache.qpid.dispatch.vhost')
+        schema = self.get_schema()
+        vg_schema = schema['entityTypes']['vhostUserGroupSettings']['attributes']
+
+        if len(vhosts) == 0:
+            print("No Vhosts")
+            return
+        # Create table for all vhosts and groups omitting
+        # strings that are potentially 'very long'.
+        heads = []
+        heads.append(Header("vhost"))
+        heads.append(Header("group"))
+        heads.append(Header("maxConnectionsPerUser"))
+        heads.append(Header("maxConnectionsPerHost"))
+
+        have_max_message_size = False
+        if 'maxMessageSize' in vhosts[0]:
+            have_max_message_size = True
+            heads.append(Header('maxMessageSize'))
+
+        heads.append(Header("maxFrameSize"))
+        heads.append(Header("maxSessionWindow"))
+        heads.append(Header("maxSessions"))
+        heads.append(Header("maxSenders"))
+        heads.append(Header("maxReceivers"))
+        heads.append(Header("allowDynamicSource"))
+        heads.append(Header("allowAnonymousSender"))
+        heads.append(Header("allowUserIdProxy"))
+        heads.append(Header("allowWaypointLinks"))
+        heads.append(Header("allowDynamicLinkRoutes"))
+        heads.append(Header("allowAdminStatusUpdate"))
+        heads.append(Header("allowFallbackLinks"))
+        rows = []
+        for vhost in vhosts:
+            groups = vhost["groups"]
+            if len(groups) > 0:
+                for groupname in groups:
+                    group = groups[groupname]
+                    row = []
+                    row.append(vhost.hostname)
+                    row.append(groupname)
+                    row.append(self.showNodefaultInt(group, "maxConnectionsPerUser", vg_schema))
+                    row.append(self.showNodefaultInt(group, "maxConnectionsPerHost", vg_schema))
+                    if have_max_message_size:
+                        row.append(self.showNodefaultInt(group, "maxMessageSize", vg_schema))
+                    row.append(self.showNodefaultInt(group, "maxFrameSize", vg_schema))
+                    row.append(self.showNodefaultInt(group, "maxSessionWindow", vg_schema))
+                    row.append(self.showNodefaultInt(group, "maxSessions", vg_schema))
+                    row.append(self.showNodefaultInt(group, "maxSenders", vg_schema))
+                    row.append(self.showNodefaultInt(group, "maxReceivers", vg_schema))
+                    row.append(self.showNodefaultBool(group, "allowDynamicSource", vg_schema))
+                    row.append(self.showNodefaultBool(group, "allowAnonymousSender", vg_schema))
+                    row.append(self.showNodefaultBool(group, "allowUserIdProxy", vg_schema))
+                    row.append(self.showNodefaultBool(group, "allowWaypointLinks", vg_schema))
+                    row.append(self.showNodefaultBool(group, "allowDynamicLinkRoutes", vg_schema))
+                    row.append(self.showNodefaultBool(group, "allowAdminStatusUpdate", vg_schema))
+                    row.append(self.showNodefaultBool(group, "allowFallbackLinks", vg_schema))
+                    rows.append(tuple(row))
+        disp.formattedTable("Vhost Groups", heads, rows)
+
+        # Create tables per vhost and per usergroup
+        # showing only potentially lengthy strings.
+        heads = []
+        heads.append(Header("attr"))
+        heads.append(Header("value"))
+
+        for vhost in vhosts:
+            groups = vhost["groups"]
+            if len(groups) > 0:
+                for groupname in groups:
+                    group = groups[groupname]
+                    rows = []
+                    rows.append(("vhost",         vhost.hostname))
+                    rows.append(("group",         groupname))
+                    rows.append(("users",         self.showNodefaultString(group, "users", vg_schema)))
+                    rows.append(("remoteHosts",   self.showNodefaultString(group, "remoteHosts", vg_schema)))
+                    rows.append(("sources",       self.showNodefaultString(group, "sources", vg_schema)))
+                    rows.append(("targets",       self.showNodefaultString(group, "targets", vg_schema)))
+                    rows.append(("sourcePattern", self.showNodefaultString(group, "sourcePattern", vg_schema)))
+                    rows.append(("targetPattern", self.showNodefaultString(group, "targetPattern", vg_schema)))
+                    disp.formattedTable(("\nVhost '%s' UserGroup '%s'" % (vhost.hostname, groupname)), heads, rows)
+
+    def displayVhoststats(self, show_date_id=True):
+        disp = Display(prefix="  ", bodyFormat=self.bodyFormat)
+
+        vstats = self.query('org.apache.qpid.dispatch.vhostStats')
+
+        if len(vstats) == 0:
+            print("No Vhost Stats")
+            return
+        heads = []
+        heads.append(Header("hostname"))
+        heads.append(Header("connectionsApproved"))
+        heads.append(Header("connectionsDenied"))
+        heads.append(Header("connectionsCurrent"))
+        heads.append(Header("sessionDenied"))
+        heads.append(Header("senderDenied"))
+        heads.append(Header("receiverDenied"))
+        have_max_message_size = False
+        if 'maxMessageSizeDenied' in vstats[0]:
+            have_max_message_size = True
+            heads.append(Header("maxMessageSizeDenied"))
+        rows = []
+
+        for vstat in vstats:
+            row = []
+            row.append(vstat.hostname)
+            row.append(PlainNum(vstat.connectionsApproved))
+            row.append(PlainNum(vstat.connectionsDenied))
+            row.append(PlainNum(vstat.connectionsCurrent))
+            row.append(PlainNum(vstat.sessionDenied))
+            row.append(PlainNum(vstat.senderDenied))
+            row.append(PlainNum(vstat.receiverDenied))
+            if have_max_message_size:
+                row.append(PlainNum(vstat.maxMessageSizeDenied))
+            rows.append(tuple(row))
+        disp.formattedTable("Vhost Stats", heads, rows)
+
+        heads = []
+        heads.append(Header("vhost"))
+        heads.append(Header("user"))
+        heads.append(Header("remote hosts"))
+        rows = []
+
+        for vstat in vstats:
+            ustates = vstat["perUserState"]
+            if len(ustates) > 0:
+                for ustate in ustates:
+                    rows.append((
+                        vstat.hostname,
+                        ustate,
+                        ustates[ustate]
+                        ))
+        disp.formattedTable("\nVhost User Stats", heads, rows)
+
+
 
     def displayLog(self):
         log = self.get_log(limit=self.opts.limit)
@@ -792,6 +1017,15 @@ class BusManager(Node):
         self.displayGeneral(show_date_id=False)
         print("")
         self.displayMemory(show_date_id=False)
+        print("")
+        self.displayPolicy(show_date_id=False)
+        print("")
+        self.displayVhosts(show_date_id=False)
+        print("")
+        # Groups is an ugly display. Show it only on demand.
+        # self.displayVhostgroups(show_date_id=False)
+        # print("")
+        self.displayVhoststats(show_date_id=False)
         print("")
 
     def has_nodes(self):

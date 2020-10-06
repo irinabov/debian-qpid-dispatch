@@ -193,7 +193,6 @@ typedef struct qd_server_config_t {
         char *ssl_uid_name_mapping_file;
         char *ssl_password;
         char *ssl_trusted_certificate_db;
-        char *ssl_trusted_certificates;
         char *ssl_ciphers;
         char *ssl_protocols;
     } sasl_plugin_config;
@@ -315,14 +314,6 @@ typedef struct qd_server_config_t {
     char *ssl_trusted_certificate_db;
 
     /**
-     * Path to an optional file containing the PEM-formatted set of certificates of
-     * trusted CAs for a particular connection/listener.  This must be a subset of the
-     * set of certificates in the ssl_trusted_certificate_db.  If this is left NULL,
-     * the entire set within the db will be used.
-     */
-    char *ssl_trusted_certificates;
-
-    /**
      * Iff true, require that the peer's certificate be supplied and that it be authentic
      * according to the set of trusted CAs.
      */
@@ -432,6 +423,11 @@ typedef struct qd_server_config_t {
      * Configured failover list
      */
     qd_failover_list_t *failover_list;
+
+    /**
+     * Extra connection properties to include in the outgoing Open frame.  Stored as a map.
+     */
+    pn_data_t *conn_props;
 
     /**
      * @name These fields are not primary configuration, they are computed.
@@ -604,7 +600,7 @@ bool qd_connection_strip_annotations_in(const qd_connection_t *c);
 
 void qd_connection_wake(qd_connection_t *ctx);
 
-int qd_connection_max_message_size(const qd_connection_t *c);
+uint64_t qd_connection_max_message_size(const qd_connection_t *c);
 
 /**
  * @}
