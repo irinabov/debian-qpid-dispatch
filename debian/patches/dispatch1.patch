@@ -1,0 +1,31 @@
+Description: Fix for i386 compile error
+ .
+ qpid-dispatch (1.15.0-1qpid+bionic1) bionic; urgency=medium
+ .
+   * Rebased to 1.15.0
+Author: Kim van der Riet <kvanderr@redhat.com>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: 2021-04-06
+
+--- qpid-dispatch-1.15.0.orig/tests/buffer_test.c
++++ qpid-dispatch-1.15.0/tests/buffer_test.c
+@@ -113,7 +113,7 @@ static char *test_buffer_list_append(voi
+     }
+     if (list_len != 26) {
+         static char error[100];
+-        sprintf(error, "Incorrect accumulated buffer size: %ld", list_len);
++        sprintf(error, "Incorrect accumulated buffer size: %zu", list_len);
+         return error;
+     }
+ 
