@@ -23,6 +23,7 @@ jobs:
   fast_finish: true
   allow_failures:
     - os: osx
+    - name: "qdrouterd:TSAN"
   include:
   - name: "apache-rat:check"
     os: linux
@@ -51,11 +52,11 @@ jobs:
   - name: "qdrouterd:Coverage"
     os: linux
     env:
-    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.31.0 BUILD_TYPE=Coverage
+    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.33.0 BUILD_TYPE=Coverage
   - name: "qdrouterd:RelWithDebInfo+MemoryDebug (gcc on xenial)"
     os: linux
     env:
-    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.31.0 BUILD_TYPE=RelWithDebInfo
+    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.33.0 BUILD_TYPE=RelWithDebInfo
     - DISPATCH_CMAKE_ARGS='-DRUNTIME_CHECK=asan -DCMAKE_C_FLAGS=-DQD_MEMORY_DEBUG'
   - name: "qdrouterd:RelWithDebInfo+MemoryDebug (clang on focal)"
     os: linux
@@ -67,6 +68,12 @@ jobs:
     # https://github.com/pypa/virtualenv/issues/1873
     - python -m pip install --user --upgrade pip
     - python -m pip install --user --upgrade tox virtualenv==20.0.23
+    # Install quart to run the http2 tests.
+    - python -m pip install --user quart
+    # DISPATCH-1883: Install selectors to run tcp echo server/client tools
+    - python -m pip install --user selectors
+    # Install grpcio and protobuf to run the grpc tests.
+    - python -m pip install --user grpcio protobuf
     env:
     - CC=clang-10
     - CXX=clang++-10
@@ -75,7 +82,24 @@ jobs:
   - name: "qdrouterd:Default Build"
     os: linux
     env:
-    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.31.0
+    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.33.0
+  - name: "qdrouterd:TSAN"
+    os: linux
+    dist: focal
+    before_install:
+      # https://github.com/pypa/virtualenv/issues/1740
+      # https://github.com/pypa/virtualenv/issues/1873
+      - python -m pip install --user --upgrade pip
+      - python -m pip install --user --upgrade tox virtualenv==20.0.23
+      # Install quart to run the http2 tests.
+      - python -m pip install --user quart
+      # DISPATCH-1883: Install selectors to run tcp echo server/client tools
+      - python -m pip install --user selectors
+      # Install grpcio and protobuf to run the grpc tests.
+      - python -m pip install --user grpcio protobuf
+    env:
+    - PATH="/usr/bin:$PATH" PROTON_VERSION=0.33.0
+    - DISPATCH_CMAKE_ARGS='-DRUNTIME_CHECK=tsan'
   - os: osx
     osx_image: xcode11
     env:
@@ -83,7 +107,7 @@ jobs:
     before_install:
     - bash ./macports.sh
     - export COLUMNS=80
-    - yes | sudo port install cmake swig swig-python libuv jsoncpp libwebsockets cyrus-sasl2 pkgconfig python37 py37-pip
+    - yes | sudo port install cmake swig swig-python libuv jsoncpp libwebsockets nghttp2 cyrus-sasl2 pkgconfig python37 py37-pip
     # set aliases for CMake's PythonInterp and PythonLibs to find MacPort's `python` on the path first
     - sudo port select --set python python37
     - sudo port select --set python3 python37
@@ -101,6 +125,7 @@ addons:
     - python2.7-dev
     - sasl2-bin
     - swig
+    - libnghttp2-dev
     # documentation
     - asciidoc
     - asciidoctor
@@ -110,6 +135,10 @@ addons:
     - tox
     # code coverage
     - lcov
+
+before_install:
+# Install and use the latest Node.js LTS version
+- nvm install "lts/*"
 
 install:
 - NPROC=2

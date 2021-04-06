@@ -34,8 +34,16 @@ if (CMAKE_BUILD_TYPE MATCHES "Deb|Cover")
   set (has_debug_symbols " (has debug symbols)")
 endif (CMAKE_BUILD_TYPE MATCHES "Deb|Cover")
 message(STATUS "Build type is \"${CMAKE_BUILD_TYPE}\"${has_debug_symbols}")
+# This is commonly needed so define it before we include anything else.
+string(TOUPPER "${CMAKE_BUILD_TYPE}" uppercase_CMAKE_BUILD_TYPE)
 
 option(QD_MEMORY_STATS "Track memory pool usage statistics" ON)
+
+if(uppercase_CMAKE_BUILD_TYPE STREQUAL "DEBUG" )
+    option(QD_ENABLE_ASSERTIONS "Enable assertions" ON)
+else()
+    option(QD_ENABLE_ASSERTIONS "Enable assertions" OFF)
+endif()
 
 file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION.txt" QPID_DISPATCH_VERSION)
 
@@ -57,17 +65,23 @@ endif (NOT APPLE)
 find_package(PythonInterp REQUIRED)
 find_package(PythonLibs REQUIRED)
 find_package(Threads REQUIRED)
-find_package(Proton 0.23 REQUIRED COMPONENTS Core Proactor)
+find_package(Proton 0.33.0 REQUIRED COMPONENTS Core Proactor)
 message(STATUS "Found Proton: ${Proton_LIBRARIES} (found version \"${Proton_VERSION}\")" )
-
 ##
 ## Optional dependencies
 ##
+
+# http2 support is optional
+find_package(libnghttp2 1.33.0)
+CMAKE_DEPENDENT_OPTION(USE_LIBNGHTTP2 "Use libnghttp2 for HTTP/2 support" ON
+                         "libnghttp2_FOUND" OFF)
 
 # Web Sockets
 find_package(LibWebSockets 2.4.2)
 CMAKE_DEPENDENT_OPTION(USE_LIBWEBSOCKETS "Use libwebsockets for WebSocket support" ON
                          "LIBWEBSOCKETS_FOUND" OFF)
+
+set(SKIP_DELETE_HTTP_LISTENER "True")
 if (LIBWEBSOCKETS_FOUND AND LIBWEBSOCKETS_VERSION_STRING)
   # This is a fix for DISPATCH-1513. libwebsockets versions 3.2.0 introduces a new flag called LWS_SERVER_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER
   # The new flag allows (as the flag says) HTTP pver HTTPS listeners. Since this flag is not available before lws 3.2.0 we need
@@ -77,6 +91,14 @@ if (LIBWEBSOCKETS_FOUND AND LIBWEBSOCKETS_VERSION_STRING)
   if ((LIBWEBSOCKETS_VERSION_STRING STREQUAL LWS_VERSION_WITH_SSL_FIX) OR (LIBWEBSOCKETS_VERSION_STRING STRGREATER  LWS_VERSION_WITH_SSL_FIX))
     set(TEST_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER "")
   endif()
+  # The listener delete functionality worked in all versions of LibWebSockets
+  # starting from v2.4.2 thru v3.2.3. It stopped working in v4.0.0 and beyond
+  if ( (LIBWEBSOCKETS_VERSION_STRING STREQUAL "2.4.2") OR (  (LIBWEBSOCKETS_VERSION_STRING STRGREATER_EQUAL  "3.0.0") AND (LIBWEBSOCKETS_VERSION_STRING STRLESS  "4.0.0") )  )
+    # Do not skip the tests (in system_tests_http.py) that specifically
+    # test deletion of http:yes listeners.
+    set(SKIP_DELETE_HTTP_LISTENER "False")
+  endif()
+
 endif(LIBWEBSOCKETS_FOUND AND LIBWEBSOCKETS_VERSION_STRING)
 
 # Python
@@ -132,7 +154,7 @@ set(QPID_DISPATCH_HOME "lib/qpid-dispatch" CACHE PATH "Private Dispatch library 
 set(LIB_INSTALL_DIR "lib${LIB_SUFFIX}" CACHE PATH "Library object file directory")
 set(SHARE_INSTALL_DIR share CACHE PATH "Shared read only data directory")
 set(DOC_INSTALL_DIR ${SHARE_INSTALL_DIR}/doc CACHE PATH "Documentation directory")
-set(QD_DOC_INSTALL_DIR ${SHARE_INSTALL_DIR}/doc/qpid-dispatch CACHE PATH "Qpid dispatch documentation directory")
+set(QD_DOC_INSTALL_DIR ${SHARE_INSTALL_DIR}/doc/qpid-dispatch CACHE PATH "Qpid Dispatch documentation directory")
 set(MAN_INSTALL_DIR share/man CACHE PATH "Manpage directory")
 set(QPID_DISPATCH_HOME_INSTALLED ${CMAKE_INSTALL_PREFIX}/${QPID_DISPATCH_HOME})
 
@@ -173,6 +195,32 @@ include_directories(
     ${Proton_Core_INCLUDE_DIRS}
     ${PYTHON_INCLUDE_PATH}
     )
+
+# Originally from the LLVM project, https://opensource.apple.com/source/llvmCore/llvmCore-2358.3/CMakeLists.txt.auto.html
+if(QD_ENABLE_ASSERTIONS)
+    # MSVC doesn't like _DEBUG on release builds.
+    if(NOT MSVC)
+        add_definitions(-D_DEBUG)
+    endif()
+    # On non-Debug builds cmake automatically defines NDEBUG, so we explicitly undefine it:
+    if(NOT uppercase_CMAKE_BUILD_TYPE STREQUAL "DEBUG")
+        # NOTE: use `add_compile_options` rather than `add_definitions` since
+        # `add_definitions` does not support generator expressions.
+        add_compile_options($<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:-UNDEBUG>)
+
+        # Also remove /D NDEBUG to avoid MSVC warnings about conflicting defines.
+        foreach (flags_var_to_scrub
+                CMAKE_CXX_FLAGS_RELEASE
+                CMAKE_CXX_FLAGS_RELWITHDEBINFO
+                CMAKE_CXX_FLAGS_MINSIZEREL
+                CMAKE_C_FLAGS_RELEASE
+                CMAKE_C_FLAGS_RELWITHDEBINFO
+                CMAKE_C_FLAGS_MINSIZEREL)
+            string (REGEX REPLACE "(^| )[/-]D *NDEBUG($| )" " "
+                    "${flags_var_to_scrub}" "${${flags_var_to_scrub}}")
+        endforeach()
+    endif()
+endif()
 
 if (NOT CMAKE_SYSTEM_NAME STREQUAL SunOS)
  add_compile_options(-Werror)
@@ -243,6 +291,7 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_authz_service_plug
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_handle_failover.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_handle_failover.py)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_http.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_http.py)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_topology_disposition.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_topology_disposition.py)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/python/qpid_dispatch_internal/management/agent.py.in ${CMAKE_CURRENT_SOURCE_DIR}/python/qpid_dispatch_internal/management/agent.py)
 execute_process(COMMAND ${RUN} --sh OUTPUT_FILE config.sh)
 
 if (NOT UNITTEST_MISSING)

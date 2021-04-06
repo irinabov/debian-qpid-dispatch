@@ -28,7 +28,7 @@
 #include "router_private.h"
 #include "delivery.h"
 #include "policy.h"
-#include <qpid/dispatch/router_core.h>
+#include <qpid/dispatch/protocol_adaptor.h>
 #include <qpid/dispatch/proton_utils.h>
 #include <proton/sasl.h>
 #include <inttypes.h>
@@ -36,6 +36,8 @@
 const char *QD_ROUTER_NODE_TYPE = "router.node";
 const char *QD_ROUTER_ADDRESS_TYPE = "router.address";
 const char *QD_ROUTER_LINK_TYPE = "router.link";
+
+static qdr_protocol_adaptor_t *amqp_direct_adaptor = 0;
 
 static char *router_role    = "inter-router";
 static char *container_role = "route-container";
@@ -123,6 +125,109 @@ void qd_link_abandoned_deliveries_handler(void *context, qd_link_t *link)
     }
 }
 
+
+// read the delivery-state set by the remote endpoint
+//
+static qd_delivery_state_t *qd_delivery_read_remote_state(pn_delivery_t *pnd)
+{
+    qd_delivery_state_t *dstate = 0;
+    uint64_t            outcome = pn_delivery_remote_state(pnd);
+    if (pnd) {
+        switch (outcome) {
+        case PN_RECEIVED:
+        case PN_ACCEPTED:
+        case PN_RELEASED:
+            // no associated state (that we care about)
+            break;
+        case PN_REJECTED: {
+            // See AMQP 1.0 section 3.4.4 Rejected
+            pn_condition_t *cond = pn_disposition_condition(pn_delivery_remote(pnd));
+            dstate = qd_delivery_state();
+            dstate->error = qdr_error_from_pn(cond);
+            break;
+        }
+        case PN_MODIFIED: {
+            // See AMQP 1.0 section 3.4.5 Modified
+            pn_disposition_t *disp = pn_delivery_remote(pnd);
+            bool failed = pn_disposition_is_failed(disp);
+            bool undeliverable = pn_disposition_is_undeliverable(disp);
+            pn_data_t *anno = pn_disposition_annotations(disp);
+
+            // avoid expensive alloc if only default values found
+            const bool need_anno = (anno && pn_data_size(anno) > 0);
+            if (failed || undeliverable || need_anno) {
+                dstate = qd_delivery_state();
+                dstate->delivery_failed = failed;
+                dstate->undeliverable_here = undeliverable;
+                if (need_anno) {
+                    dstate->annotations = pn_data(0);
+                    pn_data_copy(dstate->annotations, anno);
+                }
+            }
+            break;
+        }
+        default: {
+            // Check for custom state data. Custom outcomes and AMQP 1.0
+            // Transaction defined outcomes will all be numerically >
+            // PN_MODIFIED. See Part 4: Transactions and section 1.5 Descriptor
+            // Values in the AMQP 1.0 spec.
+            if (outcome > PN_MODIFIED) {
+                pn_data_t *data = pn_disposition_data(pn_delivery_remote(pnd));
+                if (data && pn_data_size(data) > 0) {
+                    dstate = qd_delivery_state();
+                    dstate->extension = pn_data(0);
+                    pn_data_copy(dstate->extension, data);
+                }
+            }
+        break;
+        }
+        } // end switch
+    }
+    return dstate;
+}
+
+
+// Set the delivery-state to be sent to the remote endpoint.
+//
+static void qd_delivery_write_local_state(pn_delivery_t *pnd, uint64_t outcome, const qd_delivery_state_t *dstate)
+{
+    if (pnd && dstate) {
+        switch (outcome) {
+        case PN_RECEIVED:
+        case PN_ACCEPTED:
+        case PN_RELEASED:
+            // no associated state (that we care about)
+            break;
+        case PN_REJECTED:
+            if (dstate->error) {
+                pn_condition_t *condition = pn_disposition_condition(pn_delivery_local(pnd));
+                char *name = qdr_error_name(dstate->error);
+                char *description = qdr_error_description(dstate->error);
+                pn_condition_set_name(condition, (const char*) name);
+                pn_condition_set_description(condition, (const char*) description);
+                if (qdr_error_info(dstate->error)) {
+                    pn_data_copy(pn_condition_info(condition), qdr_error_info(dstate->error));
+                }
+                //proton makes copies of name and description, so it is ok to free them here.
+                free(name);
+                free(description);
+            }
+            break;
+        case PN_MODIFIED: {
+            pn_disposition_t *ldisp = pn_delivery_local(pnd);
+            pn_disposition_set_failed(ldisp, dstate->delivery_failed);
+            pn_disposition_set_undeliverable(ldisp, dstate->undeliverable_here);
+            if (dstate->annotations)
+                pn_data_copy(pn_disposition_annotations(ldisp), dstate->annotations);
+            break;
+        }
+        default:
+            if (dstate->extension)
+                pn_data_copy(pn_disposition_data(pn_delivery_local(pnd)), dstate->extension);
+            break;
+        }
+    }
+}
 
 
 /**
@@ -434,7 +539,7 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
     //
 
     if (delivery) {
-        qdr_deliver_continue(router->router_core, delivery, pn_delivery_settled(pnd));
+        qdr_delivery_continue(router->router_core, delivery, pn_delivery_settled(pnd));
         return next_delivery;
     }
 
@@ -481,43 +586,11 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
                                                    (uint8_t*) dtag.start,
                                                    dtag.size,
                                                    pn_delivery_remote_state(pnd),
-                                                   pn_disposition_data(pn_delivery_remote(pnd)));
+                                                   qd_delivery_read_remote_state(pnd));
         qd_link_set_incoming_msg(link, (qd_message_t*) 0);  // msg no longer exclusive to qd_link
         qdr_node_connect_deliveries(link, delivery, pnd);
         qdr_delivery_decref(router->router_core, delivery, "release protection of return from deliver_to_routed_link");
         return next_delivery;
-    }
-
-    //
-    // Head of line blocking avoidance (DISPATCH-1545)
-    //
-    // Before we can forward a message we need to determine whether or not this
-    // message is "streaming" - a large message that has the potential to block
-    // other messages sharing the trunk link.  At this point we cannot for sure
-    // know the actual length of the incoming message, so we employ the
-    // following heuristic to determine if the message is "streaming":
-    //
-    // - If the message is receive-complete it is NOT a streaming message.
-    // - If it is NOT receive-complete:
-    //   Continue buffering incoming data until:
-    //   - receive has completed => NOT a streaming message
-    //   - not rx-complete AND Q2 threshold hit => a streaming message
-    //
-    // Once Q2 is hit we MUST forward the message regardless of rx-complete
-    // since Q2 will block forever unless the incoming data is drained via
-    // forwarding.
-    //
-    if (!receive_complete) {
-        if (qd_message_is_Q2_blocked(msg)) {
-            qd_log(router->log_source, QD_LOG_DEBUG,
-                   "[C%"PRIu64" L%"PRIu64"] Incoming message classified as streaming. User:%s",
-                   conn->connection_id,
-                   qd_link_link_id(link),
-                   conn->user_id);
-        } else {
-            // Continue buffering this message
-            return false;
-        }
     }
 
     //
@@ -538,7 +611,7 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
     int               tenant_space_len;
     const char       *tenant_space = qdr_connection_get_tenant_space(qdr_conn, &tenant_space_len);
     if (conn->policy_settings)
-        check_user = !conn->policy_settings->allowUserIdProxy;
+        check_user = !conn->policy_settings->spec.allowUserIdProxy;
 
     //
     // Validate the content of the delivery as an AMQP message.  This is done partially, only
@@ -598,10 +671,42 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
     }
 
     qd_message_message_annotations(msg);
-    qd_bitmask_t *link_exclusions;
-    uint32_t      distance;
-    int           ingress_index = 0; // Default to _this_ router
 
+    //
+    // Head of line blocking avoidance (DISPATCH-1545)
+    //
+    // Before we can forward a message we need to determine whether or not this
+    // message is "streaming" - a large message that has the potential to block
+    // other messages sharing the trunk link.  At this point we cannot for sure
+    // know the actual length of the incoming message, so we employ the
+    // following heuristic to determine if the message is "streaming":
+    //
+    // - If the message is receive-complete it is NOT a streaming message.
+    // - If it is NOT receive-complete:
+    //   Continue buffering incoming data until:
+    //   - receive has completed => NOT a streaming message
+    //   - not rx-complete AND Q2 threshold hit => a streaming message
+    //
+    // Once Q2 is hit we MUST forward the message regardless of rx-complete
+    // since Q2 will block forever unless the incoming data is drained via
+    // forwarding.
+    //
+    if (!receive_complete) {
+        if (qd_message_is_streaming(msg) || qd_message_is_Q2_blocked(msg)) {
+            qd_log(router->log_source, QD_LOG_DEBUG,
+                   "[C%"PRIu64"][L%"PRIu64"] Incoming message classified as streaming. User:%s",
+                   conn->connection_id,
+                   qd_link_link_id(link),
+                   conn->user_id);
+        } else {
+            // Continue buffering this message
+            return false;
+        }
+    }
+
+    uint32_t       distance = 0;
+    int            ingress_index = 0; // Default to _this_ router
+    qd_bitmask_t  *link_exclusions = 0;
     qd_iterator_t *ingress_iter = router_annotate_message(router, msg, &link_exclusions, &distance, &ingress_index);
 
     //
@@ -662,7 +767,7 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
                 delivery = qdr_link_deliver_to(rlink, msg, ingress_iter, addr_iter, pn_delivery_settled(pnd),
                                                link_exclusions, ingress_index,
                                                pn_delivery_remote_state(pnd),
-                                               pn_disposition_data(pn_delivery_remote(pnd)));
+                                               qd_delivery_read_remote_state(pnd));
             } else {
                 //reject
                 qd_log(router->log_source, QD_LOG_DEBUG, "Message rejected due to policy violation on target. User:%s", conn->user_id);
@@ -711,7 +816,7 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
         }
         delivery = qdr_link_deliver(rlink, msg, ingress_iter, pn_delivery_settled(pnd), link_exclusions, ingress_index,
                                     pn_delivery_remote_state(pnd),
-                                    pn_disposition_data(pn_delivery_remote(pnd)));
+                                    qd_delivery_read_remote_state(pnd));
     }
 
     //
@@ -779,18 +884,13 @@ static void AMQP_disposition_handler(void* context, qd_link_t *link, pn_delivery
     if (!delivery || !qdr_delivery_receive_complete(delivery))
         return;
 
-    pn_disposition_t *disp  = pn_delivery_remote(pnd);
-    pn_condition_t   *cond  = pn_disposition_condition(disp);
-    qdr_error_t      *error = qdr_error_from_pn(cond);
-
     //
     // Update the disposition of the delivery
     //
     qdr_delivery_remote_state_updated(router->router_core, delivery,
                                       pn_delivery_remote_state(pnd),
                                       pn_delivery_settled(pnd),
-                                      error,
-                                      pn_disposition_data(disp),
+                                      qd_delivery_read_remote_state(pnd),
                                       false);
 
     //
@@ -825,6 +925,8 @@ static int AMQP_incoming_link_handler(void* context, qd_link_t *link)
                                                        qdr_terminus(qd_link_remote_target(link)),
                                                        pn_link_name(qd_link_pn(link)),
                                                        terminus_addr,
+                                                       false,
+                                                       0,
                                                        &link_id);
     qd_link_set_link_id(link, link_id);
     qdr_link_set_context(qdr_link, link);
@@ -854,6 +956,8 @@ static int AMQP_outgoing_link_handler(void* context, qd_link_t *link)
                                                  qdr_terminus(qd_link_remote_target(link)),
                                                  pn_link_name(qd_link_pn(link)),
                                                  terminus_addr,
+                                                 false,
+                                                 0,
                                                  &link_id);
     qd_link_set_link_id(link, link_id);
     qdr_link_set_context(qdr_link, link);
@@ -1209,21 +1313,22 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
                                                                  rversion,
                                                                  streaming_links);
 
-    qdr_connection_opened(router->router_core, inbound, role, cost, connection_id, name,
+    qdr_connection_opened(router->router_core,
+                          amqp_direct_adaptor,
+                          inbound,
+                          role,
+                          cost,
+                          connection_id,
+                          name,
                           pn_connection_remote_container(pn_conn),
                           conn->strip_annotations_in,
                           conn->strip_annotations_out,
-                          conn->policy_settings ? conn->policy_settings->allowDynamicLinkRoutes : true,
-                          conn->policy_settings ? conn->policy_settings->allowAdminStatusUpdate : true,
                           link_capacity,
                           vhost,
+                          !!conn->policy_settings ? &conn->policy_settings->spec : 0,
                           connection_info,
-                          bind_connection_context, conn);
-
-    char   props_str[1000];
-    size_t props_len = 1000;
-
-    pn_data_format(props, props_str, &props_len);
+                          bind_connection_context,
+                          conn);
 
     if (conn->connector) {
         char conn_msg[300];
@@ -1233,12 +1338,6 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
                         authenticated ? mech : "no", (char*) user, container);
         strcpy(conn->connector->conn_msg, conn_msg);
     }
-
-
-    qd_log(router->log_source, QD_LOG_INFO, "[C%"PRIu64"] Connection Opened: dir=%s host=%s vhost=%s encrypted=%s"
-           " auth=%s user=%s container_id=%s props=%s",
-           connection_id, inbound ? "in" : "out", host, vhost ? vhost : "", encrypted ? proto : "no",
-           authenticated ? mech : "no", (char*) user, container, props_str);
 }
 
 
@@ -1249,7 +1348,7 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
 // 1. The failover-server-list is present but the content of the list is empty in which case we scrub the failover list except we keep the original connector information and current connection information.
 // 2. If the failover list contains one or more maps that contain failover connection information, that information will be appended to the list which already contains the original connection information
 //    and the current connection information. Any other failover information left over from the previous connection is deleted
-// 3. If the failover-server-list is not present at all in the connection properties, the failover list we maintain in untoched.
+// 3. If the failover-server-list is not present at all in the connection properties, the failover list we maintain is untouched.
 //
 // props should be pointing at the value that corresponds to the QD_CONNECTION_PROPERTY_FAILOVER_LIST_KEY
 // returns true if failover list properly parsed.
@@ -1405,10 +1504,14 @@ static int AMQP_outbound_opened_handler(void *type_context, qd_connection_t *con
 
 static int AMQP_closed_handler(void *type_context, qd_connection_t *conn, void *context)
 {
-    qdr_connection_t *qdrc = (qdr_connection_t*) qd_connection_get_context(conn);
+    qdr_connection_t *qdrc   = (qdr_connection_t*) qd_connection_get_context(conn);
+    qd_router_t      *router = (qd_router_t*) type_context;
 
     if (qdrc) {
-        qdr_connection_set_context(qdrc, NULL);
+        sys_mutex_lock(qd_server_get_activation_lock(router->qd->server));
+        qdr_connection_set_context(qdrc, 0);
+        sys_mutex_unlock(qd_server_get_activation_lock(router->qd->server));
+
         qdr_connection_closed(qdrc);
         qd_connection_set_context(conn, 0);
     }
@@ -1457,7 +1560,7 @@ qd_router_t *qd_router(qd_dispatch_t *qd, qd_router_mode_t mode, const char *are
     }
 
     size_t dplen = 9 + strlen(area) + strlen(id);
-    node_id = (char*) malloc(dplen);
+    node_id = (char*) qd_malloc(dplen);
     strcpy(node_id, area);
     strcat(node_id, "/");
     strcat(node_id, id);
@@ -1478,6 +1581,8 @@ qd_router_t *qd_router(qd_dispatch_t *qd, qd_router_mode_t mode, const char *are
 
     router->lock  = sys_mutex();
     router->timer = qd_timer(qd, qd_router_timer_handler, (void*) router);
+
+    sys_atomic_init(&global_delivery_id, 1);
 
     //
     // Inform the field iterator module of this router's mode, id, and area.  The field iterator
@@ -1500,11 +1605,15 @@ qd_router_t *qd_router(qd_dispatch_t *qd, qd_router_mode_t mode, const char *are
 
 static void CORE_connection_activate(void *context, qdr_connection_t *conn)
 {
+    qd_router_t *router = (qd_router_t*) context;
+
     //
     // IMPORTANT:  This is the only core callback that is invoked on the core
     //             thread itself. It must not take locks that could deadlock the core.
     //
+    sys_mutex_lock(qd_server_get_activation_lock(router->qd->server));
     qd_server_activate((qd_connection_t*) qdr_connection_get_context(conn));
+    sys_mutex_unlock(qd_server_get_activation_lock(router->qd->server));
 }
 
 
@@ -1577,12 +1686,12 @@ static void CORE_link_second_attach(void *context, qdr_link_t *link, qdr_terminu
 
 static void CORE_conn_trace(void *context, qdr_connection_t *qdr_conn, bool trace)
 {
-    qd_connection_t      *qconn  = (qd_connection_t*) qdr_connection_get_context(qdr_conn);
+    qd_connection_t *qconn = (qd_connection_t*) qdr_connection_get_context(qdr_conn);
 
     if (!qconn)
         return;
 
-    pn_transport_t *tport  = pn_connection_transport(qconn->pn_conn);
+    pn_transport_t *tport = pn_connection_transport(qconn->pn_conn);
 
     if (!tport)
         return;
@@ -1590,7 +1699,6 @@ static void CORE_conn_trace(void *context, qdr_connection_t *qdr_conn, bool trac
     if (trace) {
         pn_transport_trace(tport, PN_TRACE_FRM);
         pn_transport_set_tracer(tport, connection_transport_tracer);
-
     }
     else {
         pn_transport_trace(tport, PN_TRACE_OFF);
@@ -1775,7 +1883,6 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
         const char *tag;
         int         tag_length;
         uint64_t    disposition = 0;
-        pn_data_t   *extension_state = 0;
 
         qdr_delivery_tag(dlv, &tag, &tag_length);
 
@@ -1785,10 +1892,10 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
         pdlv = pn_link_current(plink);
 
         // handle any delivery-state on the transfer e.g. transactional-state
-        extension_state = qdr_delivery_take_local_extension_state(dlv, &disposition);
-        if (extension_state) {
-            pn_data_copy(pn_disposition_data(pn_delivery_local(pdlv)), extension_state);
-            pn_data_free(extension_state);
+        qd_delivery_state_t *dstate = qdr_delivery_take_local_delivery_state(dlv, &disposition);
+        if (dstate) {
+            qd_delivery_write_local_state(pdlv, disposition, dstate);
+            qd_delivery_state_free(dstate);
         }
         if (disposition)
             pn_delivery_update(pdlv, disposition);
@@ -1881,21 +1988,6 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
     if (!pn_delivery_link(pnd))
         return;
 
-    qdr_error_t *error = qdr_delivery_error(dlv);
-
-    if (error) {
-        pn_condition_t *condition = pn_disposition_condition(pn_delivery_local(pnd));
-        char *name = qdr_error_name(error);
-        char *description = qdr_error_description(error);
-        pn_condition_set_name(condition, (const char*) name);
-        pn_condition_set_description(condition, (const char*) description);
-        if (qdr_error_info(error))
-            pn_data_copy(pn_condition_info(condition), qdr_error_info(error));
-        //proton makes copies of name and description, so it is ok to free them here.
-        free(name);
-        free(description);
-    }
-
     qdr_link_t      *qlink   = qdr_delivery_link(dlv);
     qd_link_t       *link    = 0;
     qd_connection_t *qd_conn = 0;
@@ -1919,14 +2011,15 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
     if (disp != pn_delivery_remote_state(pnd) && !pn_delivery_settled(pnd)) {
         qd_message_t *msg = qdr_delivery_message(dlv);
 
+        // handle propagation of delivery state from qdr_delivery_t to proton:
+        uint64_t ignore = 0;  // expect same value as 'disp'
+        qd_delivery_state_t *dstate = qdr_delivery_take_local_delivery_state(dlv, &ignore);
+        assert(ignore == disp);
+        qd_delivery_write_local_state(pnd, disp, dstate);
+        qd_delivery_state_free(dstate);
+
         if (disp == PN_MODIFIED)
             pn_disposition_set_failed(pn_delivery_local(pnd), true);
-
-        pn_data_t *extension_state = qdr_delivery_take_local_extension_state(dlv, 0);
-        if (extension_state) {
-            pn_data_copy(pn_disposition_data(pn_delivery_local(pnd)), extension_state);
-            pn_data_free(extension_state);
-        }
 
         //
         // If the delivery is still arriving, don't push out the disposition change yet.
@@ -1949,7 +2042,7 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
             qdr_node_disconnect_deliveries(router->router_core, link, dlv, pnd);
             pn_delivery_settle(pnd);
         } else {
-            if (disp == PN_RELEASED || disp == PN_MODIFIED || qdr_delivery_presettled(dlv)) {
+            if (disp == PN_RELEASED || disp == PN_MODIFIED || disp == PN_REJECTED || qdr_delivery_presettled(dlv)) {
                 //
                 // If the delivery is settled and it is still arriving, defer the settlement
                 // until the content has fully arrived. For now set the disposition on the qdr_delivery
@@ -1978,21 +2071,23 @@ void qd_router_setup_late(qd_dispatch_t *qd)
     qd->router->tracemask   = qd_tracemask();
     qd->router->router_core = qdr_core(qd, qd->router->router_mode, qd->router->router_area, qd->router->router_id);
 
-    qdr_connection_handlers(qd->router->router_core, (void*) qd->router,
-                            CORE_connection_activate,
-                            CORE_link_first_attach,
-                            CORE_link_second_attach,
-                            CORE_link_detach,
-                            CORE_link_flow,
-                            CORE_link_offer,
-                            CORE_link_drained,
-                            CORE_link_drain,
-                            CORE_link_push,
-                            CORE_link_deliver,
-                            CORE_link_get_credit,
-                            CORE_delivery_update,
-                            CORE_close_connection,
-                            CORE_conn_trace);
+    amqp_direct_adaptor = qdr_protocol_adaptor(qd->router->router_core,
+                                               "amqp",
+                                               (void*) qd->router,
+                                               CORE_connection_activate,
+                                               CORE_link_first_attach,
+                                               CORE_link_second_attach,
+                                               CORE_link_detach,
+                                               CORE_link_flow,
+                                               CORE_link_offer,
+                                               CORE_link_drained,
+                                               CORE_link_drain,
+                                               CORE_link_push,
+                                               CORE_link_deliver,
+                                               CORE_link_get_credit,
+                                               CORE_delivery_update,
+                                               CORE_close_connection,
+                                               CORE_conn_trace);
 
     qd_router_python_setup(qd->router);
     qd_timer_schedule(qd->router->timer, 1000);

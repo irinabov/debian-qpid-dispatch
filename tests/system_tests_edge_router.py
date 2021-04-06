@@ -624,7 +624,9 @@ class RouterTest(TestCase):
                                           self.routers[2].addresses[0],
                                           self.routers[2].addresses[0],
                                           self.routers[2].addresses[0],
-                                          "multicast.24")
+                                          "multicast.24",
+                                          self.routers[2].addresses[0],
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -639,7 +641,8 @@ class RouterTest(TestCase):
                                           self.routers[3].addresses[0],
                                           self.routers[3].addresses[0],
                                           "multicast.25",
-                                          self.routers[0].addresses[0])
+                                          self.routers[0].addresses[0],
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -654,7 +657,8 @@ class RouterTest(TestCase):
                                           self.routers[0].addresses[0],
                                           self.routers[2].addresses[0],
                                           "multicast.26",
-                                          self.routers[0].addresses[0])
+                                          self.routers[0].addresses[0],
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -668,7 +672,8 @@ class RouterTest(TestCase):
                                           self.routers[3].addresses[0],
                                           self.routers[0].addresses[0],
                                           "multicast.27",
-                                          self.routers[0].addresses[0])
+                                          self.routers[0].addresses[0],
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -682,7 +687,9 @@ class RouterTest(TestCase):
                                           self.routers[2].addresses[0],
                                           self.routers[3].addresses[0],
                                           self.routers[1].addresses[0],
-                                          "multicast.28")
+                                          "multicast.28",
+                                          self.routers[0].addresses[0],
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -695,7 +702,9 @@ class RouterTest(TestCase):
                                           self.routers[3].addresses[0],
                                           self.routers[4].addresses[0],
                                           self.routers[0].addresses[0],
-                                          "multicast.29")
+                                          "multicast.29",
+                                          self.routers[0].addresses[0],
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -708,7 +717,8 @@ class RouterTest(TestCase):
                                           self.routers[4].addresses[0],
                                           self.routers[5].addresses[0],
                                           "multicast.30",
-                                          self.routers[0].addresses[0])
+                                          self.routers[0].addresses[0],
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -725,7 +735,10 @@ class RouterTest(TestCase):
                                           self.routers[2].addresses[0],
                                           self.routers[2].addresses[0],
                                           self.routers[2].addresses[0],
-                                          "multicast.31", large_msg=True)
+                                          "multicast.31",
+                                          self.routers[2].addresses[0],
+                                          large_msg=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -741,7 +754,8 @@ class RouterTest(TestCase):
                                           self.routers[3].addresses[0],
                                           "multicast.32",
                                           self.routers[0].addresses[0],
-                                          large_msg=True)
+                                          large_msg=True,
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -755,7 +769,10 @@ class RouterTest(TestCase):
                                           self.routers[3].addresses[0],
                                           self.routers[0].addresses[0],
                                           self.routers[2].addresses[0],
-                                          "multicast.33", large_msg=True)
+                                          "multicast.33",
+                                          self.routers[0].addresses[0],
+                                          large_msg=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -768,7 +785,10 @@ class RouterTest(TestCase):
                                           self.routers[2].addresses[0],
                                           self.routers[3].addresses[0],
                                           self.routers[0].addresses[0],
-                                          "multicast.34", large_msg=True)
+                                          "multicast.34",
+                                          self.routers[0].addresses[0],
+                                          large_msg=True,
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -784,7 +804,8 @@ class RouterTest(TestCase):
                                           self.routers[1].addresses[0],
                                           "multicast.35",
                                           self.routers[0].addresses[0],
-                                          large_msg=True)
+                                          large_msg=True,
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -797,7 +818,10 @@ class RouterTest(TestCase):
                                           self.routers[3].addresses[0],
                                           self.routers[4].addresses[0],
                                           self.routers[0].addresses[0],
-                                          "multicast.36", large_msg=True)
+                                          "multicast.36",
+                                          self.routers[0].addresses[0],
+                                          large_msg=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -811,7 +835,8 @@ class RouterTest(TestCase):
                                           self.routers[5].addresses[0],
                                           "multicast.37",
                                           self.routers[0].addresses[0],
-                                          large_msg=True)
+                                          large_msg=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -839,7 +864,7 @@ class RouterTest(TestCase):
                                       self.routers[5].addresses[0],
                                       self.routers[2].addresses[0],
                                       self.routers[0].addresses[0],
-                                      "test_39")
+                                      "test_39", check_remote=True)
 
         test.run()
         self.assertEqual(None, test.error)
@@ -981,7 +1006,10 @@ class RouterTest(TestCase):
                                           self.routers[2].addresses[0],
                                           self.routers[2].addresses[0],
                                           self.routers[2].addresses[0],
-                                          "multicast.52", anon_sender=True)
+                                          "multicast.52",
+                                          self.routers[2].addresses[0],
+                                          anon_sender=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -997,7 +1025,8 @@ class RouterTest(TestCase):
                                           self.routers[3].addresses[0],
                                           "multicast.53",
                                           self.routers[0].addresses[0],
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1013,7 +1042,8 @@ class RouterTest(TestCase):
                                           self.routers[2].addresses[0],
                                           "multicast.54",
                                           self.routers[0].addresses[0],
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1028,7 +1058,8 @@ class RouterTest(TestCase):
                                           self.routers[0].addresses[0],
                                           "multicast.55",
                                           self.routers[0].addresses[0],
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1043,7 +1074,9 @@ class RouterTest(TestCase):
                                           self.routers[3].addresses[0],
                                           self.routers[1].addresses[0],
                                           "multicast.56",
-                                          anon_sender=True)
+                                          self.routers[0].addresses[0],
+                                          anon_sender=True,
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1057,7 +1090,9 @@ class RouterTest(TestCase):
                                           self.routers[4].addresses[0],
                                           self.routers[0].addresses[0],
                                           "multicast.57",
-                                          anon_sender=True)
+                                          self.routers[0].addresses[0],
+                                          anon_sender=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1071,7 +1106,8 @@ class RouterTest(TestCase):
                                           self.routers[5].addresses[0],
                                           "multicast.58",
                                           self.routers[0].addresses[0],
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1088,8 +1124,10 @@ class RouterTest(TestCase):
                                           self.routers[2].addresses[0],
                                           self.routers[2].addresses[0],
                                           "multicast.59",
+                                          self.routers[2].addresses[0],
                                           large_msg=True,
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1106,7 +1144,8 @@ class RouterTest(TestCase):
                                           "multicast.60",
                                           self.routers[0].addresses[0],
                                           large_msg=True,
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1121,9 +1160,10 @@ class RouterTest(TestCase):
                                           self.routers[0].addresses[0],
                                           self.routers[2].addresses[0],
                                           "multicast.61",
-                                          self.routers[3].addresses[0],
+                                          self.routers[0].addresses[0],
                                           large_msg=True,
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1137,8 +1177,10 @@ class RouterTest(TestCase):
                                           self.routers[3].addresses[0],
                                           self.routers[0].addresses[0],
                                           "multicast.62",
+                                          self.routers[0].addresses[0],
                                           large_msg=True,
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1155,7 +1197,8 @@ class RouterTest(TestCase):
                                           "multicast.63",
                                           self.routers[0].addresses[0],
                                           large_msg=True,
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=2)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1169,8 +1212,10 @@ class RouterTest(TestCase):
                                           self.routers[4].addresses[0],
                                           self.routers[0].addresses[0],
                                           "multicast.64",
+                                          self.routers[0].addresses[0],
                                           large_msg=True,
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1185,7 +1230,8 @@ class RouterTest(TestCase):
                                           "multicast.65",
                                           self.routers[0].addresses[0],
                                           large_msg=True,
-                                          anon_sender=True)
+                                          anon_sender=True,
+                                          subscriber_count=3)
         test.run()
         self.assertEqual(None, test.error)
 
@@ -1244,45 +1290,45 @@ class RouterTest(TestCase):
         # Connects to an edge router and runs "qdstat --all-routers"
         # "qdstat --all-routers" is same as "qdstat --all-routers --g"
         # Connecting to an edge router and running "qdstat --all-routers""will only yield the
-        # summary statostics of the edge router. It will not show statistics of the interior routers.
+        # summary statistics of the edge router. It will not show statistics of the interior routers.
         outs = self.run_qdstat(['--all-routers'],
                                address=self.routers[2].addresses[0])
-        self.assertTrue("Router Id                        EA1" in outs)
+        self.assertIn("Router Id                        EA1", outs)
 
         outs = self.run_qdstat(['--all-routers', '--all-entities'],
                                address=self.routers[2].addresses[0])
         # Check if each entity  section is showing
-        self.assertTrue("Router Links" in outs)
-        self.assertTrue("Router Addresses" in outs)
-        self.assertTrue("Connections" in outs)
-        self.assertTrue("AutoLinks" in outs)
-        self.assertTrue("Auto Links" in outs)
+        self.assertIn("Router Links", outs)
+        self.assertIn("Router Addresses", outs)
+        self.assertIn("Connections", outs)
+        self.assertIn("AutoLinks", outs)
         self.assertEqual(outs.count("Link Routes"), 2)
-        self.assertTrue("Router Statistics" in outs)
-        self.assertTrue("Router Id                        EA1" in outs)
+        self.assertIn("Auto Links", outs)
+        self.assertIn("Router Statistics", outs)
+        self.assertIn("Router Id                        EA1", outs)
 
-        self.assertTrue("Memory Pools" in outs)
+        self.assertIn("Memory Pools", outs)
 
         outs = self.run_qdstat(['-c', '--all-routers'],
                                address=self.routers[2].addresses[0])
 
         # Verify that the the edhe uplink connection is showing
-        self.assertTrue("INT.A" in outs)
-        self.assertTrue("inter-router" not in outs)
+        self.assertIn("INT.A", outs)
+        self.assertNotIn("inter-router", outs)
 
         outs = self.run_qdstat(['--all-entities'],
                                address=self.routers[2].addresses[0])
         # Check if each entity  section is showing
-        self.assertTrue("Router Links" in outs)
-        self.assertTrue("Router Addresses" in outs)
-        self.assertTrue("Connections" in outs)
-        self.assertTrue("AutoLinks" in outs)
-        self.assertTrue("Auto Links" in outs)
+        self.assertIn("Router Links", outs)
+        self.assertIn("Router Addresses", outs)
+        self.assertIn("Connections", outs)
+        self.assertIn("AutoLinks", outs)
+        self.assertIn("Auto Links", outs)
         self.assertEqual(outs.count("Link Routes"), 2)
-        self.assertTrue("Router Statistics" in outs)
-        self.assertTrue("Router Id                        EA1" in outs)
+        self.assertIn("Router Statistics", outs)
+        self.assertIn("Router Id                        EA1", outs)
 
-        self.assertTrue("Memory Pools" in outs)
+        self.assertIn("Memory Pools", outs)
 
     def test_69_interior_qdstat_all_routers(self):
         # Connects to an interior router and runs "qdstat --all-routers"
@@ -1666,7 +1712,8 @@ class LinkRouteProxyTest(TestCase):
                 self.link_dropped.set()
 
         ad = AttachDropper(self.EA1.route_container)
-        self.INT_B.wait_address("CfgLinkRoute1")
+        # wait for both in and out link route addresses to propagate
+        self.INT_B.wait_address("CfgLinkRoute1", count=2)
 
         # create a consumer, do not wait for link to open, reattach
         # on received detach
@@ -1676,14 +1723,13 @@ class LinkRouteProxyTest(TestCase):
         ad.join() # wait for thread exit
 
         # wait until prefix addresses are removed
-        self._wait_address_gone(self.INT_B, "CCfgLinkRoute1")
-        self._wait_address_gone(self.INT_B, "DCfgLinkRoute1")
+        self._wait_address_gone(self.INT_B, "CfgLinkRoute1")
         rx.stop()
 
         # now attach a working service to the same address,
         # make sure it all works
         fs = FakeService(self.EA1.route_container)
-        self.INT_B.wait_address("CfgLinkRoute1")
+        self.INT_B.wait_address("CfgLinkRoute1", count=2)
         rx = AsyncTestReceiver(self.EB1.listener, 'CfgLinkRoute1/foo',
                                wait=False, recover_link=True)
         tx = AsyncTestSender(self.EA1.listener, 'CfgLinkRoute1/foo',
@@ -1712,7 +1758,7 @@ class LinkRouteProxyTest(TestCase):
         # activate the pre-configured link routes
         ea1_mgmt = self.EA1.management
         fs = FakeService(self.EA1.route_container)
-        self.INT_B.wait_address("CfgLinkRoute1")
+        self.INT_B.wait_address("CfgLinkRoute1", count=2)
 
         for i in range(10):
             lr1 = ea1_mgmt.create(type=self.CFG_LINK_ROUTE_TYPE,
@@ -1727,7 +1773,7 @@ class LinkRouteProxyTest(TestCase):
                                               'direction': 'in'})
             # verify that they are correctly propagated (once)
             if i == 9:
-                self.INT_B.wait_address("Test/*/9/#")
+                self.INT_B.wait_address("Test/*/9/#", count=2)
             lr1.delete()
             lr2.delete()
 
@@ -1783,7 +1829,7 @@ class LinkRouteProxyTest(TestCase):
 
         # activate the link routes before the connection exists
         fs = FakeService(er.addresses[1])
-        er.wait_address("Edge1/*")
+        er.wait_address("Edge1/*", count=2)
 
         # create the connection to interior
         er_mgmt = er.management
@@ -1791,7 +1837,7 @@ class LinkRouteProxyTest(TestCase):
                               name='toA',
                               attributes={'role': 'edge',
                                           'port': self.INTA_edge_port})
-        self.INT_B.wait_address("Edge1/*")
+        self.INT_B.wait_address("Edge1/*", count=2)
 
         # delete it, and verify the routes are removed
         ctor.delete()
@@ -1802,7 +1848,7 @@ class LinkRouteProxyTest(TestCase):
                               name='toA',
                               attributes={'role': 'edge',
                                           'port': self.INTA_edge_port})
-        self.INT_B.wait_address("Edge1/*")
+        self.INT_B.wait_address("Edge1/*", count=2)
         self._test_traffic(self.INT_B.listener,
                            self.INT_B.listener,
                            "Edge1/One",
@@ -1823,7 +1869,7 @@ class LinkRouteProxyTest(TestCase):
             self.skipTest ( "Test skipped during development." )
 
         fs = FakeService(self.EA1.route_container)
-        self.INT_B.wait_address("CfgLinkRoute1")
+        self.INT_B.wait_address("CfgLinkRoute1", count=2)
 
         # create a sender on one edge and the receiver on another
         bc_b = BlockingConnection(self.EB1.listener, timeout=TIMEOUT)
@@ -1891,7 +1937,7 @@ class LinkRouteProxyTest(TestCase):
         a_type = 'org.apache.qpid.dispatch.router.address'
 
         fs = FakeService(self.EA1.route_container)
-        self.INT_B.wait_address("CfgLinkRoute1")
+        self.INT_B.wait_address("CfgLinkRoute1", count=2)
 
         self._test_traffic(self.INT_B.listener,
                            self.INT_B.listener,
@@ -1909,7 +1955,7 @@ class LinkRouteProxyTest(TestCase):
         # repeat test, but this time with patterns:
 
         fs = FakeService(self.EB1.route_container)
-        self.INT_A.wait_address("*.cfg.pattern.#")
+        self.INT_A.wait_address("*.cfg.pattern.#", count=2)
 
         self._test_traffic(self.INT_A.listener,
                            self.INT_A.listener,
@@ -1920,7 +1966,6 @@ class LinkRouteProxyTest(TestCase):
         self.assertEqual(5, fs.in_count)
         self.assertEqual(5, fs.out_count)
         self._wait_address_gone(self.INT_A, "*.cfg.pattern.#")
-
 
     def test_52_conn_link_route_proxy(self):
         """
@@ -1942,7 +1987,7 @@ class LinkRouteProxyTest(TestCase):
                                               "direction": "in"})])
         self.assertEqual(2, len(fs.values))
 
-        self.INT_B.wait_address("Conn/*/One")
+        self.INT_B.wait_address("Conn/*/One", count=2)
         self.assertEqual(2, len(self._get_address(self.INT_A, "Conn/*/One")))
 
         # between interiors
@@ -2435,7 +2480,7 @@ class MobileAddressOneSenderTwoReceiversTest(MessagingHandler):
 class MobileAddressMulticastTest(MessagingHandler):
     def __init__(self, receiver1_host, receiver2_host, receiver3_host,
                  sender_host, address, check_addr_host=None, large_msg=False,
-                 anon_sender=False):
+                 anon_sender=False, subscriber_count=0):
         super(MobileAddressMulticastTest, self).__init__()
         self.receiver1_host = receiver1_host
         self.receiver2_host = receiver2_host
@@ -2443,6 +2488,7 @@ class MobileAddressMulticastTest(MessagingHandler):
         self.sender_host = sender_host
         self.address = address
         self.anon_sender = anon_sender
+        self.subscriber_count = subscriber_count
 
         # One sender connection and two receiver connections
         self.receiver1_conn = None
@@ -2519,17 +2565,27 @@ class MobileAddressMulticastTest(MessagingHandler):
         local_node = Node.connect(self.check_addr_host, timeout=TIMEOUT)
         outs = local_node.query(type='org.apache.qpid.dispatch.router.address')
         found = False
+
+        subscriber_count_index = outs.attribute_names.index("subscriberCount")
+        remote_count_index = outs.attribute_names.index("remoteCount")
+
         self.num_attempts += 1
         for result in outs.results:
             if self.address in result[0]:
-                found = True
-                self.create_sndr()
-                local_node.close()
-                self.addr_timer.cancel()
-                break
+                # We are good if the sum of subscriberCount and remoteCount
+                # equals the total subscriber_count
+                if self.subscriber_count == 0 or (result[subscriber_count_index] + result[remote_count_index] == self.subscriber_count):
+                    # The address is in the address table and the subscriber count is as expected.
+                    # subscriberCount match means that both edge routers have
+                    # told the interior router about the existence of the address
+                    # If this has not happened yet, we will try again.
+                    found = True
+                    self.create_sndr()
+                    local_node.close()
+                    self.addr_timer.cancel()
+                    break
 
         if not found:
-
             if self.num_attempts < self.max_attempts:
                 self.addr_timer = self.reactor.schedule(1.0, AddrTimer(self))
             else:
@@ -2700,7 +2756,7 @@ class MobileAddrMcastAnonSenderDroppedRxTest(MobileAddressMulticastTest):
 
 class MobileAddressEventTest(MessagingHandler):
     def __init__(self, receiver1_host, receiver2_host, receiver3_host,
-                 sender_host, interior_host, address):
+                 sender_host, interior_host, address, check_remote=False):
         super(MobileAddressEventTest, self).__init__(auto_accept=False)
         self.receiver1_host = receiver1_host
         self.receiver2_host = receiver2_host
@@ -2734,6 +2790,9 @@ class MobileAddressEventTest(MessagingHandler):
         self.n_settled = 0
         self.addr_timer = None
         self.container = None
+        self.max_attempts = 5
+        self.num_attempts = 0
+        self.check_remote = check_remote
 
     def timeout(self):
         if self.dup_msg:
@@ -2756,20 +2815,30 @@ class MobileAddressEventTest(MessagingHandler):
         outs = local_node.query(type='org.apache.qpid.dispatch.router.address')
         remote_count = outs.attribute_names.index("remoteCount")
         found = False
+        self.num_attempts += 1
         for result in outs.results:
-
             if self.address in result[0]:
-                found = True
+                if self.check_remote:
+                    if result[remote_count] > 0:
+                        found = True
+                else:
+                    found = True
                 self.sender_conn = self.container.connect(self.sender_host)
                 self.sender = self.container.create_sender(self.sender_conn,
                                                            self.address)
+                local_node.close()
                 break
 
         if not found:
-            self.error = "Unable to create sender because of " \
-                         "absence of address in the address table"
-            self.addr_timer.cancel()
-            self.timeout()
+            if self.num_attempts < self.max_attempts:
+                local_node.close()
+                self.addr_timer = self.reactor.schedule(1.0, AddrTimer(self))
+            else:
+                self.error = "Unable to create sender because of " \
+                             "absence of address in the address table"
+                self.addr_timer.cancel()
+                local_node.close()
+                self.timeout()
 
     def on_start(self, event):
         self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
@@ -2996,8 +3065,8 @@ class StreamingMessageTest(TestCase):
         # start a new broker on EB1
         fake_broker = FakeBroker(self.EB1.route_container)
         # wait until the link route appears on the interior routers
-        self.INT_B.wait_address("MyLinkRoute")
-        self.INT_A.wait_address("MyLinkRoute")
+        self.INT_B.wait_address("MyLinkRoute", count=2)
+        self.INT_A.wait_address("MyLinkRoute", count=2)
         return fake_broker
 
     def spawn_receiver(self, router, count, address, expect=None):
@@ -3045,7 +3114,6 @@ class StreamingMessageTest(TestCase):
         """
         Verify that a streaming message can be delivered over a link route
         """
-
         fake_broker = self._start_broker_EB1()
 
         rx = self.spawn_receiver(self.EB1, count=1,

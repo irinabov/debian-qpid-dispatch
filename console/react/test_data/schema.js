@@ -17,6 +17,7 @@ specific language governing permissions and limitations
 under the License.
 */
 
+// eslint-disable-next-line import/no-anonymous-default-export
 export default {
   prefix: "org.apache.qpid.dispatch",
   entityTypes: {
@@ -344,7 +345,7 @@ export default {
       },
       singleton: true,
       fullyQualifiedType: "org.apache.qpid.dispatch.management",
-      description: "Qpid dispatch router extensions to the standard org.amqp.management interface."
+      description: "Qpid Dispatch Router extensions to the standard org.amqp.management interface."
     },
     log: {
       operations: ["UPDATE", "READ"],

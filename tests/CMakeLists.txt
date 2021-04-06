@@ -67,10 +67,7 @@ target_link_libraries(clogger ${Proton_LIBRARIES})
 # running tests in parallel (the ctest -j option) without port clashes
 set(USE_BWRAP OFF CACHE BOOL "Wrap test executions with bwrap (https://github.com/containers/bubblewrap)")
 if(USE_BWRAP)
-  # Inaccessible DNS servers produce "proton:io Temporary failure in name resolution".
-  # For system_tests_bad_configuration we need to get "proton:io Name or service not known",
-  # so blank /etc/nsswitch.conf to achieve that.
-  set(BWRAP_ARGS bwrap --bind / / --bind /dev/zero /etc/nsswitch.conf --unshare-net --dev /dev --die-with-parent --)
+  set(BWRAP_ARGS bwrap --bind / / --unshare-net --dev /dev --die-with-parent --)
 else()
   set(BWRAP_ARGS "")
 endif()
@@ -95,6 +92,10 @@ add_test(test_command    ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v test_command)
 if(USE_LIBWEBSOCKETS)
   set(SYSTEM_TESTS_HTTP system_tests_http)
 endif()
+
+if(USE_LIBNGHTTP2)
+  set(SYSTEM_TESTS_HTTP2 system_tests_http2 system_tests_grpc)
+endif(USE_LIBNGHTTP2)
 
 if(CONSOLE_INSTALL)
   set(CONSOLE_TEST system_tests_console)
@@ -159,6 +160,9 @@ foreach(py_test_module
     system_tests_log_level_update
     system_tests_routing_protocol
     system_tests_open_properties
+    ${SYSTEM_TESTS_HTTP2}
+    system_tests_http1_adaptor
+    system_tests_tcp_adaptor
     )
 
   add_test(${py_test_module} ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v ${py_test_module})
@@ -231,6 +235,8 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-2/policy-photoserver-sasl.sasldb  D
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-3/test-sender-receiver-limits.json DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-3)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-4/management-access.json  DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-4/)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/authservice.py  DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/TCP_echo_server.py  DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/TCP_echo_client.py  DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
 # following install() functions will be called only if you do a make "install"
 install(FILES ${SYSTEM_TEST_FILES}
