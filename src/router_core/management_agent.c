@@ -41,17 +41,19 @@ const char *OPERATION = "operation";
 const char *ATTRIBUTE_NAMES = "attributeNames";
 
 
-const unsigned char *config_address_entity_type  = (unsigned char*) "org.apache.qpid.dispatch.router.config.address";
-const unsigned char *link_route_entity_type      = (unsigned char*) "org.apache.qpid.dispatch.router.config.linkRoute";
-const unsigned char *auto_link_entity_type       = (unsigned char*) "org.apache.qpid.dispatch.router.config.autoLink";
-const unsigned char *address_entity_type         = (unsigned char*) "org.apache.qpid.dispatch.router.address";
-const unsigned char *link_entity_type            = (unsigned char*) "org.apache.qpid.dispatch.router.link";
-const unsigned char *console_entity_type         = (unsigned char*) "org.apache.qpid.dispatch.console";
-const unsigned char *router_entity_type          = (unsigned char*) "org.apache.qpid.dispatch.router";
-const unsigned char *connection_entity_type      = (unsigned char*) "org.apache.qpid.dispatch.connection";
-const unsigned char *config_exchange_entity_type = (unsigned char*) "org.apache.qpid.dispatch.router.config.exchange";
-const unsigned char *config_binding_entity_type  = (unsigned char*) "org.apache.qpid.dispatch.router.config.binding";
-const unsigned char *conn_link_route_entity_type = (unsigned char*) "org.apache.qpid.dispatch.router.connection.linkRoute";
+const unsigned char *config_address_entity_type    = (unsigned char*) "org.apache.qpid.dispatch.router.config.address";
+const unsigned char *link_route_entity_type        = (unsigned char*) "org.apache.qpid.dispatch.router.config.linkRoute";
+const unsigned char *auto_link_entity_type         = (unsigned char*) "org.apache.qpid.dispatch.router.config.autoLink";
+const unsigned char *address_entity_type           = (unsigned char*) "org.apache.qpid.dispatch.router.address";
+const unsigned char *link_entity_type              = (unsigned char*) "org.apache.qpid.dispatch.router.link";
+const unsigned char *console_entity_type           = (unsigned char*) "org.apache.qpid.dispatch.console";
+const unsigned char *router_entity_type            = (unsigned char*) "org.apache.qpid.dispatch.router";
+const unsigned char *connection_entity_type        = (unsigned char*) "org.apache.qpid.dispatch.connection";
+const unsigned char *tcp_connection_entity_type    = (unsigned char*) "org.apache.qpid.dispatch.tcpConnection";
+const unsigned char *http_request_info_entity_type = (unsigned char*) "org.apache.qpid.dispatch.httpRequestInfo";
+const unsigned char *config_exchange_entity_type   = (unsigned char*) "org.apache.qpid.dispatch.router.config.exchange";
+const unsigned char *config_binding_entity_type    = (unsigned char*) "org.apache.qpid.dispatch.router.config.binding";
+const unsigned char *conn_link_route_entity_type   = (unsigned char*) "org.apache.qpid.dispatch.router.connection.linkRoute";
 
 const char * const status_description = "statusDescription";
 const char * const correlation_id = "correlation-id";
@@ -216,7 +218,7 @@ static void qd_manage_response_handler(void *context, const qd_amqp_error_t *sta
     qd_set_response_status(status, &fld);
 
     // Finally, compose and send the message.
-    qd_message_compose_3(ctx->msg, fld, ctx->field);
+    qd_message_compose_3(ctx->msg, fld, ctx->field, true);
 
     qdr_send_to1(ctx->core, ctx->msg, reply_to, true, false);
 
@@ -441,6 +443,10 @@ static bool qd_can_handle_request(qd_parsed_field_t           *properties_fld,
         *entity_type = QD_ROUTER_FORBIDDEN;
     else if (qd_iterator_equal(qd_parse_raw(parsed_field), connection_entity_type))
         *entity_type = QD_ROUTER_CONNECTION;
+    else if (qd_iterator_equal(qd_parse_raw(parsed_field), tcp_connection_entity_type))
+        *entity_type = QD_ROUTER_TCP_CONNECTION;
+    else if (qd_iterator_equal(qd_parse_raw(parsed_field), http_request_info_entity_type))
+        *entity_type = QD_ROUTER_HTTP_REQUEST_INFO;
     else if (qd_iterator_equal(qd_parse_raw(parsed_field), config_exchange_entity_type))
         *entity_type = QD_ROUTER_EXCHANGE;
     else if (qd_iterator_equal(qd_parse_raw(parsed_field), config_binding_entity_type))
@@ -492,8 +498,8 @@ static bool qd_can_handle_request(qd_parsed_field_t           *properties_fld,
  * Handler for the management agent.
  *
  */
-void qdr_management_agent_on_message(void *context, qd_message_t *msg, int unused_link_id, int unused_cost,
-                                     uint64_t in_conn_id)
+uint64_t qdr_management_agent_on_message(void *context, qd_message_t *msg, int unused_link_id, int unused_cost,
+                                         uint64_t in_conn_id, const qd_policy_spec_t *policy_spec, qdr_error_t **error)
 {
     qdr_core_t *core = (qdr_core_t*) context;
     qd_iterator_t *app_properties_iter = qd_message_field_iterator(msg, QD_FIELD_APPLICATION_PROPERTIES);
@@ -506,6 +512,8 @@ void qdr_management_agent_on_message(void *context, qd_message_t *msg, int unuse
 
     int32_t count = 0;
     int32_t offset = 0;
+
+    *error = 0;
 
     qd_parsed_field_t *properties_fld = qd_parse(app_properties_iter);
 
@@ -536,6 +544,6 @@ void qdr_management_agent_on_message(void *context, qd_message_t *msg, int unuse
 
     qd_iterator_free(app_properties_iter);
     qd_parse_free(properties_fld);
-
+    return PN_ACCEPTED;
 }
 

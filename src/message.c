@@ -86,6 +86,7 @@ PN_HANDLE(PN_DELIVERY_CTX)
 
 ALLOC_DEFINE_CONFIG(qd_message_t, sizeof(qd_message_pvt_t), 0, 0);
 ALLOC_DEFINE(qd_message_content_t);
+ALLOC_DEFINE(qd_message_stream_data_t);
 
 typedef void (*buffer_process_t) (void *context, const unsigned char *base, int length);
 
@@ -122,7 +123,6 @@ static void quote(char* bytes, int n, char **begin, char *end) {
 /**
  * Populates the buffer with formatted epoch_time
  */
-//static void format_time(pn_timestamp_t  epoch_time, char *format, char *buffer, size_t len)
 static void format_time(pn_timestamp_t epoch_time, char *format, char *buffer, size_t len)
 {
     struct timeval local_timeval;
@@ -369,36 +369,59 @@ char* qd_message_repr(qd_message_t *msg, char* buffer, size_t len, qd_log_bits f
     return buffer;
 }
 
+
+/**
+ * Return true if there is at least one consumable octet in the buffer chain
+ * starting at *cursor.  If the cursor is beyond the end of the buffer, and there
+ * is another buffer in the chain, move the cursor and buffer pointers to reference
+ * the first octet in the next buffer.  Note that this movement does NOT constitute
+ * advancement of the cursor in the buffer chain.
+ */
+static bool can_advance(unsigned char **cursor, qd_buffer_t **buffer)
+{
+    if (qd_buffer_cursor(*buffer) > *cursor)
+        return true;
+
+    if (DEQ_NEXT(*buffer)) {
+        *buffer = DEQ_NEXT(*buffer);
+        *cursor = qd_buffer_base(*buffer);
+    }
+
+    return qd_buffer_cursor(*buffer) > *cursor;
+}
+
+
 /**
  * Advance cursor through buffer chain by 'consume' bytes.
  * Cursor and buffer args are advanced to point to new position in buffer chain.
  *  - if the number of bytes in the buffer chain is less than or equal to
- *    the consume number then set *cursor and *buffer to NULL and
- *    return the number of missing bytes
+ *    the consume number then return false
  *  - the original buffer chain is not changed or freed.
  *
  * @param cursor Pointer into current buffer content
  * @param buffer pointer to current buffer
  * @param consume number of bytes to advance
- * @return 0 if all bytes consumed, != 0 if not enough bytes available
+ * @return true if all bytes consumed, false if not enough bytes available
  */
-static int advance(unsigned char **cursor, qd_buffer_t **buffer, int consume)
+static bool advance(unsigned char **cursor, qd_buffer_t **buffer, int consume)
 {
+    if (!can_advance(cursor, buffer))
+        return false;
+
     unsigned char *local_cursor = *cursor;
     qd_buffer_t   *local_buffer = *buffer;
 
     int remaining = qd_buffer_cursor(local_buffer) - local_cursor;
     while (consume > 0) {
-        if (consume < remaining) {
+        if (consume <= remaining) {
             local_cursor += consume;
             consume = 0;
         } else {
+            if (!local_buffer->next)
+                return false;
+
             consume -= remaining;
             local_buffer = local_buffer->next;
-            if (local_buffer == 0){
-                local_cursor = 0;
-                break;
-            }
             local_cursor = qd_buffer_base(local_buffer);
             remaining = qd_buffer_size(local_buffer);
         }
@@ -407,7 +430,7 @@ static int advance(unsigned char **cursor, qd_buffer_t **buffer, int consume)
     *cursor = local_cursor;
     *buffer = local_buffer;
 
-    return consume;
+    return true;
 }
 
 
@@ -457,21 +480,29 @@ static void advance_guarded(unsigned char **cursor, qd_buffer_t **buffer, int co
 }
 
 
-static unsigned char next_octet(unsigned char **cursor, qd_buffer_t **buffer)
+/**
+ * If there is an octet to be consumed, put it in octet and return true, else return false.
+ */
+static bool next_octet(unsigned char **cursor, qd_buffer_t **buffer, unsigned char *octet)
 {
-    unsigned char result = **cursor;
-    advance(cursor, buffer, 1);
-    return result;
+    if (can_advance(cursor, buffer)) {
+        *octet = **cursor;
+        advance(cursor, buffer, 1);
+        return true;
+    }
+    return false;
 }
 
 
-static int traverse_field(unsigned char **cursor, qd_buffer_t **buffer, qd_field_location_t *field)
+static bool traverse_field(unsigned char **cursor, qd_buffer_t **buffer, qd_field_location_t *field)
 {
     qd_buffer_t   *start_buffer = *buffer;
     unsigned char *start_cursor = *cursor;
+    unsigned char  tag;
+    unsigned char  octet;
 
-    unsigned char tag = next_octet(cursor, buffer);
-    if (!(*cursor)) return 0;
+    if (!next_octet(cursor, buffer, &tag))
+        return false;
 
     int    consume    = 0;
     size_t hdr_length = 1;
@@ -500,22 +531,32 @@ static int traverse_field(unsigned char **cursor, qd_buffer_t **buffer, qd_field
     case 0xD0 :
     case 0xF0 :
         hdr_length += 3;
-        consume |= ((int) next_octet(cursor, buffer)) << 24;
-        if (!(*cursor)) return 0;
-        consume |= ((int) next_octet(cursor, buffer)) << 16;
-        if (!(*cursor)) return 0;
-        consume |= ((int) next_octet(cursor, buffer)) << 8;
-        if (!(*cursor)) return 0;
+        if (!next_octet(cursor, buffer, &octet))
+            return false;
+        consume |= ((int) octet) << 24;
+
+        if (!next_octet(cursor, buffer, &octet))
+            return false;
+        consume |= ((int) octet) << 16;
+
+        if (!next_octet(cursor, buffer, &octet))
+            return false;
+        consume |= ((int) octet) << 8;
+
         // Fall through to the next case...
 
     case 0xA0 :
     case 0xC0 :
     case 0xE0 :
         hdr_length++;
-        consume |= (int) next_octet(cursor, buffer);
-        if (!(*cursor)) return 0;
+        if (!next_octet(cursor, buffer, &octet))
+            return false;
+        consume |= (int) octet;
         break;
     }
+
+    if (!advance(cursor, buffer, consume))
+        return false;
 
     if (field && !field->parsed) {
         field->buffer     = start_buffer;
@@ -526,48 +567,58 @@ static int traverse_field(unsigned char **cursor, qd_buffer_t **buffer, qd_field
         field->tag        = tag;
     }
 
-    advance(cursor, buffer, consume);
-    return 1;
+    return true;
 }
 
 
-static int start_list(unsigned char **cursor, qd_buffer_t **buffer)
+static int get_list_count(unsigned char **cursor, qd_buffer_t **buffer)
 {
-    unsigned char tag = next_octet(cursor, buffer);
-    if (!(*cursor)) return 0;
-    int length = 0;
-    int count  = 0;
+    unsigned char tag;
+    unsigned char octet;
+
+    if (!next_octet(cursor, buffer, &tag))
+        return 0;
+
+    int count = 0;
 
     switch (tag) {
     case 0x45 :     // list0
         break;
     case 0xd0 :     // list32
-        length |= ((int) next_octet(cursor, buffer)) << 24;
-        if (!(*cursor)) return 0;
-        length |= ((int) next_octet(cursor, buffer)) << 16;
-        if (!(*cursor)) return 0;
-        length |= ((int) next_octet(cursor, buffer)) << 8;
-        if (!(*cursor)) return 0;
-        length |=  (int) next_octet(cursor, buffer);
-        if (!(*cursor)) return 0;
+        //
+        // Advance past the list length
+        //
+        if (!advance(cursor, buffer, 4))
+            return 0;
 
-        count |= ((int) next_octet(cursor, buffer)) << 24;
-        if (!(*cursor)) return 0;
-        count |= ((int) next_octet(cursor, buffer)) << 16;
-        if (!(*cursor)) return 0;
-        count |= ((int) next_octet(cursor, buffer)) << 8;
-        if (!(*cursor)) return 0;
-        count |=  (int) next_octet(cursor, buffer);
-        if (!(*cursor)) return 0;
+        if (!next_octet(cursor, buffer, &octet))
+            return 0;
+        count |= ((int) octet) << 24;
+
+        if (!next_octet(cursor, buffer, &octet))
+            return 0;
+        count |= ((int) octet) << 16;
+
+        if (!next_octet(cursor, buffer, &octet))
+            return 0;
+        count |= ((int) octet) << 8;
+
+        if (!next_octet(cursor, buffer, &octet))
+            return 0;
+        count |=  (int) octet;
 
         break;
 
     case 0xc0 :     // list8
-        length |= (int) next_octet(cursor, buffer);
-        if (!(*cursor)) return 0;
+        //
+        // Advance past the list length
+        //
+        if (!advance(cursor, buffer, 1))
+            return 0;
 
-        count |= (int) next_octet(cursor, buffer);
-        if (!(*cursor)) return 0;
+        if (!next_octet(cursor, buffer, &octet))
+            return 0;
+        count |= (int) octet;
         break;
     }
 
@@ -602,21 +653,22 @@ typedef enum {
     QD_SECTION_NEED_MORE  // not enough data in the buffer chain - try again
 } qd_section_status_t;
 
-static qd_section_status_t message_section_check(qd_buffer_t         **buffer,
-                                                 unsigned char       **cursor,
-                                                 const unsigned char  *pattern,
-                                                 int                   pattern_length,
-                                                 const unsigned char  *expected_tags,
-                                                 qd_field_location_t  *location)
+static qd_section_status_t message_section_check_LH(qd_buffer_t         **buffer,
+                                                    unsigned char       **cursor,
+                                                    const unsigned char  *pattern,
+                                                    int                   pattern_length,
+                                                    const unsigned char  *expected_tags,
+                                                    qd_field_location_t  *location,
+                                                    bool                  dup_ok,
+                                                    bool                  protect_buffer)
 {
-    qd_buffer_t   *test_buffer = *buffer;
-    unsigned char *test_cursor = *cursor;
-
-    if (!test_cursor)
+    if (!*cursor || !can_advance(cursor, buffer))
         return QD_SECTION_NEED_MORE;
 
+    qd_buffer_t   *test_buffer   = *buffer;
+    unsigned char *test_cursor   = *cursor;
     unsigned char *end_of_buffer = qd_buffer_cursor(test_buffer);
-    int idx = 0;
+    int            idx           = 0;
 
     while (idx < pattern_length && *test_cursor == pattern[idx]) {
         idx++;
@@ -641,7 +693,7 @@ static qd_section_status_t message_section_check(qd_buffer_t         **buffer,
     if (*expected_tags == 0)
         return QD_SECTION_INVALID;  // Error: Unexpected tag
 
-    if (location->parsed)
+    if (location->parsed && !dup_ok)
         return QD_SECTION_INVALID;  // Error: Duplicate section
 
     //
@@ -656,14 +708,19 @@ static qd_section_status_t message_section_check(qd_buffer_t         **buffer,
     // Check that the full section is present, if so advance the pointers to
     // consume the whole section.
     //
-    int pre_consume = 1;  // Count the already extracted tag
+    int pre_consume  = 1;  // Count the already extracted tag
     uint32_t consume = 0;
-    unsigned char tag = next_octet(&test_cursor, &test_buffer);
+    unsigned char tag;
+    unsigned char octet;
+
+    if (!next_octet(&test_cursor, &test_buffer, &tag))
+        return QD_SECTION_NEED_MORE;
+
     unsigned char tag_subcat = tag & 0xF0;
 
     // if there is no more data the only valid data type is a null type (0x40),
     // size is implied as 0
-    if (!test_cursor && tag_subcat != 0x40)
+    if (!can_advance(&test_cursor, &test_buffer) && tag_subcat != 0x40)
         return QD_SECTION_NEED_MORE;
 
     switch (tag_subcat) {
@@ -680,12 +737,18 @@ static qd_section_status_t message_section_check(qd_buffer_t         **buffer,
     case 0xF0:
         // uint32_t size field:
         pre_consume += 3;
-        consume |= ((uint32_t) next_octet(&test_cursor, &test_buffer)) << 24;
-        if (!test_cursor) return QD_SECTION_NEED_MORE;
-        consume |= ((uint32_t) next_octet(&test_cursor, &test_buffer)) << 16;
-        if (!test_cursor) return QD_SECTION_NEED_MORE;
-        consume |= ((uint32_t) next_octet(&test_cursor, &test_buffer)) << 8;
-        if (!test_cursor) return QD_SECTION_NEED_MORE;
+        if (!next_octet(&test_cursor, &test_buffer, &octet))
+            return QD_SECTION_NEED_MORE;
+        consume |= ((uint32_t) octet) << 24;
+
+        if (!next_octet(&test_cursor, &test_buffer, &octet))
+            return QD_SECTION_NEED_MORE;
+        consume |= ((uint32_t) octet) << 16;
+
+        if (!next_octet(&test_cursor, &test_buffer, &octet))
+            return QD_SECTION_NEED_MORE;
+        consume |= ((uint32_t) octet) << 8;
+
         // Fall through to the next case...
 
     case 0xA0:
@@ -693,42 +756,45 @@ static qd_section_status_t message_section_check(qd_buffer_t         **buffer,
     case 0xE0:
         // uint8_t size field
         pre_consume += 1;
-        consume |= (uint32_t) next_octet(&test_cursor, &test_buffer);
-        if (!test_cursor) return QD_SECTION_NEED_MORE;
+        if (!next_octet(&test_cursor, &test_buffer, &octet))
+            return QD_SECTION_NEED_MORE;
+        consume |= (uint32_t) octet;
         break;
     }
 
     location->length = pre_consume + consume;
     if (consume) {
-        if (advance(&test_cursor, &test_buffer, consume) != 0) {
+        if (!advance(&test_cursor, &test_buffer, consume)) {
             return QD_SECTION_NEED_MORE;  // whole section not fully received
         }
     }
 
-    //
-    // increment the reference count of the parsed section as location now
-    // references it. Note that the cursor may have advanced to the octet after
-    // the parsed section, so be careful not to include an extra buffer past
-    // the end.  And cursor + buffer will be null if the parsed section ends at
-    // the end of the buffer chain, so be careful of that, too!
-    //
-    qd_buffer_t *start = *buffer;
-    qd_buffer_t *last = test_buffer;
-    if (last && last != start) {
-        if (test_cursor == qd_buffer_base(last)) {
-            // last does not include octets for the current section
-            last = DEQ_PREV(last);
+    if (protect_buffer) {
+        //
+        // increment the reference count of the parsed section as location now
+        // references it. Note that the cursor may have advanced to the octet after
+        // the parsed section, so be careful not to include an extra buffer past
+        // the end.  And cursor + buffer will be null if the parsed section ends at
+        // the end of the buffer chain, so be careful of that, too!
+        //
+        qd_buffer_t *start = *buffer;
+        qd_buffer_t *last = test_buffer;
+        if (last && last != start) {
+            if (test_cursor == qd_buffer_base(last)) {
+                // last does not include octets for the current section
+                last = DEQ_PREV(last);
+            }
+        }
+
+        while (start) {
+            qd_buffer_inc_fanout(start);
+            if (start == last)
+                break;
+            start = DEQ_NEXT(start);
         }
     }
 
-    while (start) {
-        qd_buffer_inc_fanout(start);
-        if (start == last)
-            break;
-        start = DEQ_NEXT(start);
-    }
-
-    location->parsed     = 1;
+    location->parsed = 1;
 
     *cursor = test_cursor;
     *buffer = test_buffer;
@@ -786,19 +852,19 @@ static qd_field_location_t *qd_message_properties_field(qd_message_t *msg, qd_me
     static const intptr_t offsets[] = {
         // position of the field's qd_field_location_t in the message content
         // object
-        (intptr_t) &((qd_message_content_t *)0)->field_message_id,
-        (intptr_t) &((qd_message_content_t *)0)->field_user_id,
-        (intptr_t) &((qd_message_content_t *)0)->field_to,
-        (intptr_t) &((qd_message_content_t *)0)->field_subject,
-        (intptr_t) &((qd_message_content_t *)0)->field_reply_to,
-        (intptr_t) &((qd_message_content_t *)0)->field_correlation_id,
-        (intptr_t) &((qd_message_content_t *)0)->field_content_type,
-        (intptr_t) &((qd_message_content_t *)0)->field_content_encoding,
-        (intptr_t) &((qd_message_content_t *)0)->field_absolute_expiry_time,
-        (intptr_t) &((qd_message_content_t *)0)->field_creation_time,
-        (intptr_t) &((qd_message_content_t *)0)->field_group_id,
-        (intptr_t) &((qd_message_content_t *)0)->field_group_sequence,
-        (intptr_t) &((qd_message_content_t *)0)->field_reply_to_group_id
+        (intptr_t) &((qd_message_content_t*) 0)->field_message_id,
+        (intptr_t) &((qd_message_content_t*) 0)->field_user_id,
+        (intptr_t) &((qd_message_content_t*) 0)->field_to,
+        (intptr_t) &((qd_message_content_t*) 0)->field_subject,
+        (intptr_t) &((qd_message_content_t*) 0)->field_reply_to,
+        (intptr_t) &((qd_message_content_t*) 0)->field_correlation_id,
+        (intptr_t) &((qd_message_content_t*) 0)->field_content_type,
+        (intptr_t) &((qd_message_content_t*) 0)->field_content_encoding,
+        (intptr_t) &((qd_message_content_t*) 0)->field_absolute_expiry_time,
+        (intptr_t) &((qd_message_content_t*) 0)->field_creation_time,
+        (intptr_t) &((qd_message_content_t*) 0)->field_group_id,
+        (intptr_t) &((qd_message_content_t*) 0)->field_group_sequence,
+        (intptr_t) &((qd_message_content_t*) 0)->field_reply_to_group_id
     };
     // update table above if new fields need to be accessed:
     assert(QD_FIELD_MESSAGE_ID <= field && field <= QD_FIELD_REPLY_TO_GROUP_ID);
@@ -810,23 +876,27 @@ static qd_field_location_t *qd_message_properties_field(qd_message_t *msg, qd_me
     }
 
     const int index = field - QD_FIELD_MESSAGE_ID;
-    qd_field_location_t *const location = (qd_field_location_t *)((char *)content + offsets[index]);
+    qd_field_location_t *const location = (qd_field_location_t*) ((char*) content + offsets[index]);
     if (location->parsed)
         return location;
 
     // requested field not parsed out.  Need to parse out up to the requested field:
     qd_buffer_t   *buffer = content->section_message_properties.buffer;
     unsigned char *cursor = qd_buffer_base(buffer) + content->section_message_properties.offset;
-    advance(&cursor, &buffer, content->section_message_properties.hdr_length);
-    if (index >= start_list(&cursor, &buffer)) return 0;  // properties list too short
+    if (!advance(&cursor, &buffer, content->section_message_properties.hdr_length))
+        return 0;
+    if (index >= get_list_count(&cursor, &buffer))
+        return 0;  // properties list too short
 
     int position = 0;
     while (position < index) {
-        qd_field_location_t *f = (qd_field_location_t *)((char *)content + offsets[position]);
-        if (f->parsed)
-            advance(&cursor, &buffer, f->hdr_length + f->length);
-        else // parse it out
-            if (!traverse_field(&cursor, &buffer, f)) return 0;
+        qd_field_location_t *f = (qd_field_location_t*) ((char*) content + offsets[position]);
+        if (f->parsed) {
+            if (!advance(&cursor, &buffer, f->hdr_length + f->length))
+                return 0;
+        } else // parse it out
+            if (!traverse_field(&cursor, &buffer, f))
+                return 0;
         position++;
     }
 
@@ -984,7 +1054,6 @@ void qd_message_free(qd_message_t *in_msg)
         if (content->q2_input_holdoff
             && was_blocked
             && qd_message_Q2_holdoff_should_unblock(in_msg)) {
-
             content->q2_input_holdoff = false;
             qd_link_restart_rx(qd_message_get_receiving_link(in_msg));
         }
@@ -1027,6 +1096,8 @@ qd_message_t *qd_message_copy(qd_message_t *in_msg)
     if (!copy)
         return 0;
 
+    ZERO(copy);
+
     qd_buffer_list_clone(&copy->ma_to_override, &msg->ma_to_override);
     qd_buffer_list_clone(&copy->ma_trace, &msg->ma_trace);
     qd_buffer_list_clone(&copy->ma_ingress, &msg->ma_ingress);
@@ -1062,6 +1133,7 @@ void qd_message_message_annotations(qd_message_t *in_msg)
     if (content->ma_field_iter_in == 0)
         return;
 
+    qd_parsed_field_t *ma_pf_stream = 0;
     qd_parse_annotations(
         msg->strip_annotations_in,
         content->ma_field_iter_in,
@@ -1069,6 +1141,7 @@ void qd_message_message_annotations(qd_message_t *in_msg)
         &content->ma_pf_phase,
         &content->ma_pf_to_override,
         &content->ma_pf_trace,
+        &ma_pf_stream,
         &content->ma_user_annotation_blob,
         &content->ma_count);
 
@@ -1086,6 +1159,11 @@ void qd_message_message_annotations(qd_message_t *in_msg)
     // extract phase
     if (content->ma_pf_phase) {
         content->ma_int_phase = qd_parse_as_int(content->ma_pf_phase);
+    }
+
+    if (ma_pf_stream) {
+        content->ma_stream = qd_parse_as_int(ma_pf_stream);
+        qd_parse_free(ma_pf_stream);
     }
 
     return;
@@ -1118,6 +1196,12 @@ int qd_message_get_phase_annotation(const qd_message_t *in_msg)
 {
     qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
     return msg->ma_phase;
+}
+
+void qd_message_set_stream_annotation(qd_message_t *in_msg, bool stream)
+{
+    qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
+    msg->content->ma_stream = stream;
 }
 
 void qd_message_set_ingress_annotation(qd_message_t *in_msg, qd_composed_field_t *ingress_field)
@@ -1221,6 +1305,44 @@ bool qd_message_send_complete(qd_message_t *in_msg)
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
     return msg->send_complete;
 }
+
+
+void qd_message_set_send_complete(qd_message_t *in_msg)
+{
+    if (!!in_msg) {
+        qd_message_pvt_t *msg = (qd_message_pvt_t*) in_msg;
+        msg->send_complete = true;
+    }
+}
+
+
+void qd_message_set_receive_complete(qd_message_t *in_msg)
+{
+    if (!!in_msg) {
+        qd_message_content_t *content = MSG_CONTENT(in_msg);
+        content->receive_complete = true;
+    }
+}
+
+void qd_message_set_no_body(qd_message_t *in_msg)
+{
+    if (!!in_msg) {
+        qd_message_content_t *content = MSG_CONTENT(in_msg);
+        content->no_body = true;
+    }
+}
+
+bool qd_message_no_body(qd_message_t *in_msg)
+{
+    if (!!in_msg) {
+        qd_message_content_t *content = MSG_CONTENT(in_msg);
+        return content->no_body;
+    }
+
+    return false;
+}
+
+
 
 bool qd_message_tag_sent(qd_message_t *in_msg)
 {
@@ -1447,6 +1569,15 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
             // the entire message.  We'll be back later to finish it up.
             // Return the message so that the caller can start sending out whatever we have received so far
             //
+            // push what we do have for testing/processing
+            if (qd_buffer_size(content->pending) > 0) {
+                LOCK(content->lock);
+                qd_buffer_set_fanout(content->pending, content->fanout);
+                DEQ_INSERT_TAIL(content->buffers, content->pending);
+                content->pending = 0;
+                UNLOCK(content->lock);
+                content->pending = qd_buffer();
+            }
             break;
         }
     }
@@ -1499,7 +1630,8 @@ static void compose_message_annotations_v1(qd_message_pvt_t *msg, qd_buffer_list
     if (!DEQ_IS_EMPTY(msg->ma_to_override) ||
         !DEQ_IS_EMPTY(msg->ma_trace) ||
         !DEQ_IS_EMPTY(msg->ma_ingress) ||
-        msg->ma_phase != 0) {
+        msg->ma_phase != 0 ||
+        msg->content->ma_stream) {
 
         if (!map_started) {
             qd_compose_start_map(out_ma);
@@ -1527,6 +1659,12 @@ static void compose_message_annotations_v1(qd_message_pvt_t *msg, qd_buffer_list
         if (msg->ma_phase != 0) {
             qd_compose_insert_symbol(field, QD_MA_PHASE);
             qd_compose_insert_int(field, msg->ma_phase);
+            field_count++;
+        }
+
+        if (msg->content->ma_stream) {
+            qd_compose_insert_symbol(field, QD_MA_STREAM);
+            qd_compose_insert_int(field, msg->content->ma_stream);
             field_count++;
         }
         // pad out to N fields
@@ -1767,7 +1905,7 @@ void qd_message_send(qd_message_t *in_msg,
                         // by freeing a buffer there now may be room to restart a
                         // stalled message receiver
                         if (content->q2_input_holdoff) {
-                            if (qd_message_Q2_holdoff_should_unblock((qd_message_t *)msg)) {
+                            if (qd_message_Q2_holdoff_should_unblock((qd_message_t*) msg)) {
                                 // wake up receive side
                                 // Note: clearing holdoff here is easy compared to
                                 // clearing it in the deferred callback. Tracing
@@ -1821,7 +1959,8 @@ static qd_message_depth_status_t message_check_depth_LH(qd_message_content_t *co
                                                         const unsigned char  *short_pattern,
                                                         const unsigned char  *expected_tags,
                                                         qd_field_location_t  *location,
-                                                        bool                  optional)
+                                                        bool                  optional,
+                                                        bool                  protect_buffer)
 {
 #define LONG  10
 #define SHORT 3
@@ -1829,9 +1968,9 @@ static qd_message_depth_status_t message_check_depth_LH(qd_message_content_t *co
         return QD_MESSAGE_DEPTH_OK;
 
     qd_section_status_t rc;
-    rc = message_section_check(&content->parse_buffer, &content->parse_cursor, short_pattern, SHORT, expected_tags, location);
+    rc = message_section_check_LH(&content->parse_buffer, &content->parse_cursor, short_pattern, SHORT, expected_tags, location, false, protect_buffer);
     if (rc == QD_SECTION_NO_MATCH)  // try the alternative
-        rc = message_section_check(&content->parse_buffer, &content->parse_cursor, long_pattern,  LONG,  expected_tags, location);
+        rc = message_section_check_LH(&content->parse_buffer, &content->parse_cursor, long_pattern,  LONG,  expected_tags, location, false, protect_buffer);
 
     if (rc == QD_SECTION_MATCH || (optional && rc == QD_SECTION_NO_MATCH)) {
         content->parse_depth = depth;
@@ -1843,7 +1982,7 @@ static qd_message_depth_status_t message_check_depth_LH(qd_message_content_t *co
             return QD_MESSAGE_DEPTH_INCOMPLETE;
 
         // no more data is going to come. OK if at the end and optional:
-        if (!content->parse_cursor && optional)
+        if (!can_advance(&content->parse_cursor, &content->parse_buffer) && optional)
             return QD_MESSAGE_DEPTH_OK;
 
         // otherwise we've got an invalid (truncated) header
@@ -1884,7 +2023,7 @@ static qd_message_depth_status_t qd_message_check_LH(qd_message_content_t *conte
         last_section = QD_DEPTH_HEADER;
         rc = message_check_depth_LH(content, QD_DEPTH_HEADER,
                                     MSG_HDR_LONG, MSG_HDR_SHORT, TAGS_LIST,
-                                    &content->section_message_header, true);
+                                    &content->section_message_header, true, true);
         if (rc != QD_MESSAGE_DEPTH_OK || depth == QD_DEPTH_HEADER)
             break;
 
@@ -1897,7 +2036,7 @@ static qd_message_depth_status_t qd_message_check_LH(qd_message_content_t *conte
         last_section = QD_DEPTH_DELIVERY_ANNOTATIONS;
         rc = message_check_depth_LH(content, QD_DEPTH_DELIVERY_ANNOTATIONS,
                                     DELIVERY_ANNOTATION_LONG, DELIVERY_ANNOTATION_SHORT, TAGS_MAP,
-                                    &content->section_delivery_annotation, true);
+                                    &content->section_delivery_annotation, true, true);
         if (rc != QD_MESSAGE_DEPTH_OK || depth == QD_DEPTH_DELIVERY_ANNOTATIONS)
             break;
 
@@ -1910,7 +2049,7 @@ static qd_message_depth_status_t qd_message_check_LH(qd_message_content_t *conte
         last_section = QD_DEPTH_MESSAGE_ANNOTATIONS;
         rc = message_check_depth_LH(content, QD_DEPTH_MESSAGE_ANNOTATIONS,
                                     MESSAGE_ANNOTATION_LONG, MESSAGE_ANNOTATION_SHORT, TAGS_MAP,
-                                    &content->section_message_annotation, true);
+                                    &content->section_message_annotation, true, true);
         if (rc != QD_MESSAGE_DEPTH_OK || depth == QD_DEPTH_MESSAGE_ANNOTATIONS)
             break;
 
@@ -1923,7 +2062,7 @@ static qd_message_depth_status_t qd_message_check_LH(qd_message_content_t *conte
         last_section = QD_DEPTH_PROPERTIES;
         rc = message_check_depth_LH(content, QD_DEPTH_PROPERTIES,
                                     PROPERTIES_LONG, PROPERTIES_SHORT, TAGS_LIST,
-                                    &content->section_message_properties, true);
+                                    &content->section_message_properties, true, true);
         if (rc != QD_MESSAGE_DEPTH_OK || depth == QD_DEPTH_PROPERTIES)
             break;
 
@@ -1936,7 +2075,7 @@ static qd_message_depth_status_t qd_message_check_LH(qd_message_content_t *conte
         last_section = QD_DEPTH_APPLICATION_PROPERTIES;
         rc = message_check_depth_LH(content, QD_DEPTH_APPLICATION_PROPERTIES,
                                     APPLICATION_PROPERTIES_LONG, APPLICATION_PROPERTIES_SHORT, TAGS_MAP,
-                                    &content->section_application_properties, true);
+                                    &content->section_application_properties, true, true);
         if (rc != QD_MESSAGE_DEPTH_OK || depth == QD_DEPTH_APPLICATION_PROPERTIES)
             break;
 
@@ -1960,15 +2099,15 @@ static qd_message_depth_status_t qd_message_check_LH(qd_message_content_t *conte
         last_section = QD_DEPTH_BODY;
         rc = message_check_depth_LH(content, QD_DEPTH_BODY,
                                     BODY_VALUE_LONG, BODY_VALUE_SHORT, TAGS_ANY,
-                                    &content->section_body, false);
+                                    &content->section_body, false, false);
         if (rc == QD_MESSAGE_DEPTH_INVALID) {   // may be a different body type, need to check:
             rc = message_check_depth_LH(content, QD_DEPTH_BODY,
                                         BODY_DATA_LONG, BODY_DATA_SHORT, TAGS_BINARY,
-                                        &content->section_body, false);
+                                        &content->section_body, false, false);
             if (rc == QD_MESSAGE_DEPTH_INVALID) {
                 rc = message_check_depth_LH(content, QD_DEPTH_BODY,
                                             BODY_SEQUENCE_LONG, BODY_SEQUENCE_SHORT, TAGS_LIST,
-                                            &content->section_body, true);  // PROTON-2085
+                                            &content->section_body, true, false);  // PROTON-2085
             }
         }
 
@@ -1987,7 +2126,7 @@ static qd_message_depth_status_t qd_message_check_LH(qd_message_content_t *conte
         last_section = QD_DEPTH_ALL;
         rc = message_check_depth_LH(content, QD_DEPTH_ALL,
                                     FOOTER_LONG, FOOTER_SHORT, TAGS_MAP,
-                                    &content->section_footer, true);
+                                    &content->section_footer, true, false);
         break;
 
     default:
@@ -2044,7 +2183,8 @@ qd_iterator_t *qd_message_field_iterator(qd_message_t *msg, qd_message_field_t f
 
     qd_buffer_t   *buffer = loc->buffer;
     unsigned char *cursor = qd_buffer_base(loc->buffer) + loc->offset;
-    advance(&cursor, &buffer, loc->hdr_length);
+    if (!advance(&cursor, &buffer, loc->hdr_length))
+        return 0;
 
     return qd_iterator_buffer(buffer, cursor - qd_buffer_base(buffer), loc->length, ITER_VIEW_ALL);
 }
@@ -2139,22 +2279,22 @@ void qd_message_compose_1(qd_message_t *msg, const char *to, qd_buffer_list_t *b
 }
 
 
-void qd_message_compose_2(qd_message_t *msg, qd_composed_field_t *field)
+void qd_message_compose_2(qd_message_t *msg, qd_composed_field_t *field, bool complete)
 {
     qd_message_content_t *content       = MSG_CONTENT(msg);
-    content->receive_complete     = true;
-
     qd_buffer_list_t     *field_buffers = qd_compose_buffers(field);
 
-    content->buffers = *field_buffers;
+    content->buffers          = *field_buffers;
+    content->receive_complete = complete;
+
     DEQ_INIT(*field_buffers); // Zero out the linkage to the now moved buffers.
 }
 
 
-void qd_message_compose_3(qd_message_t *msg, qd_composed_field_t *field1, qd_composed_field_t *field2)
+void qd_message_compose_3(qd_message_t *msg, qd_composed_field_t *field1, qd_composed_field_t *field2, bool receive_complete)
 {
     qd_message_content_t *content        = MSG_CONTENT(msg);
-    content->receive_complete     = true;
+    content->receive_complete            = receive_complete;
     qd_buffer_list_t     *field1_buffers = qd_compose_buffers(field1);
     qd_buffer_list_t     *field2_buffers = qd_compose_buffers(field2);
 
@@ -2164,10 +2304,10 @@ void qd_message_compose_3(qd_message_t *msg, qd_composed_field_t *field1, qd_com
 }
 
 
-void qd_message_compose_4(qd_message_t *msg, qd_composed_field_t *field1, qd_composed_field_t *field2, qd_composed_field_t *field3)
+void qd_message_compose_4(qd_message_t *msg, qd_composed_field_t *field1, qd_composed_field_t *field2, qd_composed_field_t *field3, bool receive_complete)
 {
-    qd_message_content_t *content = MSG_CONTENT(msg);
-    content->receive_complete     = true;
+    qd_message_content_t *content        = MSG_CONTENT(msg);
+    content->receive_complete            = receive_complete;
     qd_buffer_list_t     *field1_buffers = qd_compose_buffers(field1);
     qd_buffer_list_t     *field2_buffers = qd_compose_buffers(field2);
     qd_buffer_list_t     *field3_buffers = qd_compose_buffers(field3);
@@ -2179,15 +2319,451 @@ void qd_message_compose_4(qd_message_t *msg, qd_composed_field_t *field1, qd_com
 }
 
 
-qd_parsed_field_t *qd_message_get_ingress    (qd_message_t *msg)
+int qd_message_extend(qd_message_t *msg, qd_composed_field_t *field)
 {
-    return ((qd_message_pvt_t*)msg)->content->ma_pf_ingress;
+    qd_message_content_t *content = MSG_CONTENT(msg);
+    int                   count;
+    qd_buffer_list_t     *buffers = qd_compose_buffers(field);
+    qd_buffer_t          *buf     = DEQ_HEAD(*buffers);
+
+    LOCK(content->lock);
+    while (buf) {
+        qd_buffer_set_fanout(buf, content->fanout);
+        buf = DEQ_NEXT(buf);
+    }
+
+    DEQ_APPEND(content->buffers, (*buffers));
+    count = DEQ_SIZE(content->buffers);
+    UNLOCK(content->lock);
+    return count;
 }
 
 
-qd_parsed_field_t *qd_message_get_phase      (qd_message_t *msg)
+/**
+ * find_last_buffer_LH
+ *
+ * Given a field location, find the following:
+ *
+ *  - *cursor - The pointer to the octet _past_ the last octet in the field.  If this is the last octet in
+ *              the buffer, the cursor must point one octet past the buffer.
+ *  - *buffer - The last buffer that contains content for this field.
+ *
+ * Important:  If the last octet of the field is the last octet of a buffer and there are more buffers in the
+ * buffer list, *buffer _must_ refer to the buffer that contains the last octet of the field and *cursor must
+ * point at the octet following that octet, even if it points past the end of the buffer.
+ */
+static void find_last_buffer_LH(qd_field_location_t *location, unsigned char **cursor, qd_buffer_t **buffer)
 {
-    return ((qd_message_pvt_t*)msg)->content->ma_pf_phase;
+    qd_buffer_t *buf       = location->buffer;
+    size_t       remaining = location->hdr_length + location->length;
+
+    while (!!buf && remaining > 0) {
+        size_t this_buf_size = qd_buffer_size(buf) - (buf == location->buffer ? location->offset : 0);
+        if (remaining <= this_buf_size) {
+            *buffer = buf;
+            *cursor = qd_buffer_base(buf) + (buf == location->buffer ? location->offset : 0) + remaining;
+            return;
+        }
+        remaining -= this_buf_size;
+        buf = DEQ_NEXT(buf);
+    }
+
+    assert(false);  // The field should already have been validated as complete.
+}
+
+
+void trim_stream_data_headers_LH(qd_message_stream_data_t *stream_data, bool remove_vbin_header)
+{
+    const qd_field_location_t *location = &stream_data->section;
+    qd_buffer_t               *buffer   = location->buffer;
+    unsigned char             *cursor   = qd_buffer_base(buffer) + location->offset;
+
+    bool good = advance(&cursor, &buffer, location->hdr_length);
+    assert(good);
+    if (good) {
+        size_t        vbin_hdr_len = 0;
+        unsigned char tag          = 0;
+
+        if (remove_vbin_header) {
+            vbin_hdr_len = 1;
+            // coverity[check_return]
+            next_octet(&cursor, &buffer, &tag);
+            if (tag == QD_AMQP_VBIN8) {
+                advance(&cursor, &buffer, 1);
+                vbin_hdr_len += 1;
+            } else if (tag == QD_AMQP_VBIN32) {
+                advance(&cursor, &buffer, 4);
+                vbin_hdr_len += 4;
+            }
+        }
+
+        // coverity[check_return]
+        can_advance(&cursor, &buffer); // bump cursor to the next buffer if necessary
+
+        stream_data->payload.buffer     = buffer;
+        stream_data->payload.offset     = cursor - qd_buffer_base(buffer);
+        stream_data->payload.length     = location->length - vbin_hdr_len;
+        stream_data->payload.hdr_length = 0;
+        stream_data->payload.parsed     = true;
+        stream_data->payload.tag        = tag;
+    }
+}
+
+
+/**
+ * qd_message_stream_data_iterator
+ *
+ * Given a stream_data object, return an iterator that refers to the content of that body data.  This iterator
+ * shall not refer to the 3-byte performative header or the header for the vbin{8,32} field.
+ *
+ * The iterator must be freed eventually by the caller.
+ */
+qd_iterator_t *qd_message_stream_data_iterator(const qd_message_stream_data_t *stream_data)
+{
+    const qd_field_location_t *location = &stream_data->payload;
+
+    return qd_iterator_buffer(location->buffer, location->offset, location->length, ITER_VIEW_ALL);
+}
+
+/**
+ * qd_message_stream_data_payload_length
+ *
+ * Given a stream_data object, return the length of the payload.
+ */
+size_t qd_message_stream_data_payload_length(const qd_message_stream_data_t *stream_data)
+{
+    return stream_data->payload.length;
+}
+
+
+/**
+ * qd_message_stream_data_buffer_count
+ *
+ * Return the number of buffers contained in payload portion of the stream_data object.
+ */
+int qd_message_stream_data_buffer_count(const qd_message_stream_data_t *stream_data)
+{
+    if (stream_data->payload.length == 0)
+        return 0;
+
+    int count = 1;
+    qd_buffer_t *buffer = stream_data->payload.buffer;
+    while (!!buffer && buffer != stream_data->last_buffer) {
+        buffer = DEQ_NEXT(buffer);
+        count++;
+    }
+
+    return count;
+}
+
+
+/**
+ * qd_message_stream_data_buffers
+ *
+ * Populate the provided array of pn_raw_buffers with the addresses and lengths of the buffers in the stream_data
+ * object.  Don't fill more than count raw_buffers with data.  Start at offset from the zero-th buffer in the
+ * stream_data.
+ */
+int qd_message_stream_data_buffers(qd_message_stream_data_t *stream_data, pn_raw_buffer_t *buffers, int offset, int count)
+{
+    qd_buffer_t *buffer       = stream_data->payload.buffer;
+    size_t       data_offset  = stream_data->payload.offset;
+    size_t       payload_len  = stream_data->payload.length;
+
+    //
+    // Skip the buffer offset
+    //
+    if (offset > 0) {
+        assert(offset < qd_message_stream_data_buffer_count(stream_data));
+        while (offset > 0 && payload_len > 0) {
+            payload_len -= qd_buffer_size(buffer) - data_offset;
+            offset--;
+            data_offset = 0;
+            buffer = DEQ_NEXT(buffer);
+        }
+    }
+
+    //
+    // Fill the buffer array
+    //
+    int idx = 0;
+    while (idx < count && payload_len > 0) {
+        size_t buf_size = MIN(payload_len, qd_buffer_size(buffer) - data_offset);
+        buffers[idx].context  = 0;  // reserved for use by caller - do not modify!
+        buffers[idx].bytes    = (char*) qd_buffer_base(buffer) + data_offset;
+        buffers[idx].capacity = BUFFER_SIZE;
+        buffers[idx].size     = buf_size;
+        buffers[idx].offset   = 0;
+
+        data_offset = 0;
+        payload_len -= buf_size;
+        buffer = DEQ_NEXT(buffer);
+        idx++;
+    }
+
+    return idx;
+}
+
+
+/**
+ * qd_message_stream_data_release
+ *
+ * Decrement the fanout ref-counts for all of the buffers referred to in the stream_data.  If any have reached zero,
+ * remove them from the buffer list and free them.
+ *
+ * Do not free buffers that overlap with other stream_data or the buffer pointed to by msg->body_buffer.
+ */
+void qd_message_stream_data_release(qd_message_stream_data_t *stream_data)
+{
+    if (!stream_data)
+        return;
+
+    qd_message_pvt_t     *pvt       = stream_data->owning_message;
+    qd_message_content_t *content   = pvt->content;
+    qd_buffer_t          *buf;
+
+    //
+    // find the range of buffers that do not overlap other stream_data
+    // or msg->body_buffer
+    //
+
+    qd_buffer_t *start_buf = stream_data->free_prev ? DEQ_PREV(stream_data->section.buffer) : stream_data->section.buffer;
+    if (DEQ_PREV(stream_data) && DEQ_PREV(stream_data)->last_buffer == start_buf) {
+        // overlap previous stream_data
+        if (start_buf == stream_data->last_buffer) {
+            // no buffers to free
+            DEQ_REMOVE(pvt->stream_data_list, stream_data);
+            free_qd_message_stream_data_t(stream_data);
+            return;
+        }
+        start_buf = DEQ_NEXT(start_buf);
+    }
+
+    qd_buffer_t *stop_buf;
+    if (stream_data->last_buffer == pvt->body_buffer
+        || (DEQ_NEXT(stream_data) && DEQ_NEXT(stream_data)->section.buffer == stream_data->last_buffer)) {
+        stop_buf = stream_data->last_buffer;
+    } else {
+        stop_buf = DEQ_NEXT(stream_data->last_buffer);
+    }
+
+    LOCK(content->lock);
+
+    bool was_blocked = !qd_message_Q2_holdoff_should_unblock((qd_message_t*) pvt);
+
+    if (pvt->is_fanout) {
+        buf = start_buf;
+        while (buf != stop_buf) {
+            uint32_t old = qd_buffer_dec_fanout(buf);
+            (void)old;  // avoid compiler unused var error
+            assert(old > 0);
+            buf = DEQ_NEXT(buf);
+        }
+    }
+
+    //
+    // Free non-overlapping buffers with zero refcounts.
+    //
+    buf = start_buf;
+    while (buf != stop_buf) {
+        qd_buffer_t *next = DEQ_NEXT(buf);
+        if (qd_buffer_get_fanout(buf) == 0) {
+            DEQ_REMOVE(content->buffers, buf);
+            qd_buffer_free(buf);
+        }
+        buf = next;
+    }
+
+    //
+    // it is possible that we've freed enough buffers to clear Q2 holdoff
+    //
+    if (content->q2_input_holdoff
+        && was_blocked
+        && qd_message_Q2_holdoff_should_unblock((qd_message_t*) pvt)) {
+        content->q2_input_holdoff = false;
+        qd_link_restart_rx(qd_message_get_receiving_link((qd_message_t*) pvt));
+    }
+
+    UNLOCK(content->lock);
+
+    DEQ_REMOVE(pvt->stream_data_list, stream_data);
+    free_qd_message_stream_data_t(stream_data);
+}
+
+
+qd_message_stream_data_result_t qd_message_next_stream_data(qd_message_t *in_msg, qd_message_stream_data_t **out_stream_data)
+{
+    qd_message_pvt_t         *msg         = (qd_message_pvt_t*) in_msg;
+    qd_message_content_t     *content     = msg->content;
+    qd_message_stream_data_t *stream_data = 0;
+
+    *out_stream_data = 0;
+    if (!msg->body_cursor) {
+        //
+        // We haven't returned a body-data record for this message yet.  Start
+        // by ensuring the message has been parsed up to the first body section
+        //
+
+        qd_message_depth_status_t status = qd_message_check_depth(in_msg, QD_DEPTH_BODY);
+        if (status == QD_MESSAGE_DEPTH_OK) {
+            // Even if DEPTH_OK, body is optional. If there is no body then move to
+            // the footer
+            if (msg->content->section_body.buffer) {
+                msg->body_buffer = msg->content->section_body.buffer;
+                msg->body_cursor = qd_buffer_base(msg->body_buffer) + msg->content->section_body.offset;
+            } else {
+                // No body. Look for footer
+                status = qd_message_check_depth(in_msg, QD_DEPTH_ALL);
+                if (status == QD_MESSAGE_DEPTH_OK) {
+                    if (msg->content->section_footer.buffer) {
+                        // footer is also optional
+                        msg->body_buffer = msg->content->section_footer.buffer;
+                        msg->body_cursor = qd_buffer_base(msg->body_buffer) + msg->content->section_footer.offset;
+                    }
+                }
+            }
+        }
+
+        if (status == QD_MESSAGE_DEPTH_INCOMPLETE)
+            return QD_MESSAGE_STREAM_DATA_INCOMPLETE;
+        if (status == QD_MESSAGE_DEPTH_INVALID)
+            return QD_MESSAGE_STREAM_DATA_INVALID;
+
+        // neither data not footer found
+        if (!msg->body_buffer)
+            return QD_MESSAGE_STREAM_DATA_NO_MORE;
+    }
+
+    // parse out the body data section, or the footer if we're past the
+    // last data section
+
+    qd_section_status_t section_status;
+    qd_field_location_t location;
+    ZERO(&location);
+
+    qd_buffer_t * const old_body_buffer    = msg->body_buffer;
+    bool is_footer                         = false;
+    qd_message_stream_data_result_t result = QD_MESSAGE_STREAM_DATA_NO_MORE;
+
+    LOCK(content->lock);
+
+    section_status = message_section_check_LH(&msg->body_buffer, &msg->body_cursor,
+                                              BODY_DATA_SHORT, 3, TAGS_BINARY,
+                                              &location,
+                                              true,  // allow duplicates
+                                              false);  // do not inc buffer fanout
+    if (section_status == QD_SECTION_NO_MATCH) {
+        is_footer      = true;
+        section_status = message_section_check_LH(&msg->body_buffer, &msg->body_cursor,
+                                                  FOOTER_SHORT, 3, TAGS_MAP,
+                                                  &location, true, false);
+    }
+
+    switch (section_status) {
+    case QD_SECTION_INVALID:
+    case QD_SECTION_NO_MATCH:
+        result = QD_MESSAGE_STREAM_DATA_INVALID;
+        break;
+
+    case QD_SECTION_MATCH:
+        stream_data = new_qd_message_stream_data_t();
+        ZERO(stream_data);
+        stream_data->owning_message = msg;
+        stream_data->section        = location;
+        find_last_buffer_LH(&stream_data->section, &msg->body_cursor, &msg->body_buffer);
+        stream_data->last_buffer = msg->body_buffer;
+        trim_stream_data_headers_LH(stream_data, !is_footer);
+        DEQ_INSERT_TAIL(msg->stream_data_list, stream_data);
+        *out_stream_data = stream_data;
+
+        // if the buffer pointed to by the old msg->body_buffer could not be
+        // freed when the previous stream_data was released, release it when
+        // this stream_data is released.  Do not free it here as it may affect
+        // Q2 threshold, which is checked when the stream_data is released.
+        if (DEQ_HEAD(msg->stream_data_list) == stream_data)
+            if (old_body_buffer == DEQ_PREV(stream_data->section.buffer))
+                stream_data->free_prev = true;
+
+        result = is_footer ? QD_MESSAGE_STREAM_DATA_FOOTER_OK : QD_MESSAGE_STREAM_DATA_BODY_OK;
+        break;
+
+    case QD_SECTION_NEED_MORE:
+        if (msg->content->receive_complete)
+            result = QD_MESSAGE_STREAM_DATA_NO_MORE;
+        else
+            result = QD_MESSAGE_STREAM_DATA_INCOMPLETE;
+        break;
+    }
+
+    UNLOCK(content->lock);
+    return result;
+}
+
+
+int qd_message_read_body(qd_message_t *in_msg, pn_raw_buffer_t* buffers, int length)
+{
+    qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
+    if (!(msg->cursor.buffer && msg->cursor.cursor)) {
+        qd_field_location_t  *loc     = qd_message_field_location(in_msg, QD_FIELD_BODY);
+        if (!loc || loc->tag == QD_AMQP_NULL)
+            return 0;
+        // TODO: need to actually determine this, could be different if vbin32 sent
+        int preamble = 5;
+        if (loc->offset + preamble < qd_buffer_size(loc->buffer)) {
+            msg->cursor.buffer = loc->buffer;
+            msg->cursor.cursor = qd_buffer_base(loc->buffer) + loc->offset + preamble;
+        } else {
+            msg->cursor.buffer = DEQ_NEXT(loc->buffer);
+            if (!msg->cursor.buffer) return 0;
+            msg->cursor.cursor = qd_buffer_base(msg->cursor.buffer) + ((loc->offset + preamble) - qd_buffer_size(loc->buffer));
+        }
+    }
+
+    qd_buffer_t   *buf    = msg->cursor.buffer;
+    unsigned char *cursor = msg->cursor.cursor;
+
+    // if we are at the end of the current buffer, try to move to the
+    // next buffer
+    if (cursor == qd_buffer_base(buf) + qd_buffer_size(buf)) {
+        buf = DEQ_NEXT(buf);
+        if (buf) {
+            cursor = qd_buffer_base(buf);
+            msg->cursor.buffer = buf;
+            msg->cursor.cursor = cursor;
+        } else {
+            return 0;
+        }
+    }
+
+    int count;
+    for (count = 0; count < length && buf; count++) {
+        buffers[count].bytes = (char*) qd_buffer_base(buf);
+        buffers[count].capacity = qd_buffer_size(buf);
+        buffers[count].size = qd_buffer_size(buf);
+        buffers[count].offset = cursor - qd_buffer_base(buf);
+        buffers[count].context = (uintptr_t) buf;
+        buf = DEQ_NEXT(buf);
+        if (buf) {
+            cursor = qd_buffer_base(buf);
+            msg->cursor.buffer = buf;
+            msg->cursor.cursor = cursor;
+        } else {
+            msg->cursor.cursor = qd_buffer_base(msg->cursor.buffer) + qd_buffer_size(msg->cursor.buffer);
+        }
+    }
+    return count;
+}
+
+
+qd_parsed_field_t *qd_message_get_ingress(qd_message_t *msg)
+{
+    return ((qd_message_pvt_t*) msg)->content->ma_pf_ingress;
+}
+
+
+qd_parsed_field_t *qd_message_get_phase(qd_message_t *msg)
+{
+    return ((qd_message_pvt_t*) msg)->content->ma_pf_phase;
 }
 
 
@@ -2197,15 +2773,20 @@ qd_parsed_field_t *qd_message_get_to_override(qd_message_t *msg)
 }
 
 
-qd_parsed_field_t *qd_message_get_trace      (qd_message_t *msg)
+qd_parsed_field_t *qd_message_get_trace(qd_message_t *msg)
 {
-    return ((qd_message_pvt_t*)msg)->content->ma_pf_trace;
+    return ((qd_message_pvt_t*) msg)->content->ma_pf_trace;
 }
 
 
 int qd_message_get_phase_val(qd_message_t *msg)
 {
-    return ((qd_message_pvt_t*)msg)->content->ma_int_phase;
+    return ((qd_message_pvt_t*) msg)->content->ma_int_phase;
+}
+
+int qd_message_is_streaming(qd_message_t *msg)
+{
+    return ((qd_message_pvt_t*) msg)->content->ma_stream;
 }
 
 
@@ -2263,4 +2844,50 @@ bool qd_message_oversize(const qd_message_t *msg)
 {
     qd_message_content_t * mc = MSG_CONTENT(msg);
     return mc->oversize;
+}
+
+
+int qd_message_stream_data_append(qd_message_t *message, qd_buffer_list_t *data)
+{
+    unsigned int        length = DEQ_SIZE(*data);
+    qd_composed_field_t *field = 0;
+    int rc = 0;
+
+    if (length == 0)
+        return rc;
+
+    // DISPATCH-1803: ensure no body data section can violate the Q2 threshold.
+    // This allows the egress router to wait for an entire body data section
+    // to arrive and be validated before sending it out to the endpoint.
+    //
+    while (length > QD_QLIMIT_Q2_LOWER) {
+        qd_buffer_t *buf = DEQ_HEAD(*data);
+        for (int i = 0; i < QD_QLIMIT_Q2_LOWER; ++i) {
+            buf = DEQ_NEXT(buf);
+        }
+
+        // split the list at buf.  buf becomes head of trailing list
+
+        qd_buffer_list_t trailer = DEQ_EMPTY;
+        DEQ_HEAD(trailer) = buf;
+        DEQ_TAIL(trailer) = DEQ_TAIL(*data);
+        DEQ_TAIL(*data) = DEQ_PREV(buf);
+        DEQ_NEXT(DEQ_TAIL(*data)) = 0;
+        DEQ_PREV(buf) = 0;
+        DEQ_SIZE(trailer) = length - QD_QLIMIT_Q2_LOWER;
+        DEQ_SIZE(*data) = QD_QLIMIT_Q2_LOWER;
+
+        field = qd_compose(QD_PERFORMATIVE_BODY_DATA, field);
+        qd_compose_insert_binary_buffers(field, data);
+
+        DEQ_MOVE(trailer, *data);
+        length -= QD_QLIMIT_Q2_LOWER;
+    }
+
+    field = qd_compose(QD_PERFORMATIVE_BODY_DATA, field);
+    qd_compose_insert_binary_buffers(field, data);
+
+    rc = qd_message_extend(message, field);
+    qd_compose_free(field);
+    return rc;
 }

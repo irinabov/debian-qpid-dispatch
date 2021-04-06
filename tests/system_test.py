@@ -34,13 +34,14 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 import errno, os, time, socket, random, subprocess, shutil, unittest, __main__, re, sys
+import functools
 from datetime import datetime
 from subprocess import PIPE, STDOUT
 from copy import copy
 try:
-    import queue as Queue   # 3.x
+    import queue as Queue  # 3.x
 except ImportError:
-    import Queue as Queue   # 2.7
+    import Queue as Queue  # 2.7
 from threading import Thread
 from threading import Event
 import json
@@ -84,7 +85,7 @@ except ImportError as err:
 try:
     import qpid_messaging as qm
 except ImportError as err:
-    qm = None                   # pylint: disable=invalid-name
+    qm = None  # pylint: disable=invalid-name
     MISSING_MODULES.append(str(err))
 
 def find_exe(program):
@@ -157,7 +158,7 @@ def retry_exception(function, timeout=TIMEOUT, delay=.001, max_delay=1, exceptio
     while True:
         try:
             return function()
-        except Exception as e:    # pylint: disable=broad-except
+        except Exception as e:  # pylint: disable=broad-except
             if exception_test:
                 exception_test(e)
             delay = retry_delay(deadline, delay, max_delay)
@@ -340,6 +341,44 @@ class Config(object):
         with open(name, 'w') as f:
             f.write(str(self))
         return name
+
+
+class HttpServer(Process):
+    def __init__(self, args, name=None, expect=Process.RUNNING):
+        super(HttpServer, self).__init__(args, name=name, expect=expect)
+
+# A HTTP2 Server that will respond to requests made via the router
+class Http2Server(HttpServer):
+    def __init__(self, name=None, listen_port=None, wait=True,
+                 py_string='python3', perform_teardown=True, cl_args=None,
+                 server_file=None,
+                 expect=Process.RUNNING):
+        self.name = name
+        self.listen_port = listen_port
+        self.ports_family = {self.listen_port: 'IPv4'}
+        self.py_string = py_string
+        self.cl_args = cl_args
+        self.perform_teardown = perform_teardown
+        self.server_file = server_file
+        self._wait_ready = False
+        self.args = ['/usr/bin/env', self.py_string, os.path.join(os.path.dirname(os.path.abspath(__file__)), self.server_file)]
+        if self.cl_args:
+            self.args += self.cl_args
+        super(Http2Server, self).__init__(self.args, name=name, expect=expect)
+        if wait:
+            self.wait_ready()
+
+    def wait_ready(self, **retry_kwargs):
+        """
+        Wait for ports to be ready
+        """
+        if not self._wait_ready:
+            self._wait_ready = True
+            self.wait_ports(**retry_kwargs)
+
+    def wait_ports(self, **retry_kwargs):
+        wait_ports(self.ports_family, **retry_kwargs)
+
 
 class Qdrouterd(Process):
     """Run a Qpid Dispatch Router Daemon"""
@@ -569,6 +608,12 @@ class Qdrouterd(Process):
         raise Exception("Unknown protocol family: %s" % protocol_family)
 
     @property
+    def http_addresses(self):
+        """Return http://host:port addresses for all http listeners"""
+        cfg = self.config.sections('httpListener')
+        return ["http://%s" % self._cfg_2_host_port(l) for l in cfg]
+
+    @property
     def addresses(self):
         """Return amqp://host:port addresses for all listeners"""
         cfg = self.config.sections('listener')
@@ -601,7 +646,7 @@ class Qdrouterd(Process):
             return False
 
     def wait_address(self, address, subscribers=0, remotes=0, containers=0,
-                     count=1, **retry_kwargs ):
+                     count=1, **retry_kwargs):
         """
         Wait for an address to be visible on the router.
         @keyword subscribers: Wait till subscriberCount >= subscribers
@@ -624,6 +669,24 @@ class Qdrouterd(Process):
                     and addrs[0]['subscriberCount'] >= subscribers
                     and addrs[0]['remoteCount'] >= remotes
                     and addrs[0]['containerCount'] >= containers)
+        assert retry(check, **retry_kwargs)
+
+    def wait_address_unsubscribed(self, address, **retry_kwargs):
+        """
+        Block until address has no subscribers
+        """
+        a_type = 'org.apache.qpid.dispatch.router.address'
+        def check():
+            addrs = self.management.query(a_type).get_dicts()
+            rc = list(filter(lambda a: a['name'].find(address) != -1,
+                             addrs))
+            count = 0
+            for a in rc:
+                count += a['subscriberCount']
+                count += a['remoteCount']
+                count += a['containerCount']
+
+            return count == 0
         assert retry(check, **retry_kwargs)
 
     def get_host(self, protocol_family):
@@ -732,6 +795,9 @@ class Tester(object):
         """Return a Qdrouterd that will be cleaned up on teardown"""
         return self.cleanup(Qdrouterd(*args, **kwargs))
 
+    def http2server(self, *args, **kwargs):
+        return self.cleanup(Http2Server(*args, **kwargs))
+
     port_range = (20000, 30000)
     next_port = random.randint(port_range[0], port_range[1])
 
@@ -753,7 +819,7 @@ class Tester(object):
         return p
 
 
-class TestCase(unittest.TestCase, Tester): # pylint: disable=too-many-public-methods
+class TestCase(unittest.TestCase, Tester):  # pylint: disable=too-many-public-methods
     """A TestCase that sets up its own working directory and is also a Tester."""
 
     def __init__(self, test_method):
@@ -820,13 +886,29 @@ class TestCase(unittest.TestCase, Tester): # pylint: disable=too-many-public-met
         for i in seq:
             assert i > avg/2, "Work not fairly distributed: %s"%seq
 
-    def assertIn(self, item, items):
-        assert item in items, "%s not in %s" % (item, items)
+    if not hasattr(unittest.TestCase, 'assertIn'):
+        def assertIn(self, item, items, msg=None):
+            """For Python < 2.7"""
+            assert item in items, msg or "%s not in %s%s"
 
-    if not hasattr(unittest.TestCase, 'assertRegexpMatches'):
-        def assertRegexpMatches(self, text, regexp, msg=None):
-            """For python < 2.7: assert re.search(regexp, text)"""
-            assert re.search(regexp, text), msg or "Can't find %r in '%s'" %(regexp, text)
+    if not hasattr(unittest.TestCase, 'assertNotIn'):
+        def assertNotIn(self, item, items, msg=None):
+            assert item not in items, msg or "%s not in %s%s"
+
+    if not hasattr(unittest.TestCase, 'assertRegex'):
+        def assertRegex(self, text, regexp, msg=None):
+            """For Python < 3.2"""
+            if hasattr(unittest.TestCase, 'assertRegexpMatches'):
+                self.assertRegexpMatches(text, regexp, msg)
+            else:
+                assert re.search(regexp, text), msg or "Can't find %r in '%s'" % (regexp, text)
+
+    if not hasattr(unittest.TestCase, 'assertNotRegex'):
+        def assertNotRegex(self, text, regexp, msg=None):
+            if hasattr(unittest.TestCase, 'assertNotRegexpMatches'):
+                self.assertNotRegexpMatches(text, regexp, msg)
+            else:
+                assert not re.search(regexp, text), msg or "Found %r in '%s'" % (regexp, text)
 
 
 class SkipIfNeeded(object):
@@ -848,6 +930,7 @@ class SkipIfNeeded(object):
 
     def __call__(self, f):
 
+        @functools.wraps(f)
         def wrap(*args, **kwargs):
             """
             Wraps original test method's invocation and dictates whether or
@@ -929,6 +1012,8 @@ class AsyncTestReceiver(MessagingHandler):
         self._thread.join(timeout=TIMEOUT)
         if self._thread.is_alive():
             raise Exception("AsyncTestReceiver did not exit")
+        del self._conn
+        del self._container
 
     def on_start(self, event):
         kwargs = {'url': self.address}
@@ -990,6 +1075,8 @@ class AsyncTestSender(MessagingHandler):
         self.error = None
         self.link_stats = None
 
+        self._conn = None
+        self._sender = None
         self._message = message or Message(body="test")
         self._container = Container(self)
         cid = container_id or "ATS-%s:%s" % (target, uuid.uuid4())
@@ -1011,6 +1098,9 @@ class AsyncTestSender(MessagingHandler):
         assert not self._thread.is_alive(), "sender did not complete"
         if self.error:
             raise AsyncTestSender.TestSenderException(self.error)
+        del self._sender
+        del self._conn
+        del self._container
 
     def on_start(self, event):
         self._conn = self._container.connect(self.address)
@@ -1071,7 +1161,6 @@ class AsyncTestSender(MessagingHandler):
         if self._conn:
             self._conn.close()
             self._conn = None
-
 
 class QdManager(object):
     """

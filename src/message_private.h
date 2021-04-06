@@ -24,6 +24,8 @@
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/atomic.h>
 
+typedef struct qd_message_pvt_t qd_message_pvt_t;
+
 /** @file
  * Message representation.
  * 
@@ -58,6 +60,18 @@ typedef struct {
     uint8_t      tag;        // Type tag of the field
 } qd_field_location_t;
 
+
+struct qd_message_stream_data_t {
+    DEQ_LINKS(qd_message_stream_data_t);  // Linkage to form a DEQ
+    qd_message_pvt_t    *owning_message;  // Pointer to the owning message
+    qd_field_location_t  section;         // Section descriptor for the field
+    qd_field_location_t  payload;         // Descriptor for the payload of the body data
+    qd_buffer_t         *last_buffer;     // Pointer to the last buffer in the field
+    bool                 free_prev;       // true if old body_data buffer needs freeing
+};
+
+ALLOC_DECLARE(qd_message_stream_data_t);
+DEQ_DECLARE(qd_message_stream_data_t, qd_message_stream_data_list_t);
 
 // TODO - consider using pointers to qd_field_location_t below to save memory
 // TODO - provide a way to allocate a message without a lock for the link-routing case.
@@ -94,10 +108,9 @@ typedef struct {
     qd_field_location_t  field_group_sequence;
     qd_field_location_t  field_reply_to_group_id;
 
-    qd_field_location_t  body;                            // The body of the message
-    qd_buffer_t         *parse_buffer;
-    unsigned char       *parse_cursor;
-    qd_message_depth_t   parse_depth;
+    qd_buffer_t         *parse_buffer;                    // Pointer to the buffer where parsing should resume, if needed
+    unsigned char       *parse_cursor;                    // Pointer to octet in parse_buffer where parsing should resume, if needed
+    qd_message_depth_t   parse_depth;                     // The depth to which this message content has been parsed
     qd_iterator_t       *ma_field_iter_in;                // 'message field iterator' for msg.FIELD_MESSAGE_ANNOTATION
 
     qd_iterator_pointer_t ma_user_annotation_blob;        // Original user annotations
@@ -109,6 +122,7 @@ typedef struct {
     qd_parsed_field_t   *ma_pf_to_override;
     qd_parsed_field_t   *ma_pf_trace;
     int                  ma_int_phase;
+    bool                 ma_stream;                      // indicates whether this message is streaming
     uint64_t             max_message_size;               // configured max; 0 if no max to enforce
     uint64_t             bytes_received;                 // bytes returned by pn_link_recv() when enforcing max_message_size
     uint32_t             fanout;                         // The number of receivers for this message, including in-process subscribers.
@@ -123,23 +137,27 @@ typedef struct {
     bool                 priority_parsed;
     bool                 priority_present;
     bool                 oversize;                       // policy oversize handling in effect
+    bool                 no_body;                        // Used for http2 messages. If no_body is true, the HTTP request had no body
     uint8_t              priority;                       // The priority of this message
 } qd_message_content_t;
 
-typedef struct {
-    qd_iterator_pointer_t cursor;          // A pointer to the current location of the outgoing byte stream.
-    qd_message_depth_t    message_depth;   // What is the depth of the message that has been received so far
-    qd_message_depth_t    sent_depth;      // How much of the message has been sent?  QD_DEPTH_NONE means nothing has been sent so far, QD_DEPTH_HEADER means the header has already been sent, dont send it again and so on.
-    qd_message_content_t *content;         // The actual content of the message. The content is never copied
-    qd_buffer_list_t      ma_to_override;  // to field in outgoing message annotations.
-    qd_buffer_list_t      ma_trace;        // trace list in outgoing message annotations
-    qd_buffer_list_t      ma_ingress;      // ingress field in outgoing message annotations
-    int                   ma_phase;        // phase for the override address
-    bool                  strip_annotations_in;
-    bool                  send_complete;   // Has the message been completely received and completely sent?
-    bool                  tag_sent;        // Tags are sent
-    bool                  is_fanout;       // If msg is an outgoing fanout
-} qd_message_pvt_t;
+struct qd_message_pvt_t {
+    qd_iterator_pointer_t          cursor;          // A pointer to the current location of the outgoing byte stream.
+    qd_message_depth_t             message_depth;   // What is the depth of the message that has been received so far
+    qd_message_depth_t             sent_depth;      // How much of the message has been sent?  QD_DEPTH_NONE means nothing has been sent so far, QD_DEPTH_HEADER means the header has already been sent, dont send it again and so on.
+    qd_message_content_t          *content;         // The actual content of the message. The content is never copied
+    qd_buffer_list_t               ma_to_override;  // to field in outgoing message annotations.
+    qd_buffer_list_t               ma_trace;        // trace list in outgoing message annotations
+    qd_buffer_list_t               ma_ingress;      // ingress field in outgoing message annotations
+    int                            ma_phase;        // phase for the override address
+    qd_message_stream_data_list_t  stream_data_list;  // TODO - move this to the content for one-time parsing (TLR)
+    unsigned char                 *body_cursor;     // tracks the point in the content buffer chain
+    qd_buffer_t                   *body_buffer;     // to parse the next body data section (if it exists)
+    bool                           strip_annotations_in;
+    bool                           send_complete;   // Has the message been completely received and completely sent?
+    bool                           tag_sent;        // Tags are sent
+    bool                           is_fanout;       // If msg is an outgoing fanout
+};
 
 ALLOC_DECLARE(qd_message_t);
 ALLOC_DECLARE(qd_message_content_t);

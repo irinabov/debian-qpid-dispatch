@@ -252,7 +252,7 @@ static qd_message_t *qcm_mobile_sync_compose_differential_mau(qdrm_mobile_sync_t
 
     qd_compose_end_map(body);
 
-    qd_message_compose_3(msg, headers, body);
+    qd_message_compose_3(msg, headers, body, true);
     qd_compose_free(headers);
     qd_compose_free(body);
     return msg;
@@ -320,7 +320,7 @@ static qd_message_t *qcm_mobile_sync_compose_absolute_mau(qdrm_mobile_sync_t *ms
     }
     qd_compose_end_list(body);
     qd_compose_end_map(body);
-    qd_message_compose_3(msg, headers, body);
+    qd_message_compose_3(msg, headers, body, true);
     qd_compose_free(headers);
     qd_compose_free(body);
     return msg;
@@ -348,7 +348,7 @@ static qd_message_t *qcm_mobile_sync_compose_mar(qdrm_mobile_sync_t *msync, qdr_
 
     qd_compose_end_map(body);
 
-    qd_message_compose_3(msg, headers, body);
+    qd_message_compose_3(msg, headers, body, true);
     qd_compose_free(headers);
     qd_compose_free(body);
     return msg;
@@ -694,11 +694,13 @@ static void qcm_mobile_sync_on_mau_CT(qdrm_mobile_sync_t *msync, qd_parsed_field
 }
 
 
-static void qcm_mobile_sync_on_message_CT(void         *context,
-                                          qd_message_t *msg,
-                                          int           unused_link_maskbit,
-                                          int           unused_inter_router_cost,
-                                          uint64_t      unused_conn_id)
+static uint64_t qcm_mobile_sync_on_message_CT(void                    *context,
+                                              qd_message_t            *msg,
+                                              int                      unused_link_maskbit,
+                                              int                      unused_inter_router_cost,
+                                              uint64_t                 unused_conn_id,
+                                              const qd_policy_spec_t  *unused_policy_spec,
+                                              qdr_error_t            **error)
 {
     qdrm_mobile_sync_t *msync      = (qdrm_mobile_sync_t*) context;
     qd_iterator_t      *ap_iter    = qd_message_field_iterator(msg, QD_FIELD_APPLICATION_PROPERTIES);
@@ -720,6 +722,8 @@ static void qcm_mobile_sync_on_message_CT(void         *context,
     qd_iterator_free(ap_iter);
     qd_parse_free(body_field);
     qd_iterator_free(body_iter);
+
+    return PN_ACCEPTED;
 }
 
 

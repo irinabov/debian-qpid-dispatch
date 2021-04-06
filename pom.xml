@@ -26,7 +26,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.apache.qpid</groupId>
     <artifactId>qpid-dispatch</artifactId>
-    <version>1.14.0</version>
+    <version>1.15.0</version>
     <name>QpidDispatch</name>
     <inceptionYear>2018</inceptionYear>
     <url>https://qpid.apache.org</url>   
@@ -120,6 +120,7 @@
                       <exclude>libwebsockets/**</exclude>
                       <exclude>tools/scraper/test_data/**</exclude>
                       <exclude>**/doctest.h</exclude>
+                      <exclude>**/*_pb2*</exclude>
                 </excludes>
         </configuration>            
             </plugin>

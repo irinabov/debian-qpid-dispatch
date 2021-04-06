@@ -123,7 +123,7 @@ typedef struct {
      * @{
      */
 
-    /** Invoked when a new or existing received delivery is avaliable for processing. */
+    /** Invoked when a new or existing received delivery is available for processing. */
     qd_container_delivery_handler_t rx_handler;
 
     /** Invoked when an existing delivery changes disposition or settlement state. */
@@ -224,7 +224,6 @@ pn_terminus_t *qd_link_source(qd_link_t *link);
 pn_terminus_t *qd_link_target(qd_link_t *link);
 pn_terminus_t *qd_link_remote_source(qd_link_t *link);
 pn_terminus_t *qd_link_remote_target(qd_link_t *link);
-void qd_link_activate(qd_link_t *link);
 void qd_link_close(qd_link_t *link);
 void qd_link_detach(qd_link_t *link);
 void qd_link_free(qd_link_t *link);

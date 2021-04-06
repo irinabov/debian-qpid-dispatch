@@ -36,7 +36,6 @@ struct qdr_delivery_t {
     DEQ_LINKS(qdr_delivery_t);
     void                   *context;
     sys_atomic_t            ref_count;
-    bool                    ref_counted;   /// Used to protect against ref count going 1 -> 0 -> 1
     qdr_link_t_sp           link_sp;       /// Safe pointer to the link
     qdr_delivery_t         *peer;          /// Use this peer if the delivery has one and only one peer.
     qdr_delivery_ref_t     *next_peer_ref;
@@ -46,10 +45,9 @@ struct qdr_delivery_t {
     uint64_t                disposition;         ///< local disposition, will be pushed to remote endpoint
     uint64_t                remote_disposition;  ///< disposition as set by remote endpoint
     uint64_t                mcast_disposition;   ///< temporary terminal disposition while multicast fwding
+    qd_delivery_state_t    *remote_state;        ///< outcome-specific data read from remote endpoint
+    qd_delivery_state_t    *local_state;         ///< outcome-specific data to send to remote endpoint
     uint32_t                ingress_time;
-    pn_data_t              *remote_extension_state;  ///< extension state from peer endpoint
-    pn_data_t              *local_extension_state;   ///< extension state to send to peer endpoint
-    qdr_error_t            *error;
     bool                    settled;
     bool                    presettled; /// Proton does not have a notion of pre-settled. This flag is introduced in Dispatch and should exclusively be used only to update management counters like presettled delivery counts on links etc. This flag DOES NOT represent the remote settlement state of the delivery.
     qdr_delivery_where_t    where;
@@ -62,6 +60,9 @@ struct qdr_delivery_t {
     qdr_link_work_t        *link_work;         ///< Delivery work item for this delivery
     qdr_subscription_ref_list_t subscriptions;
     qdr_delivery_ref_list_t peers;             /// Use this list if there if the delivery has more than one peer.
+    uint32_t                delivery_id;       /// id for logging
+    uint64_t                link_id;           /// id for logging
+    uint64_t                conn_id;           /// id for logging
     bool                    multicast;         /// True if this delivery is targeted for a multicast address.
     bool                    via_edge;          /// True if this delivery arrived via an edge-connection.
     bool                    stuck;             /// True if this delivery was counted as stuck.
@@ -69,6 +70,15 @@ struct qdr_delivery_t {
 
 ALLOC_DECLARE(qdr_delivery_t);
 
+/** Delivery Id for logging - thread safe
+ */
+extern sys_atomic_t global_delivery_id;
+static inline uint32_t next_delivery_id() { return sys_atomic_inc(&global_delivery_id); }
+
+// Common log line prefix
+#define DLV_FMT       "[C%"PRIu64"][L%"PRIu64"][D%"PRIu32"]"
+#define DLV_ARGS(dlv) dlv->conn_id, dlv->link_id, dlv->delivery_id
+#define DLV_ARGS_MAX  75
 
 ///////////////////////////////////////////////////////////////////////////////
 //                               Delivery API
@@ -94,14 +104,12 @@ void qdr_delivery_set_aborted(const qdr_delivery_t *delivery, bool aborted);
 bool qdr_delivery_is_aborted(const qdr_delivery_t *delivery);
 
 qd_message_t *qdr_delivery_message(const qdr_delivery_t *delivery);
-qdr_error_t *qdr_delivery_error(const qdr_delivery_t *delivery);
 qdr_link_t *qdr_delivery_link(const qdr_delivery_t *delivery);
 bool qdr_delivery_presettled(const qdr_delivery_t *delivery);
 
 void qdr_delivery_incref(qdr_delivery_t *delivery, const char *label);
 
-pn_data_t *qdr_delivery_extension_state(qdr_delivery_t *dlv);
-void qdr_delivery_move_extension_state_CT(qdr_delivery_t *dlv, qdr_delivery_t *peer);
+void qdr_delivery_move_delivery_state_CT(qdr_delivery_t *from, qdr_delivery_t *to);
 
 //
 // I/O thread only functions
@@ -121,10 +129,10 @@ void qdr_delivery_set_presettled(qdr_delivery_t *delivery);
 /* handles delivery disposition and settlement changes from the remote end of
  * the link, and schedules Core thread */
 void qdr_delivery_remote_state_updated(qdr_core_t *core, qdr_delivery_t *delivery, uint64_t disp,
-                                       bool settled, qdr_error_t *error, pn_data_t *ext_state, bool ref_given);
+                                       bool settled, qd_delivery_state_t *dstate, bool ref_given);
 
 /* invoked when incoming message data arrives - schedule core thread */
-qdr_delivery_t *qdr_deliver_continue(qdr_core_t *core, qdr_delivery_t *delivery, bool settled);
+qdr_delivery_t *qdr_delivery_continue(qdr_core_t *core, qdr_delivery_t *delivery, bool settled);
 
 
 //
@@ -134,7 +142,7 @@ qdr_delivery_t *qdr_deliver_continue(qdr_core_t *core, qdr_delivery_t *delivery,
 
 /* update settlement and/or disposition and schedule I/O processing */
 void qdr_delivery_release_CT(qdr_core_t *core, qdr_delivery_t *delivery);
-void qdr_delivery_reject_CT(qdr_core_t *core, qdr_delivery_t *delivery);
+void qdr_delivery_reject_CT(qdr_core_t *core, qdr_delivery_t *delivery, qdr_error_t *error);
 void qdr_delivery_failed_CT(qdr_core_t *core, qdr_delivery_t *delivery);
 bool qdr_delivery_settled_CT(qdr_core_t *core, qdr_delivery_t *delivery);
 
@@ -153,7 +161,7 @@ qdr_delivery_t *qdr_delivery_first_peer_CT(qdr_delivery_t *dlv);
 qdr_delivery_t *qdr_delivery_next_peer_CT(qdr_delivery_t *dlv);
 
 /* schedules all peer deliveries with work for I/O processing */
-void qdr_deliver_continue_peers_CT(qdr_core_t *core, qdr_delivery_t *in_dlv, bool more);
+void qdr_delivery_continue_peers_CT(qdr_core_t *core, qdr_delivery_t *in_dlv, bool more);
 
 /* update the links counters with respect to its delivery */
 void qdr_delivery_increment_counters_CT(qdr_core_t *core, qdr_delivery_t *delivery);
