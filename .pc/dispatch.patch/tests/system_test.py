@@ -733,10 +733,6 @@ class Qdrouterd(Process):
     def wait_router_connected(self, router_id, **retry_kwargs):
         retry(lambda: self.is_router_connected(router_id), **retry_kwargs)
 
-    @property
-    def logfile_path(self):
-        return os.path.join(self.outdir, self.logfile)
-
 
 class Tester(object):
     """Tools for use by TestCase

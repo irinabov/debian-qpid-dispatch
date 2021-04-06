@@ -10,16 +10,20 @@ Build-Depends: debhelper (>= 9),
                asciidoc (>= 8.6.8),
                asciidoctor,
                dblatex,
-               libqpid-proton-core10-dev (>= 0.31.0),
-               libqpid-proton-proactor1-dev (>= 0.31.0),
-               python3-qpid-proton (>= 0.31.0),
+               libqpid-proton-core10-dev (>= 0.33.0),
+               libqpid-proton-proactor1-dev (>= 0.33.0),
+               python3-qpid-proton (>= 0.33.0),
+               libnghttp2-dev,
+               libwebsockets-dev,
                libssl-dev
 Standards-Version: 3.9.7
 Homepage: http://qpid.apache.org/components/dispatch-router
 
 Package: qdrouterd
 Architecture: any
-Depends: libqpid-proton-core10,
+Depends: libqpid-proton-core10 (>= 0.33.0),
+         libnghttp2-14,
+         libwebsockets8,
          adduser,
          python3,
          ${shlibs:Depends}, ${misc:Depends}
@@ -47,7 +51,7 @@ Description: Qpid Dispatch Router executable
 
 Package: qdstat
 Architecture: all
-Depends: python3-qpid-proton (>= 0.31.0),
+Depends: python3-qpid-proton (>= 0.33.0),
          python3,
          ${misc:Depends}
 Description: Qpid Dispatch stat tool
@@ -71,7 +75,7 @@ Description: Qpid Dispatch stat tool
 
 Package: qdmanage
 Architecture: all
-Depends: python3-qpid-proton (>= 0.31.0),
+Depends: python3-qpid-proton (>= 0.33.0),
          python3,
          ${misc:Depends}
 Description: Qpid Dispatch manage tool
