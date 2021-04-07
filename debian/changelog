@@ -1,3 +1,9 @@
+qpid-dispatch (1.15.0-2qpid+bionic1) bionic; urgency=medium
+
+  * Added patch for i386 compile error
+
+ -- Kim van der Riet <kpvdr@4468b764db05>  Wed, 07 Apr 2021 08:52:12 -0400
+
 qpid-dispatch (1.15.0-1qpid+bionic1) bionic; urgency=medium
 
   * Rebased to 1.15.0
