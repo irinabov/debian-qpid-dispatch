@@ -1,0 +1,16 @@
+ tests/buffer_test.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tests/buffer_test.c b/tests/buffer_test.c
+index 706fe8cb..25eb4cd2 100644
+--- a/tests/buffer_test.c
++++ b/tests/buffer_test.c
+@@ -113,7 +113,7 @@ static char *test_buffer_list_append(void *context)
+     }
+     if (list_len != 26) {
+         static char error[100];
+-        sprintf(error, "Incorrect accumulated buffer size: %ld", list_len);
++        sprintf(error, "Incorrect accumulated buffer size: %zu", list_len);
+         return error;
+     }
+ 

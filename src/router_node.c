@@ -451,6 +451,42 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
     qd_message_t   *msg   = qd_message_receive(pnd);
     bool receive_complete = qd_message_receive_complete(msg);
 
+    //
+    // The very first time AMQP_rx_handler is called on a PN_DELIVERY event, it calls  qd_message_receive(). When qd_message_receive() returns, we check here if
+    // there are any data in the content buffers. If there is no content in the buffers, there is no reason to route the delivery. We will wait for some data
+    // in the buffers before we start to route the delivery.
+    // Notice that the if statement checks for the existence of a delivery (qdr_delivery_t). Existence of a delivery means that the delivery has been routed when
+    // there was data in the buffers (When a delivery has been routed successfully, the delivery (qdr_delivery_t) will be non null)
+    //
+    // The following if statement will deal with the following cases:-
+    // 1. We receive one empty transfer frame with more=true followed by another empty transfer frame with (more=false and abort=true) or with just more=false
+    //    In this case, there is no data at all in the message content buffers, we will reject the message when receive_complete=true. We will never route this
+    //    delivery, so core thread will not be involved
+    // 2. We receive 2 or more empty transfer frames with more=true followed by another empty transfer frame with (more=false and abort=true) or with just more=false
+    //    This case is similar to #1. We have no content in any of the buffers, we will reject this message after receive_complete=true. We will never route this
+    //    delivery, so core thread will not be involved
+    // 3. Exactly one empty transfer frame with more=false and abort=false
+    //    In this case, again there is still no content in any of the buffers, we will reject this message. Again, we will not route this message, so the core thread is not involved.
+    //
+    if (!delivery && !qd_message_has_data_in_content_or_pending_buffers(msg)) {
+        if (receive_complete) {
+            // There is no qdr_delivery_t (delivery) yet which means this message has not been routed yet (the first run of this function is not complete yet) and
+            // the message is fully received (receive_complete=true) but there is no content in the message buffers.
+            // This is only possible if there were one or more empty transfer frames.
+            // Since there is nothing in the message, we will reject it (AMQP message must have a non empty message body)
+            pn_link_flow(pn_link, 1);
+            if (pn_delivery_aborted(pnd))
+                qd_message_set_discard(msg, true);
+            pn_delivery_update(pnd, PN_REJECTED);
+            pn_delivery_settle(pnd);
+            // qd_message_free will free all the associated content buffers and also the content->pending buffer
+            qd_message_free(msg);
+            qd_log(router->log_source, QD_LOG_TRACE, "Message rejected due to empty message");
+        }
+
+        return false;
+    }
+
     if (!qd_message_oversize(msg)) {
         // message not rejected as oversize
         if (receive_complete) {
@@ -855,6 +891,7 @@ static void deferred_AMQP_rx_handler(void *context, bool discard)
     if (!discard) {
         qd_link_t *qdl = safe_deref_qd_link_t(*safe_qdl);
         if (!!qdl) {
+            assert(qd_link_direction(qdl) == QD_INCOMING);
             qd_router_t *qdr = (qd_router_t*) qd_link_get_node_context(qdl);
             assert(qdr != 0);
             while (true) {
@@ -1914,20 +1951,15 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
     if (!pdlv)
         return 0;
 
-    bool restart_rx = false;
     bool q3_stalled = false;
 
     qd_message_t *msg_out = qdr_delivery_message(dlv);
 
-    qd_message_send(msg_out, qlink, qdr_link_strip_annotations_out(link), &restart_rx, &q3_stalled);
+    qd_message_send(msg_out, qlink, qdr_link_strip_annotations_out(link), &q3_stalled);
 
     if (q3_stalled) {
         qd_link_q3_block(qlink);
         qdr_link_stalled_outbound(link);
-    }
-
-    if (restart_rx) {
-        qd_link_restart_rx(qd_message_get_receiving_link(msg_out));
     }
 
     bool send_complete = qdr_delivery_send_complete(dlv);
@@ -2059,7 +2091,10 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
                 // and if it is blocked by Q2 holdoff, get the link rolling again.
                 //
                 qd_message_Q2_holdoff_disable(msg);
-                qd_link_restart_rx(link);
+
+                qd_link_t_sp *safe_ptr = NEW(qd_link_t_sp);
+                set_safe_ptr_qd_link_t(link, safe_ptr);
+                qd_connection_invoke_deferred(qd_conn, deferred_AMQP_rx_handler, safe_ptr);
             }
         }
     }
@@ -2131,10 +2166,13 @@ qdr_core_t *qd_router_core(qd_dispatch_t *qd)
 }
 
 
-// called when Q2 holdoff is deactivated so we can receive more message buffers
+// invoked by an I/O thread when enough buffers have been released deactivate
+// the Q2 block.  Note that this method will likely be running on a worker
+// thread that is not the same thread that "owns" the qd_link_t passed in.
 //
-void qd_link_restart_rx(qd_link_t *in_link)
+void qd_link_q2_restart_receive(qd_alloc_safe_ptr_t context)
 {
+    qd_link_t *in_link = (qd_link_t*) qd_alloc_deref_safe_ptr(&context);
     if (!in_link)
         return;
 
@@ -2142,8 +2180,8 @@ void qd_link_restart_rx(qd_link_t *in_link)
 
     qd_connection_t *in_conn = qd_link_connection(in_link);
     if (in_conn) {
-        qd_link_t_sp *safe_ptr = NEW(qd_link_t_sp);
-        set_safe_ptr_qd_link_t(in_link, safe_ptr);
+        qd_link_t_sp *safe_ptr = NEW(qd_alloc_safe_ptr_t);
+        *safe_ptr = context;  // use original to keep old sequence counter
         qd_connection_invoke_deferred(in_conn, deferred_AMQP_rx_handler, safe_ptr);
     }
 }

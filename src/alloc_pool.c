@@ -102,6 +102,7 @@ static const char *leaking_types[] = {
     "qdr_field_t",
     "qdr_link_work_t",
     "qd_buffer_t",
+    "qd_bitmask_t",
 
     "qd_parsed_field_t",  // DISPATCH-1701
     "qdr_delivery_ref_t", // DISPATCH-1702
@@ -348,7 +349,8 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
         DEQ_INSERT_TAIL(qtype->allocated, item);
         sys_mutex_unlock(desc->lock);
         item->header = PATTERN_FRONT;
-        *((uint32_t*) ((char*) &item[1] + desc->total_size))= PATTERN_BACK;
+        const uint32_t pb = PATTERN_BACK;
+        memcpy((char*) &item[1] + desc->total_size, &pb, sizeof(pb));
         QD_MEMORY_FILL(&item[1], QD_MEMORY_INIT, desc->total_size);
 #endif
         return &item[1];
@@ -414,7 +416,8 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
         DEQ_INSERT_TAIL(qtype->allocated, item);
         sys_mutex_unlock(desc->lock);
         item->header = PATTERN_FRONT;
-        *((uint32_t*) ((char*) &item[1] + desc->total_size))= PATTERN_BACK;
+        const uint32_t pb = PATTERN_BACK;
+        memcpy((char*) &item[1] + desc->total_size, &pb, sizeof(pb));
         QD_MEMORY_FILL(&item[1], QD_MEMORY_INIT, desc->total_size);
 #endif
         return &item[1];
@@ -434,7 +437,9 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     assert (desc->header  == PATTERN_FRONT);
     assert (desc->trailer == PATTERN_BACK);
     assert (item->header  == PATTERN_FRONT);
-    assert (*((uint32_t*) (p + desc->total_size)) == PATTERN_BACK);
+    const uint32_t pb = PATTERN_BACK;
+    (void)pb;  // prevent unused warning
+    assert (memcmp(p + desc->total_size, &pb, sizeof(pb)) == 0);
     assert (item->desc == desc);  // Check for double-free
     qd_alloc_type_t *qtype = (qd_alloc_type_t*) desc->debug;
     sys_mutex_lock(desc->lock);
@@ -503,6 +508,10 @@ uint32_t qd_alloc_sequence(void *p)
         return 0;
 
     qd_alloc_item_t *item = ((qd_alloc_item_t*) p) - 1;
+#ifdef QD_MEMORY_DEBUG
+    // ensure p actually points to an alloc pool item
+    assert(item->header == PATTERN_FRONT);
+#endif
     return item->sequence;
 }
 
