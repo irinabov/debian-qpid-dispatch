@@ -630,16 +630,19 @@ static qd_error_t iter_to_py_attr(qd_iterator_t *iter,
     return qd_error_code();
 }
 
-static void qd_io_rx_handler(void *context, qd_message_t *msg, int link_id, int inter_router_cost,
-                             uint64_t ignore)
+static uint64_t qd_io_rx_handler(void *context, qd_message_t *msg, int link_id, int inter_router_cost,
+                                 uint64_t ignore, const qd_policy_spec_t *policy_spec, qdr_error_t **error)
 {
     IoAdapter *self = (IoAdapter*) context;
+    *error = 0;
 
     //
     // Parse the message through the body and exit if the message is not well formed.
     //
-    if (qd_message_check_depth(msg, QD_DEPTH_BODY) != QD_MESSAGE_DEPTH_OK)
-        return;
+    if (qd_message_check_depth(msg, QD_DEPTH_BODY) != QD_MESSAGE_DEPTH_OK) {
+        *error = qdr_error(QD_AMQP_COND_DECODE_ERROR, "Parse error in message content");
+        return PN_REJECTED;
+    }
 
     // This is called from non-python threads so we need to acquire the GIL to use python APIS.
     qd_python_lock_state_t lock_state = qd_python_lock();
@@ -647,7 +650,7 @@ static void qd_io_rx_handler(void *context, qd_message_t *msg, int link_id, int 
     if (!py_msg) {
         qd_error_py();
         qd_python_unlock(lock_state);
-        return;
+        return PN_ACCEPTED;
     }
     iter_to_py_attr(qd_message_field_iterator(msg, QD_FIELD_TO), py_iter_copy, py_msg, "address");
     iter_to_py_attr(qd_message_field_iterator(msg, QD_FIELD_REPLY_TO), py_iter_copy, py_msg, "reply_to");
@@ -662,6 +665,7 @@ static void qd_io_rx_handler(void *context, qd_message_t *msg, int link_id, int 
     Py_XDECREF(value);
     qd_error_py();
     qd_python_unlock(lock_state);
+    return PN_ACCEPTED;
 }
 
 
@@ -764,7 +768,7 @@ static PyObject *qd_python_send(PyObject *self, PyObject *args)
 
     if (compose_python_message(&field, message, ioa->qd) == QD_ERROR_NONE) {
         qd_message_t *msg = qd_message();
-        qd_message_compose_2(msg, field);
+        qd_message_compose_2(msg, field, true);
 
         qd_composed_field_t *ingress = qd_compose_subfield(0);
         qd_compose_insert_string(ingress, qd_router_id(ioa->qd));
@@ -906,4 +910,73 @@ void qd_python_unlock(qd_python_lock_state_t lock_state)
 {
     lock_held = false;
     sys_mutex_unlock(ilock);
+}
+
+void qd_json_msgs_init(PyObject **msgs)
+{
+    qd_python_lock_state_t lock_state = qd_python_lock();
+    *msgs = PyList_New(0);
+    qd_python_unlock(lock_state);
+}
+
+void qd_json_msgs_done(PyObject *msgs)
+{
+    qd_python_lock_state_t lock_state = qd_python_lock();
+    Py_DECREF(msgs);
+    qd_python_unlock(lock_state);
+}
+
+void qd_json_msgs_append(PyObject *msgs, qd_message_t *msg)
+{
+    //
+    // Parse the message through the body and exit if the message is not well formed.
+    //
+    if (qd_message_check_depth(msg, QD_DEPTH_BODY) != QD_MESSAGE_DEPTH_OK)
+        return;
+
+    // This is called from non-python threads so we need to acquire the GIL to use python APIS.
+    qd_python_lock_state_t lock_state = qd_python_lock();
+    PyObject *py_msg = PyObject_CallFunction(message_type, NULL);
+    if (!py_msg) {
+        qd_error_py();
+        qd_python_unlock(lock_state);
+        return;
+    }
+    iter_to_py_attr(qd_message_field_iterator(msg, QD_FIELD_CONTENT_TYPE), py_iter_copy, py_msg, "content_type");
+    iter_to_py_attr(qd_message_field_iterator(msg, QD_FIELD_APPLICATION_PROPERTIES), py_iter_parse, py_msg, "properties");
+    iter_to_py_attr(qd_message_field_iterator(msg, QD_FIELD_BODY), py_iter_parse, py_msg, "body");
+
+    PyList_Append(msgs, py_msg);
+
+    Py_DECREF(py_msg);
+    qd_error_py();
+    qd_python_unlock(lock_state);
+}
+
+char *qd_json_msgs_string(PyObject *msgs)
+{
+    qd_python_lock_state_t lock_state = qd_python_lock();
+
+    PyObject *message_module = PyImport_ImportModule("qpid_dispatch_internal.router.message");
+    if (!message_module) {
+        qd_python_unlock(lock_state);
+        return NULL;
+    }
+    PyObject *messages_to_json = PyObject_GetAttrString(message_module, "messages_to_json");
+    Py_DECREF(message_module);
+    if (!messages_to_json) {
+        qd_python_unlock(lock_state);
+        return NULL;
+    }
+
+    PyObject *py_value = PyObject_CallFunction(messages_to_json, "O", msgs);
+    Py_DECREF(messages_to_json);
+    if (!py_value) {
+        qd_python_unlock(lock_state);
+        return NULL;
+    }
+    char *c_value = py_string_2_c(py_value);
+    Py_XDECREF(py_value);
+    qd_python_unlock(lock_state);
+    return c_value;
 }

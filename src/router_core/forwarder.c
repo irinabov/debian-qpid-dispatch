@@ -146,22 +146,25 @@ static void qdr_forward_find_closest_remotes_CT(qdr_core_t *core, qdr_address_t 
 qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in_dlv, qdr_link_t *out_link, qd_message_t *msg)
 {
     qdr_delivery_t *out_dlv = new_qdr_delivery_t();
-    uint64_t       *tag = (uint64_t*) out_dlv->tag;
     if (out_link->conn)
         out_link->conn->last_delivery_time = core->uptime_ticks;
 
     ZERO(out_dlv);
     set_safe_ptr_qdr_link_t(out_link, &out_dlv->link_sp);
     out_dlv->msg        = qd_message_copy(msg);
+    out_dlv->delivery_id = next_delivery_id();
+    out_dlv->link_id     = out_link->identity;
+    out_dlv->conn_id     = out_link->conn_id;
+    qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Delivery created qdr_forward_new_delivery_CT", DLV_ARGS(out_dlv));
 
     if (in_dlv) {
         out_dlv->settled       = in_dlv->settled;
         out_dlv->ingress_time  = in_dlv->ingress_time;
         out_dlv->ingress_index = in_dlv->ingress_index;
         if (in_dlv->remote_disposition) {
-            // propagate from disposition state from remote to peer
+            // propagate disposition state from remote to peer
             out_dlv->disposition = in_dlv->remote_disposition;
-            qdr_delivery_move_extension_state_CT(in_dlv, out_dlv);
+            qdr_delivery_move_delivery_state_CT(in_dlv, out_dlv);
         }
     } else {
         out_dlv->settled       = true;
@@ -170,8 +173,10 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
     }
 
     out_dlv->presettled = out_dlv->settled;
-    *tag                = core->next_tag++;
-    out_dlv->tag_length = 8;
+
+    uint64_t tag = core->next_tag++;
+    memcpy(out_dlv->tag, &tag, sizeof(tag));
+    out_dlv->tag_length = sizeof(tag);
 
     //
     // Add one to the message fanout. This will later be used in the qd_message_send function that sends out messages.
@@ -228,6 +233,7 @@ static void qdr_forward_drop_presettled_CT_LH(qdr_core_t *core, qdr_link_t *link
             assert(dlv->link_work);
             if (dlv->link_work && (--dlv->link_work->value == 0)) {
                 DEQ_REMOVE(link->work_list, dlv->link_work);
+                qdr_error_free(dlv->link_work->error);
                 free_qdr_link_work_t(dlv->link_work);
                 dlv->link_work = 0;
             }
@@ -302,28 +308,96 @@ void qdr_forward_deliver_CT(qdr_core_t *core, qdr_link_t *out_link, qdr_delivery
 }
 
 
-void qdr_forward_on_message(qdr_core_t *core, qdr_general_work_t *work)
+static void qdr_settle_subscription_delivery_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
 {
-    work->on_message(work->on_message_context, work->msg, work->maskbit, work->inter_router_cost, work->in_conn_id);
-    qd_message_free(work->msg);
+    qdr_delivery_t *in_delivery = action->args.delivery.delivery;
+
+    if (!in_delivery)
+        return;
+
+    if (!discard) {
+        in_delivery->disposition = action->args.delivery.disposition;
+        in_delivery->settled     = true;
+
+        bool moved = qdr_delivery_settled_CT(core, in_delivery);
+        if (moved) {
+            // expect: in_delivery has at least 2 refcounts - one from being on
+            // the unsettled list and another from the action
+            assert(sys_atomic_get(&in_delivery->ref_count) > 1);
+            qdr_delivery_decref_CT(core, in_delivery, "qdr_settle_subscription_delivery_CT - removed from unsettled");
+            qdr_delivery_push_CT(core, in_delivery);
+        }
+    }
+
+    qdr_delivery_decref_CT(core, in_delivery, "qdr_settle_subscription_delivery_CT - removed from action");
 }
 
 
-void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_link_t *link, qd_message_t *msg)
+void qdr_forward_on_message(qdr_core_t *core, qdr_general_work_t *work)
 {
-    int      mask_bit = link ? link->conn->mask_bit : 0;
-    int      cost     = link ? link->conn->inter_router_cost : 1;
-    uint64_t identity = link ? link->conn->identity : 0;
+    qdr_error_t *error = 0;
+    uint64_t disposition = work->on_message(work->on_message_context, work->msg, work->maskbit,
+                                            work->inter_router_cost, work->in_conn_id, work->policy_spec, &error);
+    qd_message_free(work->msg);
+
+    if (!work->delivery) {
+        qdr_error_free(error);
+        return;
+    }
+
+    if (!work->delivery->multicast) {
+        qdr_action_t*action = qdr_action(qdr_settle_subscription_delivery_CT, "settle_subscription_delivery");
+        action->args.delivery.delivery    = work->delivery;
+        action->args.delivery.disposition = disposition;
+        if (error) {
+            // setting the local state will cause proton to send this
+            // error to the remote
+            qd_delivery_state_free(work->delivery->local_state);
+            work->delivery->local_state = qd_delivery_state_from_error(error);
+        }
+
+        qdr_action_enqueue(core, action);
+        // Transfer the delivery reference from work protection to action protection
+    } else {
+        qdr_error_free(error);
+        qdr_delivery_decref(core, work->delivery, "qdr_forward_on_message - remove from general work");
+    }
+}
+
+
+void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_link_t *link, qd_message_t *msg, qdr_delivery_t *in_delivery)
+{
+    int          mask_bit = link ? link->conn->mask_bit : 0;
+    int          cost     = link ? link->conn->inter_router_cost : 1;
+    uint64_t     identity = link ? link->conn->identity : 0;
+    qdr_error_t *error    = 0;
 
     if (sub->in_core) {
         //
         // The handler runs in-core.  Invoke it right now.
         //
-        sub->on_message(sub->on_message_context, msg, mask_bit, cost, identity);
+        uint64_t disposition = sub->on_message(sub->on_message_context, msg, mask_bit, cost,
+                                               identity, link ? link->conn->policy_spec : 0, &error);
+        if (!!in_delivery) {
+            in_delivery->disposition = disposition;
+            in_delivery->settled     = true;
+            if (error) {
+                // setting the local state will cause proton to send this
+                // error to the remote
+                qd_delivery_state_free(in_delivery->local_state);
+                in_delivery->local_state = qd_delivery_state_from_error(error);
+            }
+            qdr_delivery_push_CT(core, in_delivery);
+        } else {
+            qdr_error_free(error);
+        }
     } else {
         //
         // The handler runs in an IO thread.  Defer its invocation.
         //
+        if (!!in_delivery)
+            qdr_delivery_incref(in_delivery, "qdr_forward_on_message_CT - adding to general work item");
+
         qdr_general_work_t *work = qdr_general_work(qdr_forward_on_message);
         work->on_message         = sub->on_message;
         work->on_message_context = sub->on_message_context;
@@ -331,6 +405,8 @@ void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_li
         work->maskbit            = mask_bit;
         work->inter_router_cost  = cost;
         work->in_conn_id         = identity;
+        work->policy_spec        = link ? link->conn->policy_spec : 0;
+        work->delivery           = in_delivery;
         qdr_post_general_work_CT(core, work);
     }
 }
@@ -365,17 +441,17 @@ static inline bool qdr_forward_edge_echo_CT(qdr_delivery_t *in_dlv, qdr_link_t *
 /**
  * Handle forwarding to a subscription
  */
-static void qdr_forward_to_subscriber(qdr_core_t *core, qdr_subscription_t *sub, qdr_delivery_t *in_dlv, qd_message_t *in_msg, bool receive_complete)
+static void qdr_forward_to_subscriber_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_delivery_t *in_dlv, qd_message_t *in_msg, bool receive_complete)
 {
     qd_message_add_fanout(in_msg, 0);
 
     //
-    // Only if the message has been completely received, forward it to the subscription
-    // Subscriptions, at the moment, dont have the ability to deal with partial messages
+    // Only if the message has been completely received, forward it to the subscription.
+    // Subscriptions don't have the ability to deal with partial messages.
     //
     if (receive_complete) {
         qdr_link_t *link = in_dlv ? safe_deref_qdr_link_t(in_dlv->link_sp) : 0;
-        qdr_forward_on_message_CT(core, sub, link, in_msg);
+        qdr_forward_on_message_CT(core, sub, link, in_msg, in_dlv);
     } else {
         //
         // Receive is not complete, we will store the sub in
@@ -535,7 +611,7 @@ int qdr_forward_multicast_CT(qdr_core_t      *core,
         //
         qdr_subscription_t *sub = DEQ_HEAD(addr->subscriptions);
         while (sub) {
-            qdr_forward_to_subscriber(core, sub, in_delivery, msg, receive_complete);
+            qdr_forward_to_subscriber_CT(core, sub, in_delivery, msg, receive_complete);
             fanout++;
             addr->deliveries_to_container++;
             sub = DEQ_NEXT(sub);
@@ -568,16 +644,7 @@ int qdr_forward_closest_CT(qdr_core_t      *core,
     if (!exclude_inprocess) {
         qdr_subscription_t *sub = DEQ_HEAD(addr->subscriptions);
         if (sub) {
-            qdr_forward_to_subscriber(core, sub, in_delivery, msg, receive_complete);
-
-            //
-            // If the incoming delivery is not settled, it should be accepted and settled here.
-            //
-            if (in_delivery && !in_delivery->settled) {
-                in_delivery->disposition = PN_ACCEPTED;
-                in_delivery->settled     = true;
-                qdr_delivery_push_CT(core, in_delivery);
-            }
+            qdr_forward_to_subscriber_CT(core, sub, in_delivery, msg, receive_complete);
 
             //
             // Rotate this subscription to the end of the list to get round-robin distribution.
@@ -963,6 +1030,7 @@ void qdr_forward_link_direct_CT(qdr_core_t       *core,
     out_link->core           = core;
     out_link->identity       = qdr_identifier(core);
     out_link->conn           = conn;
+    out_link->conn_id        = conn->identity;
     out_link->link_type      = QD_LINK_ENDPOINT;
     out_link->link_direction = qdr_link_direction(in_link) == QD_OUTGOING ? QD_INCOMING : QD_OUTGOING;
     out_link->admin_enabled  = true;

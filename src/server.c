@@ -35,6 +35,7 @@
 #include <proton/listener.h>
 #include <proton/netaddr.h>
 #include <proton/proactor.h>
+#include <proton/raw_connection.h>
 #include <proton/sasl.h>
 
 
@@ -109,7 +110,7 @@ void transport_tracer(pn_transport_t *transport, const char *message)
     qd_connection_t *ctx = (qd_connection_t*) pn_transport_get_context(transport);
     if (ctx) {
         // The PROTOCOL module is used exclusively for logging protocol related tracing. The protocol could be AMQP, HTTP, TCP etc.
-        qd_log(ctx->server->protocol_log_source, QD_LOG_TRACE, "[%"PRIu64"]:%s", ctx->connection_id, message);
+        qd_log(ctx->server->protocol_log_source, QD_LOG_TRACE, "[C%"PRIu64"]:%s", ctx->connection_id, message);
     }
 }
 
@@ -118,7 +119,7 @@ void connection_transport_tracer(pn_transport_t *transport, const char *message)
     qd_connection_t *ctx = (qd_connection_t*) pn_transport_get_context(transport);
     if (ctx) {
         // Unconditionally write the log at TRACE level to the log file.
-        qd_log_impl_v1(ctx->server->protocol_log_source, QD_LOG_TRACE,  __FILE__, __LINE__, "[%"PRIu64"]:%s", ctx->connection_id, message);
+        qd_log_impl_v1(ctx->server->protocol_log_source, QD_LOG_TRACE,  __FILE__, __LINE__, "[C%"PRIu64"]:%s", ctx->connection_id, message);
     }
 }
 
@@ -248,7 +249,7 @@ static const char *transport_get_user(qd_connection_t *conn, pn_transport_t *tpo
             }
             else {
                 // This is an unrecognized component. log a critical error
-                qd_log(conn->server->log_source, QD_LOG_CRITICAL, "Unrecognized component '%c' in uidFormat ", components[x]);
+                qd_log(conn->server->log_source, QD_LOG_CRITICAL, "[C%"PRIu64"] Unrecognized component '%c' in uidFormat ", conn->connection_id, components[x]);
                 return 0;
             }
         }
@@ -324,7 +325,7 @@ static const char *transport_get_user(qd_connection_t *conn, pn_transport_t *tpo
                     user_id = py_string_2_c(result);
                     Py_XDECREF(result);
                 } else {
-                    qd_log(conn->server->log_source, QD_LOG_DEBUG, "Internal: failed to read displaynameservice query result");
+                    qd_log(conn->server->log_source, QD_LOG_DEBUG, "[C%"PRIu64"] Internal: failed to read displaynameservice query result", conn->connection_id);
                 }
                 qd_python_unlock(lock_state);
             }
@@ -593,11 +594,10 @@ qd_connection_t *qd_server_connection(qd_server_t *server, qd_server_config_t *c
 }
 
 
-static void on_accept(pn_event_t *e)
+static void on_accept(pn_event_t *e, qd_listener_t *listener)
 {
     assert(pn_event_type(e) == PN_LISTENER_ACCEPT);
     pn_listener_t *pn_listener = pn_event_listener(e);
-    qd_listener_t *listener = pn_listener_get_context(pn_listener);
     qd_connection_t *ctx = qd_server_connection(listener->server, &listener->config);
     if (!ctx) {
         qd_log(listener->server->log_source, QD_LOG_CRITICAL,
@@ -606,7 +606,7 @@ static void on_accept(pn_event_t *e)
     }
     ctx->listener = listener;
     qd_log(listener->server->log_source, QD_LOG_TRACE,
-           "[%"PRIu64"]: Accepting incoming connection to '%s'",
+           "[C%"PRIu64"]: Accepting incoming connection to '%s'",
            ctx->connection_id, ctx->listener->config.host_port);
     /* Asynchronous accept, configure the transport on PN_CONNECTION_BOUND */
     pn_listener_accept(pn_listener, ctx->pn_conn);
@@ -692,7 +692,7 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
 
         // Set up SSL
         if (config->ssl_profile)  {
-            qd_log(ctx->server->log_source, QD_LOG_TRACE, "Configuring SSL on %s", name);
+            qd_log(ctx->server->log_source, QD_LOG_TRACE, "[C%"PRIu64"] Configuring SSL on %s", ctx->connection_id, name);
             if (listener_setup_ssl(ctx, config, tport) != QD_ERROR_NONE) {
                 connect_fail(ctx, QD_AMQP_COND_INTERNAL_ERROR, "%s on %s", qd_error_message(), name);
                 return;
@@ -709,7 +709,7 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
         if (config->sasl_mechanisms)
             pn_sasl_allowed_mechs(sasl, config->sasl_mechanisms);
         if (config->sasl_plugin_config.auth_service) {
-            qd_log(server->log_source, QD_LOG_INFO, "enabling remote authentication service %s", config->sasl_plugin_config.auth_service);
+            qd_log(server->log_source, QD_LOG_INFO, "[C%"PRIu64"] Enabling remote authentication service %s", ctx->connection_id, config->sasl_plugin_config.auth_service);
             pn_ssl_domain_t* plugin_ssl_domain = NULL;
             if (config->sasl_plugin_config.use_ssl) {
                 plugin_ssl_domain = pn_ssl_domain(PN_SSL_MODE_CLIENT);
@@ -719,26 +719,26 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
                                                       config->sasl_plugin_config.ssl_certificate_file,
                                                       config->sasl_plugin_config.ssl_private_key_file,
                                                       config->sasl_plugin_config.ssl_password)) {
-                        qd_log(server->log_source, QD_LOG_ERROR, "Cannot set SSL credentials for authentication service");
+                        qd_log(server->log_source, QD_LOG_ERROR, "[C%"PRIu64"] Cannot set SSL credentials for authentication service", ctx->connection_id);
                     }
                 }
                 if (config->sasl_plugin_config.ssl_trusted_certificate_db) {
                     if (pn_ssl_domain_set_trusted_ca_db(plugin_ssl_domain, config->sasl_plugin_config.ssl_trusted_certificate_db)) {
-                        qd_log(server->log_source, QD_LOG_ERROR, "Cannot set trusted SSL certificate db for authentication service" );
+                        qd_log(server->log_source, QD_LOG_ERROR, "[C%"PRIu64"] Cannot set trusted SSL certificate db for authentication service", ctx->connection_id);
                     } else {
                         if (pn_ssl_domain_set_peer_authentication(plugin_ssl_domain, PN_SSL_VERIFY_PEER, config->sasl_plugin_config.ssl_trusted_certificate_db)) {
-                            qd_log(server->log_source, QD_LOG_ERROR, "Cannot set SSL peer verification for authentication service");
+                            qd_log(server->log_source, QD_LOG_ERROR, "[C%"PRIu64"] Cannot set SSL peer verification for authentication service", ctx->connection_id);
                         }
                     }
                 }
                 if (config->sasl_plugin_config.ssl_ciphers) {
                     if (pn_ssl_domain_set_ciphers(plugin_ssl_domain, config->sasl_plugin_config.ssl_ciphers)) {
-                        qd_log(server->log_source, QD_LOG_ERROR, "Cannot set ciphers for authentication service");
+                        qd_log(server->log_source, QD_LOG_ERROR, "[C%"PRIu64"] Cannot set ciphers for authentication service", ctx->connection_id);
                     }
                 }
                 if (config->sasl_plugin_config.ssl_protocols) {
                     if (pn_ssl_domain_set_protocols(plugin_ssl_domain, config->sasl_plugin_config.ssl_protocols)) {
-                        qd_log(server->log_source, QD_LOG_ERROR, "Cannot set protocols for authentication service");
+                        qd_log(server->log_source, QD_LOG_ERROR, "[C%"PRIu64"] Cannot set protocols for authentication service", ctx->connection_id);
                     }
                 }
             }
@@ -798,10 +798,32 @@ static void invoke_deferred_calls(qd_connection_t *conn, bool discard)
 void qd_container_handle_event(qd_container_t *container, pn_event_t *event, pn_connection_t *pn_conn, qd_connection_t *qd_conn);
 void qd_conn_event_batch_complete(qd_container_t *container, qd_connection_t *qd_conn, bool conn_closed);
 
-static void handle_listener(pn_event_t *e, qd_server_t *qd_server) {
+static void handle_event_with_context(pn_event_t *e, qd_server_t *qd_server, qd_handler_context_t *context)
+{
+    if (context && context->handler) {
+        context->handler(e, qd_server, context->context);
+    }
+}
+
+static void do_handle_raw_connection_event(pn_event_t *e, qd_server_t *qd_server)
+{
+    handle_event_with_context(e, qd_server, (qd_handler_context_t*) pn_raw_connection_get_context(pn_event_raw_connection(e)));
+}
+
+static void do_handle_listener(pn_event_t *e, qd_server_t *qd_server)
+{
+    handle_event_with_context(e, qd_server, (qd_handler_context_t*) pn_listener_get_context(pn_event_listener(e)));
+}
+
+pn_proactor_t *qd_server_proactor(qd_server_t *qd_server)
+{
+    return qd_server->proactor;
+}
+
+static void handle_listener(pn_event_t *e, qd_server_t *qd_server, void *context) {
     qd_log_source_t *log = qd_server->log_source;
 
-    qd_listener_t *li = (qd_listener_t*) pn_listener_get_context(pn_event_listener(e));
+    qd_listener_t *li = (qd_listener_t*) context;
     const char *host_port = li->config.host_port;
     const char *port = li->config.port;
 
@@ -830,7 +852,7 @@ static void handle_listener(pn_event_t *e, qd_server_t *qd_server) {
 
     case PN_LISTENER_ACCEPT:
         qd_log(log, QD_LOG_TRACE, "Accepting connection on %s", host_port);
-        on_accept(e);
+        on_accept(e, li);
         break;
 
     case PN_LISTENER_CLOSE:
@@ -989,7 +1011,7 @@ static bool handle(qd_server_t *qd_server, pn_event_t *e, pn_connection_t *pn_co
     case PN_LISTENER_OPEN:
     case PN_LISTENER_ACCEPT:
     case PN_LISTENER_CLOSE:
-        handle_listener(e, qd_server);
+        do_handle_listener(e, qd_server);
         break;
 
     case PN_CONNECTION_INIT: {
@@ -1056,6 +1078,17 @@ static bool handle(qd_server_t *qd_server, pn_event_t *e, pn_connection_t *pn_co
         }
         break;
 
+    case PN_RAW_CONNECTION_CONNECTED:
+    case PN_RAW_CONNECTION_CLOSED_READ:
+    case PN_RAW_CONNECTION_CLOSED_WRITE:
+    case PN_RAW_CONNECTION_DISCONNECTED:
+    case PN_RAW_CONNECTION_NEED_READ_BUFFERS:
+    case PN_RAW_CONNECTION_NEED_WRITE_BUFFERS:
+    case PN_RAW_CONNECTION_READ:
+    case PN_RAW_CONNECTION_WRITTEN:
+    case PN_RAW_CONNECTION_WAKE:
+        do_handle_raw_connection_event(e, qd_server);
+        break;
     default:
         break;
     } // Switch event type
@@ -1169,7 +1202,7 @@ static void try_open_lh(qd_connector_t *ct)
     ct->delay = 5000;
 
     qd_log(ct->server->log_source, QD_LOG_TRACE,
-           "[%"PRIu64"] Connecting to %s", ctx->connection_id, host_port);
+           "[C%"PRIu64"] Connecting to %s", ctx->connection_id, host_port);
     /* Note: the transport is configured in the PN_CONNECTION_BOUND event */
     pn_proactor_connect(ct->server->proactor, ctx->pn_conn, host_port);
 }
@@ -1444,7 +1477,7 @@ void qd_server_run(qd_dispatch_t *qd)
     qd_log(qd_server->log_source, QD_LOG_INFO, "Running in DEBUG Mode");
 #endif
     int n = qd_server->thread_count - 1; /* Start count-1 threads + use current thread */
-    sys_thread_t **threads = (sys_thread_t **)calloc(n, sizeof(sys_thread_t*));
+    sys_thread_t **threads = (sys_thread_t **)qd_calloc(n, sizeof(sys_thread_t*));
     for (i = 0; i < n; i++) {
         threads[i] = sys_thread(thread_run, qd_server);
     }
@@ -1545,7 +1578,9 @@ void qd_connection_invoke_deferred(qd_connection_t *conn, qd_deferred_t call, vo
     DEQ_INSERT_TAIL(conn->deferred_calls, dc);
     sys_mutex_unlock(conn->deferred_call_lock);
 
+    sys_mutex_lock(conn->server->conn_activation_lock);
     qd_server_activate(conn);
+    sys_mutex_unlock(conn->server->conn_activation_lock);
 }
 
 
@@ -1557,13 +1592,15 @@ qd_listener_t *qd_server_listener(qd_server_t *server)
     sys_atomic_init(&li->ref_count, 1);
     li->server      = server;
     li->http = NULL;
+    li->type.context = li;
+    li->type.handler = &handle_listener;
     return li;
 }
 
 static bool qd_listener_listen_pn(qd_listener_t *li) {
    li->pn_listener = pn_listener();
     if (li->pn_listener) {
-        pn_listener_set_context(li->pn_listener, li);
+        pn_listener_set_context(li->pn_listener, &li->type);
         pn_proactor_listen(li->server->proactor, li->pn_listener, li->config.host_port,
                            BACKLOG);
         sys_atomic_inc(&li->ref_count); /* In use by proactor, PN_LISTENER_CLOSE will dec */
@@ -1577,7 +1614,7 @@ static bool qd_listener_listen_pn(qd_listener_t *li) {
 
 static bool qd_listener_listen_http(qd_listener_t *li) {
     if (li->server->http) {
-        /* qd_http_listener holds a reference to li, will decref when closed */
+        /* qd_lws_listener holds a reference to li, will decref when closed */
         qd_http_server_listen(li->server->http, li);
         return li->http;
     } else {
@@ -1701,7 +1738,7 @@ const qd_server_config_t *qd_connector_config(const qd_connector_t *c) {
     return &c->config;
 }
 
-qd_http_listener_t *qd_listener_http(qd_listener_t *li) {
+qd_lws_listener_t *qd_listener_http(qd_listener_t *li) {
     return li->http;
 }
 
@@ -1724,6 +1761,17 @@ bool qd_connection_handle(qd_connection_t *c, pn_event_t *e) {
     return true;
 }
 
+
+uint64_t qd_server_allocate_connection_id(qd_server_t *server)
+{
+    uint64_t id;
+    sys_mutex_lock(server->lock);
+    id = server->next_connection_id++;
+    sys_mutex_unlock(server->lock);
+    return id;
+}
+
+
 bool qd_connection_strip_annotations_in(const qd_connection_t *c) {
     return c->strip_annotations_in;
 }
@@ -1734,5 +1782,5 @@ sys_mutex_t *qd_server_get_activation_lock(qd_server_t * server)
 }
 
 uint64_t qd_connection_max_message_size(const qd_connection_t *c) {
-    return (c && c->policy_settings) ? c->policy_settings->maxMessageSize : 0;
+    return (c && c->policy_settings) ? c->policy_settings->spec.maxMessageSize : 0;
 }

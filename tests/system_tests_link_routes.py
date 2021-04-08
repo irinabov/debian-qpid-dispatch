@@ -32,8 +32,8 @@ from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, Process, Test
 from test_broker import FakeBroker
 from test_broker import FakeService
 
-from proton import Delivery
-from proton import Message
+from proton import Delivery, symbol
+from proton import Message, Data, Condition
 from proton.handlers import MessagingHandler
 from proton.reactor import AtMostOnce, Container, DynamicNodeProperties, LinkOption, AtLeastOnce
 from proton.reactor import ApplicationEvent
@@ -167,7 +167,7 @@ class LinkRouteTest(TestCase):
         # to settle
         cls.routers[1].wait_router_connected('QDR.C')
         cls.routers[2].wait_router_connected('QDR.B')
-        cls.routers[2].wait_address("org.apache", remotes=1, delay=0.5)
+        cls.routers[2].wait_address("org.apache", remotes=1, delay=0.5, count=2)
 
         # This is not a classic router network in the sense that QDR.A and D are acting as brokers. We allow a little
         # bit more time for the routers to stabilize.
@@ -207,23 +207,23 @@ class LinkRouteTest(TestCase):
         out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
 
         # Make sure there is a dir of in and out.
-        self.assertTrue('"direction": "in"' in out)
-        self.assertTrue('"direction": "out"' in out)
-        self.assertTrue('"containerId": "QDR.A"' in out)
+        self.assertIn('"direction": "in"', out)
+        self.assertIn('"direction": "out"', out)
+        self.assertIn('"containerId": "QDR.A"', out)
 
         # Use the long type and make sure that qdmanage does not mess up the long type
         cmd = 'QUERY --type=org.apache.qpid.dispatch.router.config.linkRoute'
         out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
 
         # Make sure there is a dir of in and out.
-        self.assertTrue('"direction": "in"' in out)
-        self.assertTrue('"direction": "out"' in out)
-        self.assertTrue('"containerId": "QDR.A"' in out)
+        self.assertIn('"direction": "in"', out)
+        self.assertIn('"direction": "out"', out)
+        self.assertIn('"containerId": "QDR.A"', out)
 
         identity = out[out.find("identity") + 12: out.find("identity") + 13]
         cmd = 'READ --type=linkRoute --identity=' + identity
         out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
-        self.assertTrue(identity in out)
+        self.assertIn(identity, out)
 
         exception_occurred = False
         try:
@@ -232,7 +232,7 @@ class LinkRouteTest(TestCase):
             out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
         except Exception as e:
             exception_occurred = True
-            self.assertTrue("NotFoundStatus: Not Found" in str(e))
+            self.assertIn("NotFoundStatus: Not Found", str(e))
 
         self.assertTrue(exception_occurred)
 
@@ -243,7 +243,7 @@ class LinkRouteTest(TestCase):
             out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
         except Exception as e:
             exception_occurred = True
-            self.assertTrue("BadRequestStatus: No name or identity provided" in str(e))
+            self.assertIn("BadRequestStatus: No name or identity provided", str(e))
 
         self.assertTrue(exception_occurred)
 
@@ -253,7 +253,7 @@ class LinkRouteTest(TestCase):
         identity = out[out.find("identity") + 12: out.find("identity") + 14]
         cmd = 'READ --type=autoLink --identity=' + identity
         out = self.run_qdmanage(cmd=cmd, address=self.routers[1].addresses[0])
-        self.assertTrue(identity in out)
+        self.assertIn(identity, out)
 
     def test_bbb_qdstat_link_routes_routerB(self):
         """
@@ -263,7 +263,7 @@ class LinkRouteTest(TestCase):
         """
         out = self.run_qdstat_linkRoute(self.routers[1].addresses[0])
         for route in ['a.*.toA.#', 'a.*.toD.#', 'org.apache',  'pulp.task']:
-            self.assertTrue(route in out)
+            self.assertIn(route, out)
 
         out_list = out.split()
         self.assertEqual(out_list.count('in'), 4)
@@ -442,7 +442,7 @@ class LinkRouteTest(TestCase):
 
         # wait until the host we're connecting to gets its next hop for the
         # pattern we're connecting to
-        connect_node.wait_address(expected_pattern, remotes=1, delay=0.1)
+        connect_node.wait_address(expected_pattern, remotes=1, delay=0.1, count=2)
 
         # Connect to 'connect_node' and send message to 'address'
 
@@ -881,7 +881,7 @@ class DeliveryTagsTest(MessagingHandler):
     def on_connection_remote_open(self, event):
         if event.connection == self.receiver_connection:
             continue_loop = True
-            # Dont open the sender connection unless we can make sure that there is a remote receiver ready to
+            # Don't open the sender connection unless we can make sure that there is a remote receiver ready to
             # accept the message.
             # If there is no remote receiver, the router will throw a 'No route to destination' error when
             # creating sender connection.
@@ -1919,10 +1919,8 @@ class ConnectionLinkRouteTest(TestCase):
         self.assertEqual(2, len(fs.values))
 
         # the address should propagate to A and B
-        self.QDR_A.wait_address(address="Eflea.*")
-        self.QDR_A.wait_address(address="Fflea.*")
-        self.QDR_B.wait_address(address="Eflea.*")
-        self.QDR_B.wait_address(address="Fflea.*")
+        self.QDR_A.wait_address(address="flea.*", count=2)
+        self.QDR_B.wait_address(address="flea.*", count=2)
 
         # now have the service delete the config
         fs.delete_config()
@@ -1955,8 +1953,7 @@ class ConnectionLinkRouteTest(TestCase):
         self.assertEqual(2, len(fs.values))
 
         # wait for the address to propagate to B
-        self.QDR_B.wait_address(address="Eflea.*")
-        self.QDR_B.wait_address(address="Fflea.*")
+        self.QDR_B.wait_address(address="flea.*", count=2)
 
         # ensure the link routes are not visible via other connections
         clrs = mgmt_A.query(self._AS_TYPE)
@@ -2351,6 +2348,63 @@ class SendReceive(MessagingHandler):
         Container(self).run()
 
 
+class DispositionSniffer(MessagingHandler):
+    """
+    Capture the outgoing delivery after the remote has set its terminal
+    outcome.  Used by tests that need to examine the delivery state
+    """
+    def __init__(self, send_url):
+        super(DispositionSniffer, self).__init__(auto_accept=False,
+                                                 auto_settle=False)
+        self.send_url = send_url
+        self.sender = None
+        self.timer = None
+        self.error = None
+        self.sent = False
+        self.delivery = None
+
+    def close(self):
+        if self.timer:
+            self.timer.cancel()
+        if self.sender:
+            self.sender.close()
+            self.sender.connection.close()
+
+    def timeout(self):
+        self.error = "Timeout Expired - Check for cores"
+        self.close()
+
+    def stop(self):
+        self.close()
+
+    def on_start(self, event):
+        self.timer  = event.reactor.schedule(TIMEOUT, TestTimeout(self))
+        self.sender = event.container.create_sender(self.send_url)
+
+    def on_sendable(self, event):
+        if not self.sent:
+            event.sender.send(Message(body="HI"))
+            self.sent = True
+
+    def on_accepted(self, event):
+        self.stop()
+
+    def on_released(self, event):
+        self.delivery = event.delivery
+        self.close()
+
+    def on_modified(self, event):
+        self.delivery = event.delivery
+        self.close()
+
+    def on_rejected(self, event):
+        self.delivery = event.delivery
+        self.close()
+
+    def run(self):
+        Container(self).run()
+
+
 class LinkRoute3Hop(TestCase):
     """
     Sets up a linear 3 hop router network for testing multi-hop link routes.
@@ -2443,11 +2497,6 @@ class LinkRoute3Hop(TestCase):
         cls.QDR_C.wait_router_connected('QDR.A')
         cls.QDR_A.wait_router_connected('QDR.C')
 
-        cls.fake_service = FakeService(cls.QDR_A.addresses[1],
-                                       container_id="FakeService")
-        cls.QDR_C.wait_address("closest/test-client",
-                               remotes=1)
-
     def test_01_parallel_link_routes(self):
         """
         Verify Q2/Q3 recovery in the case of multiple link-routes sharing the
@@ -2457,11 +2506,12 @@ class LinkRoute3Hop(TestCase):
         send_batch = 10
         total = send_clients * send_batch
 
-        start_in = self.fake_service.in_count
-        start_out = self.fake_service.out_count
+        fake_service = FakeService(self.QDR_A.addresses[1],
+                                   container_id="FakeService")
+        self.QDR_C.wait_address("closest/test-client",
+                                remotes=1)
 
-        env = dict(os.environ, PN_TRACE_FRM="1")
-
+        env = None
         rx = self.popen(["test-receiver",
                          "-a", self.QDR_C.addresses[0],
                          "-c", str(total),
@@ -2488,12 +2538,98 @@ class LinkRoute3Hop(TestCase):
 
         if rx.wait(timeout=TIMEOUT):
             raise Exception("Receiver failed to consume all messages in=%s out=%s",
-                            self.fake_service.in_count,
-                            self.fake_service.out_count)
+                            fake_service.in_count,
+                            fake_service.out_count)
 
-        self.assertEqual(start_in + total, self.fake_service.in_count)
-        self.assertEqual(start_out + total, self.fake_service.out_count)
+        fake_service.join()
+        self.assertEqual(total, fake_service.in_count)
+        self.assertEqual(total, fake_service.out_count)
 
+        self.QDR_C.wait_address_unsubscribed("closest/test-client")
+
+    def test_02_modified_outcome(self):
+        """
+        Ensure all elements of a Modified disposition are passed thru the link
+        route
+        """
+
+        class FakeServiceModified(FakeService):
+            def on_message(self, event):
+                # set non-default values for delivery state for delivery to
+                # remote endpoint
+                dlv = event.delivery
+                dlv.local.failed = True
+                dlv.local.undeliverable = True
+                dlv.local.annotations = {symbol("Key"): "Value"}
+                dlv.update(Delivery.MODIFIED)
+                dlv.settle()
+
+        fake_service = FakeServiceModified(self.QDR_A.addresses[1],
+                                           container_id="FakeService",
+                                           auto_accept=False,
+                                           auto_settle=False)
+        self.QDR_C.wait_address("closest/test-client",
+                                remotes=1)
+
+        sniffer = DispositionSniffer("%s/closest/test-client" %
+                                     self.QDR_C.addresses[0])
+        sniffer.run()
+        self.assertEqual(None, sniffer.error)
+        state = sniffer.delivery.remote
+        self.assertTrue(state.failed)
+        self.assertTrue(state.undeliverable)
+        self.assertTrue(state.annotations is not None)
+        self.assertTrue(symbol('Key') in state.annotations)
+        self.assertEqual('Value', state.annotations[symbol('Key')])
+
+        fake_service.join()
+        self.QDR_C.wait_address_unsubscribed("closest/test-client")
+
+    def test_03_rejected_outcome(self):
+        """
+        Ensure all elements of a Rejected disposition are passed thru the link
+        route
+        """
+
+        class FakeServiceReject(FakeService):
+            def on_message(self, event):
+                # set non-default values for delivery state for delivery to
+                # remote endpoint
+                dlv = event.delivery
+                dlv.local.condition = Condition("condition-name",
+                                                str("condition-description"),
+                                                {symbol("condition"): "info"})
+                dlv.update(Delivery.REJECTED)
+                dlv.settle()
+
+        fake_service = FakeServiceReject(self.QDR_A.addresses[1],
+                                         container_id="FakeService",
+                                         auto_accept=False,
+                                         auto_settle=False)
+        self.QDR_C.wait_address("closest/test-client",
+                                remotes=1)
+
+        sniffer = DispositionSniffer("%s/closest/test-client" %
+                                     self.QDR_C.addresses[0])
+        sniffer.run()
+        self.assertEqual(None, sniffer.error)
+        state = sniffer.delivery.remote
+        self.assertTrue(state.condition is not None)
+        self.assertEqual("condition-name", state.condition.name)
+        self.assertEqual("condition-description", state.condition.description)
+        self.assertTrue(state.condition.info is not None)
+        self.assertTrue(symbol("condition") in state.condition.info)
+        self.assertEqual('info', state.condition.info[symbol("condition")])
+
+        fake_service.join()
+        self.QDR_C.wait_address_unsubscribed("closest/test-client")
+
+    def test_04_extension_state(self):
+        """
+        system_tests_two_routers.TwoRouterExtensionsStateTest() already tests
+        sending extended state via a link route.
+        """
+        pass
 
 if __name__ == '__main__':
     unittest.main(main_module())

@@ -25,7 +25,6 @@
 
 
 size_t BUFFER_SIZE     = 512;
-static int size_locked = 0;
 
 ALLOC_DECLARE(qd_buffer_t);
 ALLOC_DEFINE_CONFIG(qd_buffer_t, sizeof(qd_buffer_t), &BUFFER_SIZE, 0);
@@ -33,14 +32,12 @@ ALLOC_DEFINE_CONFIG(qd_buffer_t, sizeof(qd_buffer_t), &BUFFER_SIZE, 0);
 
 void qd_buffer_set_size(size_t size)
 {
-    assert(!size_locked);
     BUFFER_SIZE = size;
 }
 
 
 qd_buffer_t *qd_buffer(void)
 {
-    size_locked = 1;
     qd_buffer_t *buf = new_qd_buffer_t();
 
     DEQ_ITEM_INIT(buf);
@@ -105,4 +102,38 @@ unsigned int qd_buffer_list_length(const qd_buffer_list_t *list)
         buf = DEQ_NEXT(buf);
     }
     return len;
+}
+
+
+void qd_buffer_list_append(qd_buffer_list_t *buflist, const uint8_t *data, size_t len)
+{
+    //
+    // If len is zero, there's no work to do.
+    //
+    if (len == 0)
+        return;
+
+    //
+    // If the buffer list is empty and there's some data, add one empty buffer before we begin.
+    //
+    if (DEQ_SIZE(*buflist) == 0) {
+        qd_buffer_t *buf = qd_buffer();
+        DEQ_INSERT_TAIL(*buflist, buf);
+    }
+
+    qd_buffer_t *tail = DEQ_TAIL(*buflist);
+
+    while (len > 0) {
+        size_t to_copy = MIN(len, qd_buffer_capacity(tail));
+        if (to_copy > 0) {
+            memcpy(qd_buffer_cursor(tail), data, to_copy);
+            qd_buffer_insert(tail, to_copy);
+            data += to_copy;
+            len  -= to_copy;
+        }
+        if (len > 0) {
+            tail = qd_buffer();
+            DEQ_INSERT_TAIL(*buflist, tail);
+        }
+    }
 }

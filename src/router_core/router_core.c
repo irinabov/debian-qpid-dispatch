@@ -39,7 +39,31 @@ ALLOC_DEFINE(qdr_connection_ref_t);
 ALLOC_DEFINE(qdr_connection_info_t);
 ALLOC_DEFINE(qdr_subscription_ref_t);
 
+const uint64_t QD_DELIVERY_MOVED_TO_NEW_LINK = 999999999;
+
 static void qdr_general_handler(void *context);
+
+static void qdr_core_setup_init(qdr_core_t *core)
+{
+    //
+    // DISPATCH-1867: These functions used to be called inside the router_core_thread() function in router_core_thread.c
+    // which meant they were executed asynchronously by the core thread which meant qd_router_setup_late() could
+    // return before these functions executed in the core thread. But we need the adaptors and modules to be initialized *before* qd_router_setup_late() completes
+    // so that python can successfully initialize httpConnectors and httpListeners.
+    //
+    qdr_forwarder_setup_CT(core);
+    qdr_route_table_setup_CT(core);
+
+    //
+    // Initialize the core modules
+    //
+    qdr_modules_init(core);
+
+    //
+    // Initialize all registered adaptors (HTTP1, HTTP2, TCP)
+    //
+    qdr_adaptors_init(core);
+}
 
 qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area, const char *id)
 {
@@ -86,6 +110,12 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     core->mgmt_agent = qdr_agent(core);
 
     //
+    // Setup and initialize modules, adaptors, address table etc. so we can have everything initialized and ready to
+    // go when the core thread starts handling actions.
+    //
+    qdr_core_setup_init(core);
+
+    //
     // Launch the core thread
     //
     core->thread = sys_thread(router_core_thread, core);
@@ -109,12 +139,28 @@ void qdr_core_free(qdr_core_t *core)
     sys_cond_signal(core->action_cond);
     sys_thread_join(core->thread);
 
+    // have adaptors clean up all core resources
+    qdr_adaptors_finalize(core);
+
     //
     // The char* core->router_id and core->router_area are owned by qd->router_id and qd->router_area respectively
     // We will set them to zero here just in case anybody tries to use these fields.
     //
     core->router_id = 0;
     core->router_area = 0;
+
+    // discard any left over actions
+
+    qdr_action_list_t  action_list;
+    DEQ_MOVE(core->action_list, action_list);
+    DEQ_APPEND(action_list, core->action_list_background);
+    qdr_action_t *action = DEQ_HEAD(action_list);
+    while (action) {
+        DEQ_REMOVE_HEAD(action_list);
+        action->action_handler(core, action, true);
+        free_qdr_action_t(action);
+        action = DEQ_HEAD(action_list);
+    }
 
     // Drain the general work lists
     qdr_general_handler(core);
@@ -574,6 +620,13 @@ void qdr_core_bind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_li
     if (key && (*key == QD_ITER_HASH_PREFIX_MOBILE))
         link->phase = (int) (key[1] - '0');
 
+    //
+    // If this link is configured as no-route, don't create any functional linkage between the
+    // link and the address beyond the owning_addr.
+    //
+    if (link->no_route)
+        return;
+
     if (link->link_direction == QD_OUTGOING) {
         qdr_add_link_ref(&addr->rlinks, link, QDR_LINK_LIST_CLASS_ADDRESS);
         if (DEQ_SIZE(addr->rlinks) == 1) {
@@ -605,6 +658,13 @@ void qdr_core_bind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_li
 void qdr_core_unbind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_link_t *link)
 {
     link->owning_addr = 0;
+
+    //
+    // If the link is configured as no_route, there will be no further link/address
+    // linkage to disconnect.
+    //
+    if (link->no_route)
+        return;
 
     if (link->link_direction == QD_OUTGOING) {
         qdr_del_link_ref(&addr->rlinks, link, QDR_LINK_LIST_CLASS_ADDRESS);
@@ -916,6 +976,7 @@ static void qdr_global_stats_request_CT(qdr_core_t *core, qdr_action_t *action, 
     qdr_post_general_work_CT(core, work);
 }
 
+
 void qdr_request_global_stats(qdr_core_t *core, qdr_global_stats_t *stats, qdr_global_stats_handler_t callback, void *context)
 {
     qdr_action_t *action = qdr_action(qdr_global_stats_request_CT, "global_stats_request");
@@ -925,3 +986,54 @@ void qdr_request_global_stats(qdr_core_t *core, qdr_global_stats_t *stats, qdr_g
     qdr_action_enqueue(core, action);
 }
 
+
+qdr_protocol_adaptor_t *qdr_protocol_adaptor(qdr_core_t                *core,
+                                             const char                *name,
+                                             void                      *context,
+                                             qdr_connection_activate_t  activate,
+                                             qdr_link_first_attach_t    first_attach,
+                                             qdr_link_second_attach_t   second_attach,
+                                             qdr_link_detach_t          detach,
+                                             qdr_link_flow_t            flow,
+                                             qdr_link_offer_t           offer,
+                                             qdr_link_drained_t         drained,
+                                             qdr_link_drain_t           drain,
+                                             qdr_link_push_t            push,
+                                             qdr_link_deliver_t         deliver,
+                                             qdr_link_get_credit_t      get_credit,
+                                             qdr_delivery_update_t      delivery_update,
+                                             qdr_connection_close_t     conn_close,
+                                             qdr_connection_trace_t     conn_trace)
+{
+    qdr_protocol_adaptor_t *adaptor = NEW(qdr_protocol_adaptor_t);
+
+    qd_log(core->log, QD_LOG_INFO, "Protocol adaptor registered: %s", name);
+
+    DEQ_ITEM_INIT(adaptor);
+    adaptor->name                    = name;
+    adaptor->user_context            = context;
+    adaptor->activate_handler        = activate;
+    adaptor->first_attach_handler    = first_attach;
+    adaptor->second_attach_handler   = second_attach;
+    adaptor->detach_handler          = detach;
+    adaptor->flow_handler            = flow;
+    adaptor->offer_handler           = offer;
+    adaptor->drained_handler         = drained;
+    adaptor->drain_handler           = drain;
+    adaptor->push_handler            = push;
+    adaptor->deliver_handler         = deliver;
+    adaptor->get_credit_handler      = get_credit;
+    adaptor->delivery_update_handler = delivery_update;
+    adaptor->conn_close_handler      = conn_close;
+    adaptor->conn_trace_handler      = conn_trace;
+
+    DEQ_INSERT_TAIL(core->protocol_adaptors, adaptor);
+    return adaptor;
+}
+
+
+void qdr_protocol_adaptor_free(qdr_core_t *core, qdr_protocol_adaptor_t *adaptor)
+{
+    DEQ_REMOVE(core->protocol_adaptors, adaptor);
+    free(adaptor);
+}

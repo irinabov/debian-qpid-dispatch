@@ -26,26 +26,27 @@
 #define QDR_CONNECTION_IDENTITY               1
 #define QDR_CONNECTION_HOST                   2
 #define QDR_CONNECTION_ROLE                   3
-#define QDR_CONNECTION_DIR                    4
-#define QDR_CONNECTION_CONTAINER_ID           5
-#define QDR_CONNECTION_SASL_MECHANISMS        6
-#define QDR_CONNECTION_IS_AUTHENTICATED       7
-#define QDR_CONNECTION_USER                   8
-#define QDR_CONNECTION_IS_ENCRYPTED           9
-#define QDR_CONNECTION_SSLPROTO              10
-#define QDR_CONNECTION_SSLCIPHER             11
-#define QDR_CONNECTION_PROPERTIES            12
-#define QDR_CONNECTION_SSLSSF                13
-#define QDR_CONNECTION_TENANT                14
-#define QDR_CONNECTION_TYPE                  15
-#define QDR_CONNECTION_SSL                   16
-#define QDR_CONNECTION_OPENED                17
-#define QDR_CONNECTION_ACTIVE                18
-#define QDR_CONNECTION_ADMIN_STATUS          19
-#define QDR_CONNECTION_OPER_STATUS           20
-#define QDR_CONNECTION_UPTIME_SECONDS        21
-#define QDR_CONNECTION_LAST_DLV_SECONDS      22
-#define QDR_CONNECTION_ENABLE_PROTOCOL_TRACE 23
+#define QDR_CONNECTION_PROTOCOL               4
+#define QDR_CONNECTION_DIR                    5
+#define QDR_CONNECTION_CONTAINER_ID           6
+#define QDR_CONNECTION_SASL_MECHANISMS        7
+#define QDR_CONNECTION_IS_AUTHENTICATED       8
+#define QDR_CONNECTION_USER                   9
+#define QDR_CONNECTION_IS_ENCRYPTED          10
+#define QDR_CONNECTION_SSLPROTO              11
+#define QDR_CONNECTION_SSLCIPHER             12
+#define QDR_CONNECTION_PROPERTIES            13
+#define QDR_CONNECTION_SSLSSF                14
+#define QDR_CONNECTION_TENANT                15
+#define QDR_CONNECTION_TYPE                  16
+#define QDR_CONNECTION_SSL                   17
+#define QDR_CONNECTION_OPENED                18
+#define QDR_CONNECTION_ACTIVE                19
+#define QDR_CONNECTION_ADMIN_STATUS          20
+#define QDR_CONNECTION_OPER_STATUS           21
+#define QDR_CONNECTION_UPTIME_SECONDS        22
+#define QDR_CONNECTION_LAST_DLV_SECONDS      23
+#define QDR_CONNECTION_ENABLE_PROTOCOL_TRACE 24
 
 
 const char * const QDR_CONNECTION_DIR_IN  = "in";
@@ -70,6 +71,7 @@ const char *qdr_connection_columns[] =
      "identity",
      "host",
      "role",
+     "protocol",
      "dir",
      "container",
      "sasl",
@@ -145,6 +147,10 @@ static void qdr_connection_insert_column_CT(qdr_core_t *core, qdr_connection_t *
 
     case QDR_CONNECTION_ROLE:
         qd_compose_insert_string(body, qdr_connection_roles[conn->connection_info->role]);
+        break;
+
+    case QDR_CONNECTION_PROTOCOL:
+        qd_compose_insert_string(body, conn->protocol_adaptor->name);
         break;
 
     case QDR_CONNECTION_DIR:
@@ -508,14 +514,8 @@ static void qdra_connection_update_set_status(qdr_core_t *core, qdr_query_t *que
             // This connection has been force-closed.
             // Inter-router and edge connections may not be force-closed
             if (conn->role != QDR_ROLE_INTER_ROUTER && conn->role != QDR_ROLE_EDGE_CONNECTION) {
-                conn->closed = true;
-                conn->error  = qdr_error(QD_AMQP_COND_CONNECTION_FORCED, "Connection forced-closed by management request");
-                conn->admin_status = QDR_CONN_ADMIN_DELETED;
-
+                qdr_close_connection_CT(core, conn);
                 qd_log(core->log, QD_LOG_INFO, "[C%"PRIu64"] Connection force-closed by request from connection [C%"PRIu64"]", conn->identity, query->in_conn);
-
-                //Activate the connection, so the I/O threads can finish the job.
-                qdr_connection_activate_CT(core, conn);
                 query->status = QD_AMQP_OK;
                 qdr_manage_write_connection_map_CT(core, conn, query->body, qdr_connection_columns);
             }
@@ -608,7 +608,8 @@ void qdra_connection_update_CT(qdr_core_t      *core,
                 admin_status_bad_or_forbidden = true;
             }
             else {
-                if (!user_conn->policy_allow_admin_status_update) {
+                bool allow = user_conn->policy_spec ? user_conn->policy_spec->allowAdminStatusUpdate : true;
+                if (!allow) {
                     //
                     // Policy on the connection that is requesting that some other connection be deleted does not allow
                     // for the other connection to be deleted.Set the status to QD_AMQP_FORBIDDEN and just quit.

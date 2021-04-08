@@ -103,8 +103,17 @@ g.selected line {
 
 #topologyPage .pf-l-stack__item,
 #messageFlowPage .pf-l-stack__item {
-  border-bottom: 1px solid #aaa;
+  /* border-bottom: 1px solid #aaa; */
 }
+
+#pf-topology-view-2 {
+  padding-bottom: 0;
+}
+
+.pf-topology-container__with-sidebar {
+  overflow-y: hidden;
+}
+
 .node.client rect {
   stroke: black;
   fill: white;
@@ -313,7 +322,7 @@ div.state-container button.pf-c-clipboard-copy__group-copy {
 }
 
 .connect-page {
-  background-image: url(/assets/images/pfbg_1200.jpg);
+  background-image: url(assets/images/pfbg_1200.jpg);
   background-size: cover;
 }
 
@@ -430,7 +439,8 @@ svg.address-svg g text {
   pointer-events: auto;
 }
 
-svg {
+/*not all SVGs are charts*/
+svg:not([role="img"]) {
   background-color: transparent;
   cursor: default;
   -webkit-user-select: none;
@@ -439,8 +449,8 @@ svg {
   -o-user-select: none;
   user-select: none;
 }
-
-svg:not(.active):not(.ctrl) {
+/*not all SVGs are charts*/
+svg:not(.active):not(.ctrl):not([role="img"]) {
   cursor: crosshair;
 }
 
@@ -982,6 +992,11 @@ div.qdrChord .legend-text {
 
 .overview-table .pf-m-footer {
   padding-right: 2em;
+}
+
+/*force Patternfly v3 style for table Toolbar (flex, not box)*/
+.table-toolbar {
+  display: flex !important;
 }
 
 .table-toolbar .pf-l-toolbar__item {

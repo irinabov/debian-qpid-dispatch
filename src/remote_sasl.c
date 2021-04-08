@@ -68,7 +68,7 @@ typedef struct {
 
 static void allocate_buffer(buffer_t* buffer)
 {
-    buffer->start = malloc(buffer->capacity);
+    buffer->start = qd_malloc(buffer->capacity);
     memset(buffer->start, 0, buffer->capacity);
 }
 
@@ -331,8 +331,8 @@ static void set_policy_settings(pn_connection_t* conn, permissions_t* permission
         if (permissions->sources.start && permissions->sources.capacity) {
             qd_conn->policy_settings->sources = qd_policy_compile_allowed_csv(permissions->sources.start);
         }
-        qd_conn->policy_settings->allowDynamicSource = true;
-        qd_conn->policy_settings->allowAnonymousSender = true;
+        qd_conn->policy_settings->spec.allowDynamicSource = true;
+        qd_conn->policy_settings->spec.allowAnonymousSender = true;
     }
 }
 

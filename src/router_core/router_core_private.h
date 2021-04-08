@@ -21,7 +21,7 @@
 
 #include "dispatch_private.h"
 #include "message_private.h"
-#include <qpid/dispatch/router_core.h>
+#include <qpid/dispatch/protocol_adaptor.h>
 #include <qpid/dispatch/threading.h>
 #include <qpid/dispatch/atomic.h>
 #include <qpid/dispatch/log.h>
@@ -136,6 +136,7 @@ struct qdr_action_t {
             qd_detach_type_t     dt;
             int                  credit;
             bool                 drain;
+            qdr_delivery_t      *initial_delivery;
         } connection;
 
         //
@@ -143,7 +144,6 @@ struct qdr_action_t {
         //
         struct {
             qdr_delivery_t *delivery;
-            qdr_error_t    *error;
             uint64_t        disposition;
             uint8_t         tag[32];
             int             tag_length;
@@ -238,6 +238,8 @@ struct qdr_general_work_t {
     void                        *on_message_context;
     uint64_t                     in_conn_id;
     uint64_t                     mobile_seq;
+    const qd_policy_spec_t      *policy_spec;
+    qdr_delivery_t              *delivery;
     qdr_delivery_cleanup_list_t  delivery_cleanup_list;
     qdr_global_stats_handler_t   stats_handler;
     void                        *context;
@@ -464,6 +466,7 @@ struct qdr_link_t {
     bool                     streaming;         ///< True if this link can be reused for streaming msgs
     bool                     in_streaming_pool; ///< True if this link is in the connections standby pool STREAMING_POOL
     bool                     terminus_survives_disconnect;
+    bool                     no_route;          ///< True if this link is to not receive routed deliveries
     char                    *strip_prefix;
     char                    *insert_prefix;
 
@@ -482,6 +485,7 @@ struct qdr_link_t {
     uint8_t   priority;
     uint8_t   rate_cursor;
     uint32_t  core_ticks;
+    uint64_t  conn_id;
 
     DEQ_LINKS_N(STREAMING_POOL, qdr_link_t);
 };
@@ -657,6 +661,7 @@ typedef enum {
 struct qdr_connection_t {
     DEQ_LINKS(qdr_connection_t);
     DEQ_LINKS_N(ACTIVATE, qdr_connection_t);
+    qdr_protocol_adaptor_t     *protocol_adaptor;
     uint64_t                    identity;
     qdr_core_t                 *core;
     bool                        incoming;
@@ -667,8 +672,6 @@ struct qdr_connection_t {
     qdr_conn_identifier_t      *alt_conn_id;
     bool                        strip_annotations_in;
     bool                        strip_annotations_out;
-    bool                        policy_allow_dynamic_link_routes;
-    bool                        policy_allow_admin_status_update;
     int                         link_capacity;
     int                         mask_bit;  ///< set only if inter-router connection
     qdr_connection_work_list_t  work_list;
@@ -689,6 +692,7 @@ struct qdr_connection_t {
     bool                        enable_protocol_trace; // Has trace level logging been turned on for this connection.
     bool                        has_streaming_links;   ///< one or more of this connection's links are for streaming messages
     qdr_link_list_t             streaming_link_pool;   ///< pool of links available for streaming messages
+    const qd_policy_spec_t     *policy_spec;
 };
 
 DEQ_DECLARE(qdr_connection_t, qdr_connection_list_t);
@@ -785,6 +789,34 @@ typedef struct qdr_priority_sheaf_t {
     int count;
 } qdr_priority_sheaf_t;
 
+
+struct qdr_protocol_adaptor_t {
+    DEQ_LINKS(qdr_protocol_adaptor_t);
+    const char *name;
+
+    //
+    // Callbacks
+    //
+    void                     *user_context;
+    qdr_connection_activate_t activate_handler;
+    qdr_link_first_attach_t   first_attach_handler;
+    qdr_link_second_attach_t  second_attach_handler;
+    qdr_link_detach_t         detach_handler;
+    qdr_link_flow_t           flow_handler;
+    qdr_link_offer_t          offer_handler;
+    qdr_link_drained_t        drained_handler;
+    qdr_link_drain_t          drain_handler;
+    qdr_link_push_t           push_handler;
+    qdr_link_deliver_t        deliver_handler;
+    qdr_link_get_credit_t     get_credit_handler;
+    qdr_delivery_update_t     delivery_update_handler;
+    qdr_connection_close_t    conn_close_handler;
+    qdr_connection_trace_t    conn_trace_handler;
+};
+
+DEQ_DECLARE(qdr_protocol_adaptor_t, qdr_protocol_adaptor_list_t);
+
+
 struct qdr_core_t {
     qd_dispatch_t     *qd;
     qd_log_source_t   *log;
@@ -802,11 +834,12 @@ struct qdr_core_t {
     qd_timer_t              *work_timer;
     uint32_t                 uptime_ticks;
 
-    qdr_connection_list_t      open_connections;
-    qdr_connection_t          *active_edge_connection;
-    qdr_connection_list_t      connections_to_activate;
-    qdr_link_list_t            open_links;
-    qdr_connection_ref_list_t  streaming_connections;
+    qdr_protocol_adaptor_list_t  protocol_adaptors;
+    qdr_connection_list_t        open_connections;
+    qdr_connection_t            *active_edge_connection;
+    qdr_connection_list_t        connections_to_activate;
+    qdr_link_list_t              open_links;
+    qdr_connection_ref_list_t    streaming_connections;
 
     qdrc_attach_addr_lookup_t  addr_lookup_handler;
     void                      *addr_lookup_context;
@@ -820,24 +853,6 @@ struct qdr_core_t {
     qdr_set_mobile_seq_t     rt_set_mobile_seq;
     qdr_set_my_mobile_seq_t  rt_set_my_mobile_seq;
     qdr_link_lost_t          rt_link_lost;
-
-    //
-    // Connection section
-    //
-    void                     *user_context;
-    qdr_link_first_attach_t   first_attach_handler;
-    qdr_link_second_attach_t  second_attach_handler;
-    qdr_link_detach_t         detach_handler;
-    qdr_link_flow_t           flow_handler;
-    qdr_link_offer_t          offer_handler;
-    qdr_link_drained_t        drained_handler;
-    qdr_link_drain_t          drain_handler;
-    qdr_link_push_t           push_handler;
-    qdr_link_deliver_t        deliver_handler;
-    qdr_link_get_credit_t     get_credit_handler;
-    qdr_delivery_update_t     delivery_update_handler;
-    qdr_connection_close_t    conn_close_handler;
-    qdr_connection_trace_t    conn_trace_handler;
 
     //
     // Events section
@@ -927,7 +942,8 @@ ALLOC_DECLARE(qdr_terminus_t);
 
 void *router_core_thread(void *arg);
 uint64_t qdr_identifier(qdr_core_t* core);
-void qdr_management_agent_on_message(void *context, qd_message_t *msg, int link_id, int cost, uint64_t in_conn_id);
+uint64_t qdr_management_agent_on_message(void *context, qd_message_t *msg, int link_id, int cost,
+                                         uint64_t in_conn_id, const qd_policy_spec_t *policy_spec, qdr_error_t **error);
 void  qdr_route_table_setup_CT(qdr_core_t *core);
 qdr_agent_t *qdr_agent(qdr_core_t *core);
 void qdr_agent_setup_subscriptions(qdr_agent_t *agent, qdr_core_t *core);
@@ -946,7 +962,7 @@ void qdr_addr_start_inlinks_CT(qdr_core_t *core, qdr_address_t *addr);
  */
 bool qdr_address_is_mobile_CT(qdr_address_t *addr);
 
-void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_link_t *link, qd_message_t *msg);
+void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_link_t *link, qd_message_t *msg, qdr_delivery_t *in_dlv);
 void qdr_in_process_send_to_CT(qdr_core_t *core, qd_iterator_t *address, qd_message_t *msg, bool exclude_inprocess, bool control);
 void qdr_agent_enqueue_response_CT(qdr_core_t *core, qdr_query_t *query);
 
@@ -961,6 +977,7 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *pe
 void qdr_forward_deliver_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery_t *dlv);
 void qdr_connection_free(qdr_connection_t *conn);
 void qdr_connection_activate_CT(qdr_core_t *core, qdr_connection_t *conn);
+void qdr_close_connection_CT(qdr_core_t *core, qdr_connection_t *conn);
 qdr_link_t *qdr_connection_new_streaming_link_CT(qdr_core_t *core, qdr_connection_t *conn);
 qdr_address_config_t *qdr_config_for_address_CT(qdr_core_t *core, qdr_connection_t *conn, qd_iterator_t *iter);
 qd_address_treatment_t qdr_treatment_for_address_hash_CT(qdr_core_t *core, qd_iterator_t *iter, qdr_address_config_t **addr_config);
@@ -996,7 +1013,11 @@ qdr_query_t *qdr_query(qdr_core_t              *core,
                        qd_router_entity_type_t  type,
                        qd_composed_field_t     *body,
                        uint64_t                 conn_id);
+
+void qdr_modules_init(qdr_core_t *core);
+void qdr_adaptors_init(qdr_core_t *core);
 void qdr_modules_finalize(qdr_core_t *core);
+void qdr_adaptors_finalize(qdr_core_t *core);
 
 /**
  * Create a new timer which will only be used inside the code thread.
