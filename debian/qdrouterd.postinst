@@ -14,7 +14,7 @@ case "$1" in
         # create user qdrouterd if missing
         if ! getent passwd qdrouterd > /dev/null ; then
             echo "Adding system-user qdrouterd" 1>&2
-            adduser --system --home /var/run/qpid --group --no-create-home --disabled-password qdrouterd
+            adduser --system --home /var/run/qpid --group --disabled-password qdrouterd
         else
             echo "System-user qdrouterd already exists" 1>&2
         fi
