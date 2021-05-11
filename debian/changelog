@@ -1,3 +1,9 @@
+qpid-dispatch (1.15.0-3qpid+bionic1) bionic; urgency=medium
+
+  * Rebuild against proton 0.34
+
+ -- Kim van der Riet <kpvdr@redhat.com>  Tue, 11 Apr 2021 09:30:00` -0400
+
 qpid-dispatch (1.15.0-2qpid+bionic1) bionic; urgency=medium
 
   * Added patch for i386 compile error
