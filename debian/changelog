@@ -1,3 +1,9 @@
+qpid-dispatch (1.16.0-1qpid+bionic1) bionic; urgency=medium
+
+  * Rebased to 1.16.0 
+
+ -- Kim van der Riet <kpvdr@redhat.com>  Mon, 17 May 2021 15:58:58 -0400
+
 qpid-dispatch (1.15.0-3qpid+bionic1) bionic; urgency=medium
 
   * Rebuild against proton 0.34
