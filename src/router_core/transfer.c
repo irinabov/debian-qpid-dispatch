@@ -17,13 +17,13 @@
  * under the License.
  */
 
-#include "router_core_private.h"
-#include "exchange_bindings.h"
 #include "delivery.h"
-#include <qpid/dispatch/amqp.h>
-#include <stdio.h>
-#include <inttypes.h>
+#include "exchange_bindings.h"
+#include "router_core_private.h"
 
+#include "qpid/dispatch/amqp.h"
+
+#include <inttypes.h>
 
 //==================================================================================
 // Internal Functions
@@ -59,6 +59,7 @@ qdr_delivery_t *qdr_link_deliver(qdr_link_t *link, qd_message_t *msg, qd_iterato
     dlv->delivery_id        = next_delivery_id();
     dlv->link_id            = link->identity;
     dlv->conn_id            = link->conn_id;
+    dlv->dispo_lock         = sys_mutex();
     qd_log(link->core->log, QD_LOG_DEBUG, DLV_FMT" Delivery created qdr_link_deliver", DLV_ARGS(dlv));
 
     qdr_delivery_incref(dlv, "qdr_link_deliver - newly created delivery, add to action list");
@@ -94,6 +95,7 @@ qdr_delivery_t *qdr_link_deliver_to(qdr_link_t *link, qd_message_t *msg,
     dlv->delivery_id        = next_delivery_id();
     dlv->link_id            = link->identity;
     dlv->conn_id            = link->conn_id;
+    dlv->dispo_lock         = sys_mutex();
     qd_log(link->core->log, QD_LOG_DEBUG, DLV_FMT" Delivery created qdr_link_deliver_to", DLV_ARGS(dlv));
 
     qdr_delivery_incref(dlv, "qdr_link_deliver_to - newly created delivery, add to action list");
@@ -124,6 +126,7 @@ qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *
     dlv->delivery_id        = next_delivery_id();
     dlv->link_id            = link->identity;
     dlv->conn_id            = link->conn_id;
+    dlv->dispo_lock         = sys_mutex();
     qd_log(link->core->log, QD_LOG_DEBUG, DLV_FMT" Delivery created qdr_link_deliver_to_routed_link", DLV_ARGS(dlv));
 
     qdr_delivery_incref(dlv, "qdr_link_deliver_to_routed_link - newly created delivery, add to action list");
@@ -207,6 +210,7 @@ int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit)
 
                         assert(dlv == DEQ_HEAD(link->undelivered));
                         DEQ_REMOVE_HEAD(link->undelivered);
+                        qdr_link_work_release(dlv->link_work);
                         dlv->link_work = 0;
 
                         if (settled || qdr_delivery_oversize(dlv) || qdr_delivery_is_aborted(dlv)) {
@@ -215,7 +219,7 @@ int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit)
                         } else {
                             DEQ_INSERT_TAIL(link->unsettled, dlv);
                             dlv->where = QDR_DELIVERY_IN_UNSETTLED;
-                            qd_log(core->log, QD_LOG_DEBUG, DLV_FMT"Delivery transfer:  qdr_link_process_deliveries: undelivered-list -> unsettled-list", DLV_ARGS(dlv));
+                            qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Delivery transfer:  qdr_link_process_deliveries: undelivered-list -> unsettled-list", DLV_ARGS(dlv));
                         }
                     } else {
                         //
@@ -229,6 +233,7 @@ int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit)
                         //
                         if (dlv == DEQ_HEAD(link->undelivered)) {
                             DEQ_REMOVE_HEAD(link->undelivered);
+                            qdr_link_work_release(dlv->link_work);
                             dlv->link_work = 0;
                             dlv->where = QDR_DELIVERY_NOWHERE;
                             qd_nullify_safe_ptr(&dlv->link_sp);
@@ -301,8 +306,8 @@ void qdr_link_complete_sent_message(qdr_core_t *core, qdr_link_t *link)
 
             if (dlv->link_work->value == 0) {
                 DEQ_REMOVE_HEAD(link->work_list);
-                qdr_error_free(dlv->link_work->error);
-                free_qdr_link_work_t(dlv->link_work);
+                qdr_link_work_release(dlv->link_work);  // for work_list ref
+                qdr_link_work_release(dlv->link_work);  // for dlv ref
                 dlv->link_work = 0;
             }
         }
@@ -310,7 +315,7 @@ void qdr_link_complete_sent_message(qdr_core_t *core, qdr_link_t *link)
         if (!dlv->settled && !qdr_delivery_oversize(dlv) && !qdr_delivery_is_aborted(dlv)) {
             DEQ_INSERT_TAIL(link->unsettled, dlv);
             dlv->where = QDR_DELIVERY_IN_UNSETTLED;
-            qd_log(core->log, QD_LOG_DEBUG, DLV_FMT"Delivery transfer:  qdr_link_complete_sent_message: undelivered-list -> unsettled-list", DLV_ARGS(dlv));
+            qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Delivery transfer:  qdr_link_complete_sent_message: undelivered-list -> unsettled-list", DLV_ARGS(dlv));
         } else {
             dlv->where = QDR_DELIVERY_NOWHERE;
             qdr_delivery_decref(core, dlv, "qdr_link_complete_sent_message - removed from undelivered");
@@ -439,10 +444,8 @@ static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discar
         if (clink->link_direction == QD_INCOMING)
             qdr_link_issue_credit_CT(core, link->connected_link, credit, drain);
         else {
-            work = new_qdr_link_work_t();
-            ZERO(work);
-            work->work_type = QDR_LINK_WORK_FLOW;
-            work->value     = credit;
+            work        = qdr_link_work(QDR_LINK_WORK_FLOW);
+            work->value = credit;
             if (drain)
                 work->drain_action = QDR_LINK_WORK_DRAIN_ACTION_DRAINED;
             qdr_link_enqueue_work_CT(core, clink, work);
@@ -460,9 +463,7 @@ static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discar
         //
         if (link->link_direction == QD_OUTGOING && (credit > 0 || drain_was_set)) {
             if (drain_was_set) {
-                work = new_qdr_link_work_t();
-                ZERO(work);
-                work->work_type    = QDR_LINK_WORK_FLOW;
+                work               = qdr_link_work(QDR_LINK_WORK_FLOW);
                 work->drain_action = QDR_LINK_WORK_DRAIN_ACTION_DRAINED;
             }
 
@@ -518,9 +519,6 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
     if (!dlv_link)
         return;
 
-    if (dlv_link->link_type == QD_LINK_ENDPOINT && !dlv_link->fallback)
-        core->deliveries_ingress++;
-
     if (addr
         && addr == link->owning_addr
         && qdr_addr_path_count_CT(addr) == 0
@@ -547,6 +545,7 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
         // messages will not *actually* be released in this case because these
         // are presettled messages.
         //
+        qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Delivery forward:  qdr_link_forward_CT (qdr_addr_path_count_CT(addr) == 0): released dlv", DLV_ARGS(dlv));
         qdr_delivery_release_CT(core, dlv);
 
         //
@@ -667,8 +666,10 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
         //
         // If the delivery is not settled, release it.
         //
-        if (!dlv->settled)
+        if (!dlv->settled) {
+        	qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Delivery forward:  qdr_link_forward_CT(fanout == 0): released dlv", DLV_ARGS(dlv));
             qdr_delivery_release_CT(core, dlv);
+        }
         else {
             link->dropped_presettled_deliveries++;
             if (dlv_link->link_type == QD_LINK_ENDPOINT)
@@ -706,7 +707,7 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
                 //
                 DEQ_INSERT_TAIL(link->settled, dlv);
                 dlv->where = QDR_DELIVERY_IN_SETTLED;
-                qd_log(core->log, QD_LOG_DEBUG, DLV_FMT"Delivery transfer:  qdr_link_forward_CT: action-list -> settled-list", DLV_ARGS(dlv));
+                qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Delivery transfer:  qdr_link_forward_CT: action-list -> settled-list", DLV_ARGS(dlv));
             }
         } else {
             //
@@ -745,6 +746,9 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
 
     link->total_deliveries++;
 
+    if (link->link_type == QD_LINK_ENDPOINT && !link->fallback)
+        core->deliveries_ingress++;
+
     //
     // Record the ingress time so we can track the age of this delivery.
     //
@@ -764,9 +768,6 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
     }
 
     if (link->connected_link) {
-        if (link->link_direction == QD_INCOMING)
-            core->deliveries_ingress++;
-
         //
         // If this is an attach-routed link, put the delivery directly onto the peer link
         //
@@ -783,7 +784,7 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
         if (!dlv->settled) {
             DEQ_INSERT_TAIL(link->unsettled, dlv);
             dlv->where = QDR_DELIVERY_IN_UNSETTLED;
-            qd_log(core->log, QD_LOG_DEBUG, DLV_FMT"Delivery transfer:  qdr_link_deliver_CT: action-list -> unsettled-list", DLV_ARGS(dlv));
+            qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Delivery transfer:  qdr_link_deliver_CT: action-list -> unsettled-list", DLV_ARGS(dlv));
         } else {
             //
             // If the delivery is settled, decrement the ref_count on the delivery.
@@ -850,6 +851,7 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
         // Deal with any delivery restrictions for this address.
         //
         if (addr && addr->router_control_only && link->link_type != QD_LINK_CONTROL) {
+        	qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Link forward:  qdr_link_deliver_CT: released dlv", DLV_ARGS(dlv));
             qdr_delivery_release_CT(core, dlv);
             qdr_link_issue_credit_CT(core, link, 1, false);
             qdr_delivery_decref_CT(core, dlv, "qdr_link_deliver_CT - removed from action on restricted access");
@@ -870,7 +872,7 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
         //
         DEQ_INSERT_TAIL(link->undelivered, dlv);
         dlv->where = QDR_DELIVERY_IN_UNDELIVERED;
-        qd_log(core->log, QD_LOG_DEBUG, DLV_FMT"Delivery transfer:  qdr_link_deliver_CT: action-list -> undelivered-list", DLV_ARGS(dlv));
+        qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Delivery transfer:  qdr_link_deliver_CT: action-list -> undelivered-list", DLV_ARGS(dlv));
     }
 }
 
@@ -944,10 +946,8 @@ void qdr_link_issue_credit_CT(qdr_core_t *core, qdr_link_t *link, int credit, bo
         sys_mutex_unlock(conn->work_lock);
 
         // need a new work flow item
-        work = new_qdr_link_work_t();
-        ZERO(work);
-        work->work_type = QDR_LINK_WORK_FLOW;
-        work->value     = credit;
+        work        = qdr_link_work(QDR_LINK_WORK_FLOW);
+        work->value = credit;
         if (drain_changed)
             work->drain_action = drain_action;
         qdr_link_enqueue_work_CT(core, link, work);

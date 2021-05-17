@@ -17,14 +17,13 @@
  * under the License.
  */
 
-#include "router_core_private.h"
-#include <qpid/dispatch/amqp.h>
-#include <stdio.h>
-#include <strings.h>
 #include "forwarder.h"
-#include "delivery.h"
-#include <inttypes.h>
 
+#include "delivery.h"
+#include "router_core_private.h"
+
+#include <inttypes.h>
+#include <strings.h>
 
 typedef struct qdr_forward_deliver_info_t {
     DEQ_LINKS(struct qdr_forward_deliver_info_t);
@@ -155,6 +154,7 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
     out_dlv->delivery_id = next_delivery_id();
     out_dlv->link_id     = out_link->identity;
     out_dlv->conn_id     = out_link->conn_id;
+    out_dlv->dispo_lock  = sys_mutex();
     qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Delivery created qdr_forward_new_delivery_CT", DLV_ARGS(out_dlv));
 
     if (in_dlv) {
@@ -163,7 +163,6 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
         out_dlv->ingress_index = in_dlv->ingress_index;
         if (in_dlv->remote_disposition) {
             // propagate disposition state from remote to peer
-            out_dlv->disposition = in_dlv->remote_disposition;
             qdr_delivery_move_delivery_state_CT(in_dlv, out_dlv);
         }
     } else {
@@ -233,8 +232,8 @@ static void qdr_forward_drop_presettled_CT_LH(qdr_core_t *core, qdr_link_t *link
             assert(dlv->link_work);
             if (dlv->link_work && (--dlv->link_work->value == 0)) {
                 DEQ_REMOVE(link->work_list, dlv->link_work);
-                qdr_error_free(dlv->link_work->error);
-                free_qdr_link_work_t(dlv->link_work);
+                qdr_link_work_release(dlv->link_work); // for work_list
+                qdr_link_work_release(dlv->link_work); // for dlv ref
                 dlv->link_work = 0;
             }
             dlv->disposition = PN_RELEASED;
@@ -276,15 +275,13 @@ void qdr_forward_deliver_CT(qdr_core_t *core, qdr_link_t *out_link, qdr_delivery
     if (work && work->work_type == QDR_LINK_WORK_DELIVERY) {
         work->value++;
     } else {
-        work = new_qdr_link_work_t();
-        ZERO(work);
-        work->work_type = QDR_LINK_WORK_DELIVERY;
+        work            = qdr_link_work(QDR_LINK_WORK_DELIVERY);
         work->value     = 1;
         DEQ_INSERT_TAIL(out_link->work_list, work);
     }
     qdr_add_link_ref(&out_link->conn->links_with_work[out_link->priority], out_link, QDR_LINK_LIST_CLASS_WORK);
 
-    out_dlv->link_work = work;
+    out_dlv->link_work = qdr_link_work_getref(work);
     sys_mutex_unlock(out_link->conn->work_lock);
 
     //
@@ -795,7 +792,9 @@ int qdr_forward_balanced_CT(qdr_core_t      *core,
     qdr_link_ref_t *link_ref = DEQ_HEAD(addr->rlinks);
     while (link_ref && eligible_link_value != 0) {
         qdr_link_t *link     = link_ref->link;
+        sys_mutex_lock(link->conn->work_lock);
         uint32_t    value    = DEQ_SIZE(link->undelivered) + DEQ_SIZE(link->unsettled);
+        sys_mutex_unlock(link->conn->work_lock);
         bool        eligible = link->capacity > value;
 
         //

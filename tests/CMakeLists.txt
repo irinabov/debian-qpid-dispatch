@@ -63,6 +63,9 @@ target_link_libraries(test-receiver ${Proton_LIBRARIES})
 add_executable(clogger clogger.c)
 target_link_libraries(clogger ${Proton_LIBRARIES})
 
+add_executable(threaded_timer_test threaded_timer_test.c)
+target_link_libraries(threaded_timer_test qpid-dispatch)
+
 # Bubblewrap is an unprivileged sandboxing tool for Linux. Setting --unshare-net allows
 # running tests in parallel (the ctest -j option) without port clashes
 set(USE_BWRAP OFF CACHE BOOL "Wrap test executions with bwrap (https://github.com/containers/bubblewrap)")
@@ -71,7 +74,7 @@ if(USE_BWRAP)
 else()
   set(BWRAP_ARGS "")
 endif()
-set(TEST_WRAP ${BWRAP_ARGS} ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/run.py)
+set(TEST_WRAP ${BWRAP_ARGS} ${Python_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/run.py)
 
 add_test(unit_tests_size_10000 ${TEST_WRAP} unit_tests_size 10000)
 add_test(unit_tests_size_512   ${TEST_WRAP} unit_tests_size 512)
@@ -83,11 +86,21 @@ add_test(unit_tests_size_2     ${TEST_WRAP} unit_tests_size 2)
 add_test(unit_tests_size_1     ${TEST_WRAP} unit_tests_size 1)
 add_test(unit_tests            ${TEST_WRAP} unit_tests ${CMAKE_CURRENT_SOURCE_DIR}/threads4.conf)
 
+# stand alone tests
+add_test(threaded_timer_test   ${TEST_WRAP} threaded_timer_test ${CMAKE_CURRENT_SOURCE_DIR}/dummy.conf)
+
 # Unit test python modules
-add_test(router_engine_test    ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v router_engine_test)
-add_test(management_test       ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v management)
-add_test(router_policy_test    ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v router_policy_test)
-add_test(test_command    ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v test_command)
+foreach(py_test_module
+    router_engine_test
+    management_test
+    router_policy_test
+    test_command
+    )
+
+  string(CONFIGURE "${PYTHON_TEST_COMMAND}" CONFIGURED_PYTHON_TEST_COMMAND)
+
+  add_test(${py_test_module} ${TEST_WRAP} ${CONFIGURED_PYTHON_TEST_COMMAND})
+endforeach()
 
 if(USE_LIBWEBSOCKETS)
   set(SYSTEM_TESTS_HTTP system_tests_http)
@@ -162,13 +175,18 @@ foreach(py_test_module
     system_tests_open_properties
     ${SYSTEM_TESTS_HTTP2}
     system_tests_http1_adaptor
+    system_tests_http1_over_tcp
     system_tests_tcp_adaptor
     )
 
-  add_test(${py_test_module} ${TEST_WRAP} ${PYTHON_TEST_COMMAND} -v ${py_test_module})
+  string(CONFIGURE "${PYTHON_TEST_COMMAND}" CONFIGURED_PYTHON_TEST_COMMAND)
+
+  add_test(${py_test_module} ${TEST_WRAP} ${CONFIGURED_PYTHON_TEST_COMMAND})
   list(APPEND SYSTEM_TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/${py_test_module}.py)
 endforeach()
 
+# Location of tox.ini determines the testroot directory for Pytest
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tox.ini.in ${CMAKE_CURRENT_BINARY_DIR}/tox.ini)
 # Use tox to run the flake8 python linter tool on all the python
 # sources. Highly recommended if you're hacking the python code.
 # Unfortunately this can only be done for versions of tox >= 1.9.0
@@ -189,7 +207,6 @@ if (TOX_EXE)
     if (TOX_VERSION STRLESS TOX_MIN_VERSION)
       message( STATUS "tox version ${TOX_VERSION} < required version ${TOX_MIN_VERSION} - skipping python-checker")
     else (TOX_VERSION STRLESS TOX_MIN_VERSION)
-      configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tox.ini.in ${CMAKE_CURRENT_BINARY_DIR}/tox.ini)
       add_test (NAME python-checker
                 COMMAND ${TOX_EXE}
                 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
@@ -256,6 +273,4 @@ install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/config-2
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ssl_certs
         DESTINATION ${QPID_DISPATCH_HOME_INSTALLED}/tests)
 
-if(NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "4.8.5"))
-  add_subdirectory(c_unittests)
-endif()
+add_subdirectory(c_unittests)

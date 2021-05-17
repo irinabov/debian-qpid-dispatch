@@ -19,10 +19,9 @@
  * under the License.
  */
 
-#include <qpid/dispatch/router_core.h>
-#include <qpid/dispatch/policy_spec.h>
-#include <qpid/dispatch/delivery_state.h>
-
+#include "qpid/dispatch/delivery_state.h"
+#include "qpid/dispatch/policy_spec.h"
+#include "qpid/dispatch/router_core.h"
 
 typedef struct qdr_protocol_adaptor_t  qdr_protocol_adaptor_t;
 typedef struct qdr_connection_t        qdr_connection_t;
@@ -908,13 +907,6 @@ void qdr_link_flow(qdr_core_t *core, qdr_link_t *link, int credit, bool drain_mo
  * @param link - the link that has been drained
  */
 void qdr_link_set_drained(qdr_core_t *core, qdr_link_t *link);
-
-
-/**
- * Set the remote delivery state for dlv. Ownership of dstate is transferred to
- * the dlv and true is returned. Caller must free dstate if false is returned.
- */
-bool qdr_delivery_set_remote_delivery_state(qdr_delivery_t *dlv, qd_delivery_state_t *dstate);
 
 /**
  * Extract the disposition and delivery state data that is to be sent to the

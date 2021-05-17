@@ -17,24 +17,21 @@
  * under the License.
  */
 
-#include <qpid/dispatch/atomic.h>
-#include <qpid/dispatch/amqp.h>
-#include <qpid/dispatch/protocol_adaptor.h>
-#include <qpid/dispatch/threading.h>
-#include <qpid/dispatch/timer.h>
+#include "config.h"
+#include "http.h"
+#include "server_private.h"
+
+#include "qpid/dispatch/amqp.h"
+#include "qpid/dispatch/atomic.h"
+#include "qpid/dispatch/protocol_adaptor.h"
+#include "qpid/dispatch/threading.h"
+#include "qpid/dispatch/timer.h"
 
 #include <proton/connection_driver.h>
 
-#include <libwebsockets.h>
-
-#include <assert.h>
 #include <ctype.h>
-#include <errno.h>
 #include <inttypes.h>
-
-#include "http.h"
-#include "server_private.h"
-#include "config.h"
+#include <libwebsockets.h>
 
 static const char *CIPHER_LIST = "ALL:aNULL:!eNULL:@STRENGTH"; /* Default */
 static const char *IGNORED = "ignore-this-log-message";
@@ -746,9 +743,9 @@ static int callback_healthz(struct lws *wsi, enum lws_callback_reasons reason,
         ZERO(stats->context);
         stats->context->wsi = wsi;
         stats->context->server = hs;
-        //make dummy request for stats (pass in null ptr); this still excercises the
+        //make dummy request for stats (pass in null ptr); this still exercises the
         //path through core thread and back through callback on io thread which is
-        //a resonable initial liveness check
+        //a reasonable initial liveness check
         qdr_request_global_stats(hs->core, 0, handle_stats_results, (void*) stats->context);
         return 0;
     }
