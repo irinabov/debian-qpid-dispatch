@@ -17,13 +17,16 @@
  * under the License.
  */
 
-#include "router_core_private.h"
-#include "route_control.h"
-#include "exchange_bindings.h"
 #include "core_events.h"
 #include "delivery.h"
+#include "exchange_bindings.h"
+#include "route_control.h"
+#include "router_core_private.h"
+
 #include <stdio.h>
 #include <strings.h>
+
+ALLOC_DECLARE(qdr_link_work_t);
 
 ALLOC_DEFINE(qdr_address_t);
 ALLOC_DEFINE(qdr_address_config_t);
@@ -223,8 +226,12 @@ void qdr_core_free(qdr_core_t *core)
             DEQ_REMOVE_N(STREAMING_POOL, link->conn->streaming_link_pool, link);
             link->in_streaming_pool = false;
         }
+
+        qdr_link_cleanup_deliveries_CT(core, link->conn, link, true);
+
         if (link->core_endpoint)
             qdrc_endpoint_do_cleanup_CT(core, link->core_endpoint);
+
         qdr_del_link_ref(&link->conn->links, link, QDR_LINK_LIST_CLASS_CONNECTION);
         qdr_del_link_ref(&link->conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
         free(link->name);
@@ -234,8 +241,36 @@ void qdr_core_free(qdr_core_t *core)
         free(link->insert_prefix);
         free(link->strip_prefix);
         link->name = 0;
+
+        //
+        // If there are still any work items remaining in the link->work_list
+        // remove them and free the associated link_work->error
+        //
+        sys_mutex_lock(link->conn->work_lock);
+        qdr_link_work_t *link_work = DEQ_HEAD(link->work_list);
+        while (link_work) {
+            DEQ_REMOVE_HEAD(link->work_list);
+            qdr_link_work_release(link_work);
+            link_work = DEQ_HEAD(link->work_list);
+        }
+        sys_mutex_unlock(link->conn->work_lock);
+
         free_qdr_link_t(link);
         link = DEQ_HEAD(core->open_links);
+    }
+
+    //
+    // Clean up any qdr_delivery_cleanup_t's that are still left in the core->delivery_cleanup_list
+    //
+    qdr_delivery_cleanup_t *cleanup = DEQ_HEAD(core->delivery_cleanup_list);
+    while (cleanup) {
+        DEQ_REMOVE_HEAD(core->delivery_cleanup_list);
+        if (cleanup->msg)
+            qd_message_free(cleanup->msg);
+        if (cleanup->iter)
+            qd_iterator_free(cleanup->iter);
+        free_qdr_delivery_cleanup_t(cleanup);
+        cleanup = DEQ_HEAD(core->delivery_cleanup_list);
     }
 
     qdr_connection_t *conn = DEQ_HEAD(core->open_connections);
@@ -245,6 +280,11 @@ void qdr_core_free(qdr_core_t *core)
         if (conn->conn_id) {
             qdr_del_connection_ref(&conn->conn_id->connection_refs, conn);
             qdr_route_check_id_for_deletion_CT(core, conn->conn_id);
+        }
+
+        if (conn->alt_conn_id) {
+            qdr_del_connection_ref(&conn->alt_conn_id->connection_refs, conn);
+            qdr_route_check_id_for_deletion_CT(core, conn->alt_conn_id);
         }
 
         qdr_connection_work_t *work = DEQ_HEAD(conn->work_list);
@@ -564,7 +604,7 @@ void qdr_core_remove_address(qdr_core_t *core, qdr_address_t *addr)
     DEQ_REMOVE(core->addrs, addr);
     if (addr->hash_handle) {
         const char *a_str = (const char *)qd_hash_key_by_handle(addr->hash_handle);
-        if (QDR_IS_LINK_ROUTE(a_str[0])) {
+        if (a_str && QDR_IS_LINK_ROUTE(a_str[0])) {
             qd_iterator_t *iter = qd_iterator_string(a_str, ITER_VIEW_ALL);
             qdr_link_route_unmap_pattern_CT(core, iter);
             qd_iterator_free(iter);
@@ -1037,3 +1077,40 @@ void qdr_protocol_adaptor_free(qdr_core_t *core, qdr_protocol_adaptor_t *adaptor
     DEQ_REMOVE(core->protocol_adaptors, adaptor);
     free(adaptor);
 }
+
+
+qdr_link_work_t *qdr_link_work(qdr_link_work_type_t type)
+{
+    qdr_link_work_t *work = new_qdr_link_work_t();
+    if (work) {
+        ZERO(work);
+        work->work_type = type;
+        sys_atomic_init(&work->ref_count, 1);
+    }
+    return work;
+}
+
+
+qdr_link_work_t *qdr_link_work_getref(qdr_link_work_t *work)
+{
+    if (work) {
+        uint32_t old = sys_atomic_inc(&work->ref_count);
+        (void)old;  // mask unused var compiler warning
+        assert(old != 0);
+    }
+    return work;
+}
+
+void qdr_link_work_release(qdr_link_work_t *work)
+{
+    if (work) {
+        uint32_t old = sys_atomic_dec(&work->ref_count);
+        assert(old != 0);
+        if (old == 1) {
+            qdr_error_free(work->error);
+            free_qdr_link_work_t(work);
+        }
+    }
+}
+
+

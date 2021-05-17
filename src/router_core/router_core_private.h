@@ -21,10 +21,12 @@
 
 #include "dispatch_private.h"
 #include "message_private.h"
-#include <qpid/dispatch/protocol_adaptor.h>
-#include <qpid/dispatch/threading.h>
-#include <qpid/dispatch/atomic.h>
-#include <qpid/dispatch/log.h>
+
+#include "qpid/dispatch/atomic.h"
+#include "qpid/dispatch/log.h"
+#include "qpid/dispatch/protocol_adaptor.h"
+#include "qpid/dispatch/threading.h"
+
 #include <memory.h>
 
 typedef struct qdr_address_t         qdr_address_t;
@@ -54,10 +56,9 @@ ALLOC_DECLARE(qdr_connection_ref_t);
 ALLOC_DECLARE(qdr_connection_t);
 ALLOC_DECLARE(qdr_link_t);
 
-
-#include "core_link_endpoint.h"
-#include "core_events.h"
 #include "core_attach_address_lookup.h"
+#include "core_events.h"
+#include "core_link_endpoint.h"
 
 qdr_forwarder_t *qdr_forwarder_CT(qdr_core_t *core, qd_address_treatment_t treatment);
 int qdr_forward_message_CT(qdr_core_t *core, qdr_address_t *addr, qd_message_t *msg, qdr_delivery_t *in_delivery,
@@ -143,13 +144,14 @@ struct qdr_action_t {
         // Arguments for delivery state updates
         //
         struct {
-            qdr_delivery_t *delivery;
-            uint64_t        disposition;
-            uint8_t         tag[32];
-            int             tag_length;
-            bool            settled;
-            bool            presettled;  // true if remote settles while msg is in flight
-            bool            more;  // true if there are more frames arriving, false otherwise
+            qdr_delivery_t      *delivery;
+            qd_delivery_state_t *dstate;
+            uint64_t             disposition;
+            uint8_t              tag[32];
+            int                  tag_length;
+            bool                 settled;
+            bool                 presettled;  // true if remote settles while msg is in flight
+            bool                 more;  // true if there are more frames arriving, false otherwise
         } delivery;
 
         //
@@ -315,6 +317,7 @@ typedef enum {
 typedef struct qdr_link_work_t {
     DEQ_LINKS(struct qdr_link_work_t);
     qdr_link_work_type_t          work_type;
+    sys_atomic_t                  ref_count;
     qdr_error_t                  *error;
     int                           value;
     qdr_link_work_drain_action_t  drain_action;
@@ -322,8 +325,11 @@ typedef struct qdr_link_work_t {
     bool                          processing;
 } qdr_link_work_t;
 
-ALLOC_DECLARE(qdr_link_work_t);
 DEQ_DECLARE(qdr_link_work_t, qdr_link_work_list_t);
+
+qdr_link_work_t *qdr_link_work(qdr_link_work_type_t type);
+qdr_link_work_t *qdr_link_work_getref(qdr_link_work_t *work);
+void qdr_link_work_release(qdr_link_work_t *work);
 
 
 #define QDR_AGENT_MAX_COLUMNS 64
@@ -986,6 +992,7 @@ qdr_edge_t *qdr_edge(qdr_core_t *);
 void qdr_edge_free(qdr_edge_t *);
 void qdr_edge_connection_opened(qdr_edge_t *edge, qdr_connection_t *conn);
 void qdr_edge_connection_closed(qdr_edge_t *edge);
+void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link, bool on_shutdown);
 
 void qdr_connection_enqueue_work_CT(qdr_core_t            *core,
                                     qdr_connection_t      *conn,

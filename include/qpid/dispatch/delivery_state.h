@@ -19,7 +19,10 @@
  * under the License.
  */
 
+#include <proton/disposition.h>
+
 #include <stdbool.h>
+#include <inttypes.h>
 
 /**
  * AMQP 1.0 defines a delivery-state type property.  Delivery-state is passed
@@ -31,6 +34,10 @@
  */
 
 typedef struct {
+
+    //RECEIVED - see section 3.4.1
+    uint32_t  section_number;
+    uint64_t  section_offset;
 
     // REJECTED - see section 3.4.3
     struct qdr_error_t *error;
@@ -55,6 +62,16 @@ qd_delivery_state_t *qd_delivery_state_from_error(struct qdr_error_t *err);
 
 // dispose
 void qd_delivery_state_free(qd_delivery_state_t *ds);
+
+
+// true if the state is final (an outcome). Once a terminal state
+// is reached no further changes are allowed.
+//
+static inline bool qd_delivery_state_is_terminal(uint64_t type)
+{
+    return ((PN_ACCEPTED <= type && type <= PN_MODIFIED) ||
+            type == 0x0033 /* See section 4.5.5 Declared */);
+}
 
 #endif
 

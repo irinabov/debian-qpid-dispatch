@@ -55,7 +55,7 @@ class RouterTestDeprecatedLinkRoute(TestCase):
             pass
 
     def test_deprecated_link_route(self):
-        with open('../setUpClass/test-router-2.out', 'r') as router_log:
+        with open(self.router.outfile + '.out', 'r') as router_log:
             log_lines = router_log.read().split("\n")
             search_lines = [s for s in log_lines if "org.apache.qpid.dispatch.router.config.linkRoute: Both 'dir' and 'direction' cannot be specified for entity 'linkRoute'" in s]
             self.assertTrue(len(search_lines) > 0)
@@ -69,7 +69,6 @@ class RouterTestDeprecatedLAutoLink(TestCase):
 
         name = "test-autolink"
 
-
         config = Qdrouterd.Config([
             ('router', {'mode': 'standalone', 'id': 'QDR.B'}),
             # We are trying to declare a link route with both 'dir' and 'direction' attributes.
@@ -77,7 +76,7 @@ class RouterTestDeprecatedLAutoLink(TestCase):
             ('autoLink', {'externalAddr': 'node.100', 'addr': 'node.10',
                           'containerId': 'container.1',
                           'direction': 'out'}),
-            ('autoLink', {'addr': 'node.1', 'containerId': 'container.1', 'dir': 'in',  'direction': 'in'}),
+            ('autoLink', {'addr': 'node.1', 'containerId': 'container.1', 'dir': 'in', 'direction': 'in'}),
             ('autoLink', {'addr': 'node.1', 'containerId': 'container.1', 'direction': 'out'}),
 
             ('listener', {'port': cls.tester.get_port()}),
@@ -91,19 +90,12 @@ class RouterTestDeprecatedLAutoLink(TestCase):
             pass
 
     def test_deprecated_auto_link(self):
-        with open('../setUpClass/test-autolink-1.out', 'r') as router_log:
+        with open(self.router.outfile + '.out', 'r') as router_log:
             log_lines = router_log.read().split("\n")
             search_lines = [s for s in log_lines if
                             "org.apache.qpid.dispatch.router.config.autoLink: Both 'dir' and 'direction' cannot be specified for entity 'autoLink'" in s]
             self.assertTrue(len(search_lines) > 0)
 
             external_addr_search_lines = [s for s in log_lines if
-                            "Attribute 'externalAddr' of entity 'autoLink' has been deprecated. Use 'externalAddress' instead" in s]
+                                          "Attribute 'externalAddr' of entity 'autoLink' has been deprecated. Use 'externalAddress' instead" in s]
             self.assertTrue(len(external_addr_search_lines) > 0)
-
-
-
-
-
-
-

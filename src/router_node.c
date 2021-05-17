@@ -17,21 +17,22 @@
  * under the License.
  */
 
-#include <qpid/dispatch/python_embedded.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdbool.h>
-#include <stdlib.h>
-#include <qpid/dispatch.h>
-#include "dispatch_private.h"
-#include "entity_cache.h"
-#include "router_private.h"
 #include "delivery.h"
+#include "dispatch_private.h"
 #include "policy.h"
-#include <qpid/dispatch/protocol_adaptor.h>
-#include <qpid/dispatch/proton_utils.h>
+#include "router_private.h"
+
+#include "qpid/dispatch.h"
+#include "qpid/dispatch/protocol_adaptor.h"
+#include "qpid/dispatch/proton_utils.h"
+
 #include <proton/sasl.h>
+
 #include <inttypes.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 const char *QD_ROUTER_NODE_TYPE = "router.node";
 const char *QD_ROUTER_ADDRESS_TYPE = "router.address";
@@ -132,57 +133,66 @@ static qd_delivery_state_t *qd_delivery_read_remote_state(pn_delivery_t *pnd)
 {
     qd_delivery_state_t *dstate = 0;
     uint64_t            outcome = pn_delivery_remote_state(pnd);
-    if (pnd) {
-        switch (outcome) {
-        case PN_RECEIVED:
-        case PN_ACCEPTED:
-        case PN_RELEASED:
-            // no associated state (that we care about)
-            break;
-        case PN_REJECTED: {
-            // See AMQP 1.0 section 3.4.4 Rejected
-            pn_condition_t *cond = pn_disposition_condition(pn_delivery_remote(pnd));
-            dstate = qd_delivery_state();
-            dstate->error = qdr_error_from_pn(cond);
-            break;
-        }
-        case PN_MODIFIED: {
-            // See AMQP 1.0 section 3.4.5 Modified
-            pn_disposition_t *disp = pn_delivery_remote(pnd);
-            bool failed = pn_disposition_is_failed(disp);
-            bool undeliverable = pn_disposition_is_undeliverable(disp);
-            pn_data_t *anno = pn_disposition_annotations(disp);
 
-            // avoid expensive alloc if only default values found
-            const bool need_anno = (anno && pn_data_size(anno) > 0);
-            if (failed || undeliverable || need_anno) {
-                dstate = qd_delivery_state();
-                dstate->delivery_failed = failed;
-                dstate->undeliverable_here = undeliverable;
-                if (need_anno) {
-                    dstate->annotations = pn_data(0);
-                    pn_data_copy(dstate->annotations, anno);
-                }
-            }
-            break;
-        }
-        default: {
-            // Check for custom state data. Custom outcomes and AMQP 1.0
-            // Transaction defined outcomes will all be numerically >
-            // PN_MODIFIED. See Part 4: Transactions and section 1.5 Descriptor
-            // Values in the AMQP 1.0 spec.
-            if (outcome > PN_MODIFIED) {
-                pn_data_t *data = pn_disposition_data(pn_delivery_remote(pnd));
-                if (data && pn_data_size(data) > 0) {
-                    dstate = qd_delivery_state();
-                    dstate->extension = pn_data(0);
-                    pn_data_copy(dstate->extension, data);
-                }
-            }
+    switch (outcome) {
+    case 0:
+        // not set - no delivery-state
         break;
-        }
-        } // end switch
+    case PN_RECEIVED: {
+        pn_disposition_t *disp = pn_delivery_remote(pnd);
+        dstate = qd_delivery_state();
+        dstate->section_number = pn_disposition_get_section_number(disp);
+        dstate->section_offset = pn_disposition_get_section_offset(disp);
+        break;
     }
+    case PN_ACCEPTED:
+    case PN_RELEASED:
+        // no associated state (that we care about)
+        break;
+    case PN_REJECTED: {
+        // See AMQP 1.0 section 3.4.4 Rejected
+        pn_condition_t *cond = pn_disposition_condition(pn_delivery_remote(pnd));
+        dstate = qd_delivery_state();
+        dstate->error = qdr_error_from_pn(cond);
+        break;
+    }
+    case PN_MODIFIED: {
+        // See AMQP 1.0 section 3.4.5 Modified
+        pn_disposition_t *disp = pn_delivery_remote(pnd);
+        bool failed = pn_disposition_is_failed(disp);
+        bool undeliverable = pn_disposition_is_undeliverable(disp);
+        pn_data_t *anno = pn_disposition_annotations(disp);
+
+        // avoid expensive alloc if only default values found
+        const bool need_anno = (anno && pn_data_size(anno) > 0);
+        if (failed || undeliverable || need_anno) {
+            dstate = qd_delivery_state();
+            dstate->delivery_failed = failed;
+            dstate->undeliverable_here = undeliverable;
+            if (need_anno) {
+                dstate->annotations = pn_data(0);
+                pn_data_copy(dstate->annotations, anno);
+            }
+        }
+        break;
+    }
+    default: {
+        // Check for custom state data. Custom outcomes and AMQP 1.0
+        // Transaction defined outcomes will all be numerically >
+        // PN_MODIFIED. See Part 4: Transactions and section 1.5 Descriptor
+        // Values in the AMQP 1.0 spec.
+        if (outcome > PN_MODIFIED) {
+            pn_data_t *data = pn_disposition_data(pn_delivery_remote(pnd));
+            if (data && pn_data_size(data) > 0) {
+                dstate = qd_delivery_state();
+                dstate->extension = pn_data(0);
+                pn_data_copy(dstate->extension, data);
+            }
+        }
+        break;
+    }
+    } // end switch
+
     return dstate;
 }
 
@@ -193,7 +203,12 @@ static void qd_delivery_write_local_state(pn_delivery_t *pnd, uint64_t outcome, 
 {
     if (pnd && dstate) {
         switch (outcome) {
-        case PN_RECEIVED:
+        case PN_RECEIVED: {
+            pn_disposition_t *ldisp = pn_delivery_local(pnd);
+            pn_disposition_set_section_number(ldisp, dstate->section_number);
+            pn_disposition_set_section_offset(ldisp, dstate->section_offset);
+            break;
+        }
         case PN_ACCEPTED:
         case PN_RELEASED:
             // no associated state (that we care about)
@@ -450,6 +465,42 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
     //
     qd_message_t   *msg   = qd_message_receive(pnd);
     bool receive_complete = qd_message_receive_complete(msg);
+
+    //
+    // The very first time AMQP_rx_handler is called on a PN_DELIVERY event, it calls  qd_message_receive(). When qd_message_receive() returns, we check here if
+    // there are any data in the content buffers. If there is no content in the buffers, there is no reason to route the delivery. We will wait for some data
+    // in the buffers before we start to route the delivery.
+    // Notice that the if statement checks for the existence of a delivery (qdr_delivery_t). Existence of a delivery means that the delivery has been routed when
+    // there was data in the buffers (When a delivery has been routed successfully, the delivery (qdr_delivery_t) will be non null)
+    //
+    // The following if statement will deal with the following cases:-
+    // 1. We receive one empty transfer frame with more=true followed by another empty transfer frame with (more=false and abort=true) or with just more=false
+    //    In this case, there is no data at all in the message content buffers, we will reject the message when receive_complete=true. We will never route this
+    //    delivery, so core thread will not be involved
+    // 2. We receive 2 or more empty transfer frames with more=true followed by another empty transfer frame with (more=false and abort=true) or with just more=false
+    //    This case is similar to #1. We have no content in any of the buffers, we will reject this message after receive_complete=true. We will never route this
+    //    delivery, so core thread will not be involved
+    // 3. Exactly one empty transfer frame with more=false and abort=false
+    //    In this case, again there is still no content in any of the buffers, we will reject this message. Again, we will not route this message, so the core thread is not involved.
+    //
+    if (!delivery && !qd_message_has_data_in_content_or_pending_buffers(msg)) {
+        if (receive_complete) {
+            // There is no qdr_delivery_t (delivery) yet which means this message has not been routed yet (the first run of this function is not complete yet) and
+            // the message is fully received (receive_complete=true) but there is no content in the message buffers.
+            // This is only possible if there were one or more empty transfer frames.
+            // Since there is nothing in the message, we will reject it (AMQP message must have a non empty message body)
+            pn_link_flow(pn_link, 1);
+            if (pn_delivery_aborted(pnd))
+                qd_message_set_discard(msg, true);
+            pn_delivery_update(pnd, PN_REJECTED);
+            pn_delivery_settle(pnd);
+            // qd_message_free will free all the associated content buffers and also the content->pending buffer
+            qd_message_free(msg);
+            qd_log(router->log_source, QD_LOG_TRACE, "Message rejected due to empty message");
+        }
+
+        return false;
+    }
 
     if (!qd_message_oversize(msg)) {
         // message not rejected as oversize
@@ -855,6 +906,7 @@ static void deferred_AMQP_rx_handler(void *context, bool discard)
     if (!discard) {
         qd_link_t *qdl = safe_deref_qd_link_t(*safe_qdl);
         if (!!qdl) {
+            assert(qd_link_direction(qdl) == QD_INCOMING);
             qd_router_t *qdr = (qd_router_t*) qd_link_get_node_context(qdl);
             assert(qdr != 0);
             while (true) {
@@ -877,28 +929,38 @@ static void AMQP_disposition_handler(void* context, qd_link_t *link, pn_delivery
     qdr_delivery_t *delivery = qdr_node_delivery_qdr_from_pn(pnd);
 
     //
-    // It's important to not do any processing without a qdr_delivery.  When pre-settled
-    // multi-frame deliveries arrive, it's possible for the settlement to register before
-    // the whole message arrives.  Such premature settlement indications must be ignored.
-    //
-    if (!delivery || !qdr_delivery_receive_complete(delivery))
+    // It's important to not do any processing without a qdr_delivery.
+    if (!delivery)
         return;
 
-    //
-    // Update the disposition of the delivery
-    //
-    qdr_delivery_remote_state_updated(router->router_core, delivery,
-                                      pn_delivery_remote_state(pnd),
-                                      pn_delivery_settled(pnd),
-                                      qd_delivery_read_remote_state(pnd),
-                                      false);
+    uint64_t dstate = pn_delivery_remote_state(pnd);
+    bool settled = pn_delivery_settled(pnd);
 
     //
-    // If settled, close out the delivery
+    // When pre-settled multi-frame deliveries arrive, it's possible for the
+    // settlement to register before the whole message arrives.  Such premature
+    // settlement indications must be ignored.
     //
-    if (pn_delivery_settled(pnd)) {
-        qdr_node_disconnect_deliveries(router->router_core, link, delivery, pnd);
-        pn_delivery_settle(pnd);
+    if (settled && !qdr_delivery_receive_complete(delivery))
+        settled = false;
+
+    if (dstate || settled) {
+        //
+        // Update the disposition of the delivery
+        //
+        qdr_delivery_remote_state_updated(router->router_core, delivery,
+                                          dstate,
+                                          settled,
+                                          qd_delivery_read_remote_state(pnd),
+                                          false);
+
+        //
+        // If settled, close out the delivery
+        //
+        if (settled) {
+            qdr_node_disconnect_deliveries(router->router_core, link, delivery, pnd);
+            pn_delivery_settle(pnd);
+        }
     }
 }
 
@@ -1336,7 +1398,9 @@ static void AMQP_opened_handler(qd_router_t *router, qd_connection_t *conn, bool
                 " auth=%s user=%s container_id=%s",
                 connection_id, inbound ? "in" : "out", host, vhost ? vhost : "", encrypted ? proto : "no",
                         authenticated ? mech : "no", (char*) user, container);
+        sys_mutex_lock(conn->connector->lock);
         strcpy(conn->connector->conn_msg, conn_msg);
+        sys_mutex_unlock(conn->connector->lock);
     }
 }
 
@@ -1893,12 +1957,12 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
 
         // handle any delivery-state on the transfer e.g. transactional-state
         qd_delivery_state_t *dstate = qdr_delivery_take_local_delivery_state(dlv, &disposition);
-        if (dstate) {
-            qd_delivery_write_local_state(pdlv, disposition, dstate);
-            qd_delivery_state_free(dstate);
-        }
-        if (disposition)
+        if (disposition) {
+            if (dstate)
+                qd_delivery_write_local_state(pdlv, disposition, dstate);
             pn_delivery_update(pdlv, disposition);
+        }
+        qd_delivery_state_free(dstate);
 
         //
         // If the remote send settle mode is set to 'settled', we should settle the delivery on behalf of the receiver.
@@ -1914,20 +1978,15 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
     if (!pdlv)
         return 0;
 
-    bool restart_rx = false;
     bool q3_stalled = false;
 
     qd_message_t *msg_out = qdr_delivery_message(dlv);
 
-    qd_message_send(msg_out, qlink, qdr_link_strip_annotations_out(link), &restart_rx, &q3_stalled);
+    qd_message_send(msg_out, qlink, qdr_link_strip_annotations_out(link), &q3_stalled);
 
     if (q3_stalled) {
         qd_link_q3_block(qlink);
         qdr_link_stalled_outbound(link);
-    }
-
-    if (restart_rx) {
-        qd_link_restart_rx(qd_message_get_receiving_link(msg_out));
     }
 
     bool send_complete = qdr_delivery_send_complete(dlv);
@@ -1996,7 +2055,7 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
         link = (qd_link_t*) qdr_link_get_context(qlink);
         if (link) {
             qd_conn = qd_link_connection(link);
-            if (qd_conn == 0)
+             if (qd_conn == 0)
                 return;
         }
         else
@@ -2005,30 +2064,19 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
     else
         return;
 
-    //
-    // If the disposition has changed and the proton delivery has not already been settled, update the proton delivery.
-    //
-    if (disp != pn_delivery_remote_state(pnd) && !pn_delivery_settled(pnd)) {
-        qd_message_t *msg = qdr_delivery_message(dlv);
-
-        // handle propagation of delivery state from qdr_delivery_t to proton:
-        uint64_t ignore = 0;  // expect same value as 'disp'
+    if (disp && !pn_delivery_settled(pnd)) {
+        uint64_t ignore = 0;
         qd_delivery_state_t *dstate = qdr_delivery_take_local_delivery_state(dlv, &ignore);
-        assert(ignore == disp);
-        qd_delivery_write_local_state(pnd, disp, dstate);
-        qd_delivery_state_free(dstate);
+        assert(ignore == disp); // expected: since both are from the same dlv
 
-        if (disp == PN_MODIFIED)
-            pn_disposition_set_failed(pn_delivery_local(pnd), true);
-
-        //
-        // If the delivery is still arriving, don't push out the disposition change yet.
-        //
-        assert(qdr_delivery_disposition(dlv) == disp) ;
-        if (qd_message_receive_complete(msg)) {
-            if (disp != pn_delivery_local_state(pnd)) {
-                pn_delivery_update(pnd, disp);
-            }
+        // update if the disposition has changed or there is new state associated with it
+        if (disp != pn_delivery_local_state(pnd) || dstate) {
+            // handle propagation of delivery state from qdr_delivery_t to proton:
+            qd_delivery_write_local_state(pnd, disp, dstate);
+            pn_delivery_update(pnd, disp);
+            qd_delivery_state_free(dstate);
+            if (disp == PN_MODIFIED)  // @TODO(kgiusti) why do we need this???
+                pn_disposition_set_failed(pn_delivery_local(pnd), true);
         }
     }
 
@@ -2059,7 +2107,10 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
                 // and if it is blocked by Q2 holdoff, get the link rolling again.
                 //
                 qd_message_Q2_holdoff_disable(msg);
-                qd_link_restart_rx(link);
+
+                qd_link_t_sp *safe_ptr = NEW(qd_link_t_sp);
+                set_safe_ptr_qd_link_t(link, safe_ptr);
+                qd_connection_invoke_deferred(qd_conn, deferred_AMQP_rx_handler, safe_ptr);
             }
         }
     }
@@ -2131,10 +2182,13 @@ qdr_core_t *qd_router_core(qd_dispatch_t *qd)
 }
 
 
-// called when Q2 holdoff is deactivated so we can receive more message buffers
+// invoked by an I/O thread when enough buffers have been released deactivate
+// the Q2 block.  Note that this method will likely be running on a worker
+// thread that is not the same thread that "owns" the qd_link_t passed in.
 //
-void qd_link_restart_rx(qd_link_t *in_link)
+void qd_link_q2_restart_receive(qd_alloc_safe_ptr_t context)
 {
+    qd_link_t *in_link = (qd_link_t*) qd_alloc_deref_safe_ptr(&context);
     if (!in_link)
         return;
 
@@ -2142,8 +2196,8 @@ void qd_link_restart_rx(qd_link_t *in_link)
 
     qd_connection_t *in_conn = qd_link_connection(in_link);
     if (in_conn) {
-        qd_link_t_sp *safe_ptr = NEW(qd_link_t_sp);
-        set_safe_ptr_qd_link_t(in_link, safe_ptr);
+        qd_link_t_sp *safe_ptr = NEW(qd_alloc_safe_ptr_t);
+        *safe_ptr = context;  // use original to keep old sequence counter
         qd_connection_invoke_deferred(in_conn, deferred_AMQP_rx_handler, safe_ptr);
     }
 }

@@ -23,11 +23,12 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 from time import sleep
-import json, os
+import json
+import os
 import logging
 from threading import Timer
 from subprocess import PIPE, STDOUT
-from proton import Message, Timeout, Delivery, symbol, Condition
+from proton import Message, Delivery, symbol, Condition
 from system_test import Logger, TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR, TestTimeout
 from system_test import AsyncTestReceiver
 from system_test import AsyncTestSender
@@ -35,11 +36,14 @@ from system_test import get_inter_router_links
 from system_test import unittest
 from test_broker import FakeService
 
+from proton import Described, ulong
+
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, AtLeastOnce
 from proton.utils import BlockingConnection
 from qpid_dispatch.management.client import Node
 CONNECTION_PROPERTIES_UNICODE_STRING = {u'connection': u'properties', u'int_property': 6451}
+
 
 class TwoRouterTest(TestCase):
 
@@ -57,7 +61,7 @@ class TwoRouterTest(TestCase):
                 # Use the deprecated attributes helloInterval, raInterval, raIntervalFlux, remoteLsMaxAge
                 # The routers should still start successfully after using these deprecated entities.
                 ('router', {'remoteLsMaxAge': 60, 'helloInterval': 1, 'raInterval': 30, 'raIntervalFlux': 4,
-                            'mode': 'interior', 'id': 'QDR.%s'%name, 'allowUnsettledMulticast': 'yes'}),
+                            'mode': 'interior', 'id': 'QDR.%s' % name, 'allowUnsettledMulticast': 'yes'}),
                 ('listener', {'port': cls.tester.get_port(), 'stripAnnotations': 'no', 'linkCapacity': 500}),
 
                 ('listener', {'port': cls.tester.get_port(), 'stripAnnotations': 'no'}),
@@ -231,14 +235,14 @@ class TwoRouterTest(TestCase):
         # verify proper distribution is selected by wildcard
         addresses = [
             # (address, count of messages expected to be received)
-            ('a.b.c.d',   1), # closest 'a.b.c.d'
-            ('b.c.d',     2), # multi   '#.b.c.d'
-            ('f.a.b.c.d', 2), # multi   '#.b.c.d
-            ('a.c.d',     2), # multi   'a.*.d'
-            ('a/c/c/d',   1), # closest 'a/*/#.d
-            ('a/x/z/z/d', 1), # closest 'a/*/#.d
-            ('a/x/d',     1), # closest 'a.x.d'
-            ('a.x.e',     1), # balanced  ----
+            ('a.b.c.d',   1),  # closest 'a.b.c.d'
+            ('b.c.d',     2),  # multi   '#.b.c.d'
+            ('f.a.b.c.d', 2),  # multi   '#.b.c.d
+            ('a.c.d',     2),  # multi   'a.*.d'
+            ('a/c/c/d',   1),  # closest 'a/*/#.d
+            ('a/x/z/z/d', 1),  # closest 'a/*/#.d
+            ('a/x/d',     1),  # closest 'a.x.d'
+            ('a.x.e',     1),  # balanced  ----
             ('m.b.c.d',   2)  # multi   '*/b/c/d'
         ]
 
@@ -333,7 +337,7 @@ class TwoRouterTest(TestCase):
         identity = None
         passed = False
 
-        print ()
+        print()
 
         for output in outputs:
             if output.get('properties'):
@@ -391,7 +395,7 @@ class TwoRouterTest(TestCase):
                 rx.queue.get(timeout=TIMEOUT)
                 i -= 1
             except AsyncTestReceiver.Empty:
-                break;
+                break
         self.assertEqual(0, i)
         rx.stop()
 
@@ -409,7 +413,6 @@ class DeleteConnectionWithReceiver(MessagingHandler):
         self.success = False
         self.error = None
 
-
     def on_start(self, event):
         self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
 
@@ -421,11 +424,12 @@ class DeleteConnectionWithReceiver(MessagingHandler):
         self.mgmt_sender = event.container.create_sender(self.mgmt_conn)
         self.mgmt_receiver = event.container.create_receiver(self.mgmt_conn, None, dynamic=True)
         self.mgmt_receiver_1 = event.container.create_receiver(self.mgmt_conn,
-                                                             None,
-                                                             dynamic=True)
+                                                               None,
+                                                               dynamic=True)
         self.mgmt_receiver_2 = event.container.create_receiver(self.mgmt_conn,
-                                                             None,
-                                                             dynamic=True)
+                                                               None,
+                                                               dynamic=True)
+
     def timeout(self):
         self.error = "Timeout Expired: sent=%d, received=%d" % (self.n_sent, self.n_received)
         self.mgmt_conn.close()
@@ -466,7 +470,7 @@ class DeleteConnectionWithReceiver(MessagingHandler):
                                 u'operation': u'UPDATE'
                             }
                             request.body = {
-                                u'adminStatus':  u'deleted'}
+                                u'adminStatus': u'deleted'}
                             request.reply_to = self.mgmt_receiver_1.remote_source.address
                             self.mgmt_sender.send(request)
         elif event.receiver == self.mgmt_receiver_1:
@@ -656,6 +660,7 @@ class ExcessDeliveriesReleasedTest(MessagingHandler):
 
 class AttachOnInterRouterTest(MessagingHandler):
     """Expect an error when attaching a link to an inter-router listener"""
+
     def __init__(self, address):
         super(AttachOnInterRouterTest, self).__init__(prefetch=0)
         self.address = address
@@ -679,11 +684,11 @@ class AttachOnInterRouterTest(MessagingHandler):
         self.timer.cancel()
 
     def run(self):
-        logging.disable(logging.ERROR) # Hide expected log errors
+        logging.disable(logging.ERROR)  # Hide expected log errors
         try:
             Container(self).run()
         finally:
-            logging.disable(logging.NOTSET) # Restore to normal
+            logging.disable(logging.NOTSET)  # Restore to normal
 
 
 class DeliveriesInTransit(MessagingHandler):
@@ -716,7 +721,7 @@ class DeliveriesInTransit(MessagingHandler):
         self.receiver = event.container.create_receiver(self.conn2, self.dest)
 
     def on_sendable(self, event):
-        if self.n_sent <= self.num_msgs-1:
+        if self.n_sent <= self.num_msgs - 1:
             msg = Message(body="Hello World")
             self.sender.send(msg)
             self.n_sent += 1
@@ -729,7 +734,7 @@ class DeliveriesInTransit(MessagingHandler):
             self.conn2.close()
 
     def on_message(self, event):
-        self.received_count+=1
+        self.received_count += 1
         self.check_if_done()
 
     def run(self):
@@ -1184,7 +1189,6 @@ class MessageAnnotationsStripAddTraceTest(MessagingHandler):
         Container(self).run()
 
 
-
 class SenderSettlesFirst(MessagingHandler):
     def __init__(self, address1, address2):
         super(SenderSettlesFirst, self).__init__(auto_accept=False)
@@ -1547,27 +1551,38 @@ class PropagatedDisposition(MessagingHandler):
     """
     Verify outcomes are properly sent end-to-end
     """
+
     def __init__(self, test, address1, address2):
         super(PropagatedDisposition, self).__init__(auto_accept=False)
         self.address1 = address1
         self.address2 = address2
         self.settled = []
         self.test = test
+        self.sender = None
+        self.receiver = None
         self.sender_conn = None
         self.receiver_conn = None
         self.passed = False
+        self.dispos = ['accept', 'modified', 'reject']
+        self.dispos_index = 0
+        self.trackers = {}
+        self.addr = "unsettled/2"
 
     def on_start(self, event):
         self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
         self.sender_conn = event.container.connect(self.address1)
         self.receiver_conn = event.container.connect(self.address2)
-        addr = "unsettled/2"
-        self.sender = event.container.create_sender(self.sender_conn, addr)
-        self.receiver = event.container.create_receiver(self.receiver_conn, addr)
-        self.receiver.flow(3)
-        self.trackers = {}
-        for b in ['accept', 'modified', 'reject']:
-            self.trackers[self.sender.send(Message(body=b))] = b
+
+        self.receiver = event.container.create_receiver(self.receiver_conn,
+                                                        self.addr)
+        self.sender = event.container.create_sender(self.sender_conn,
+                                                    self.addr)
+
+    def on_sendable(self, event):
+        # This function is called when the sender has credit to send
+        if self.dispos_index < 3:
+            self.trackers[self.sender.send(Message(body=self.dispos[self.dispos_index]))] = self.dispos[self.dispos_index]
+            self.dispos_index += 1
 
     def timeout(self):
         unique_list = sorted(list(dict.fromkeys(self.settled)))
@@ -1642,6 +1657,7 @@ class PropagatedDispositionData(PropagatedDisposition):
     Verify that data associated with a terminal outcome is correctly passed end
     to end
     """
+
     def set_rejected_data(self, local_state):
         local_state.condition = Condition("name",
                                           str("description"),
@@ -1740,22 +1756,22 @@ class TwoRouterConnection(TestCase):
         cls.B_normal_port_2 = cls.tester.get_port()
 
         TwoRouterConnection.router('A', [
-                        ('router', {'mode': 'interior', 'id': 'A'}),
-                        ('listener', {'host': '0.0.0.0', 'role': 'normal',
-                                      'port': cls.tester.get_port()}),
-                        ]
-              )
+            ('router', {'mode': 'interior', 'id': 'A'}),
+            ('listener', {'host': '0.0.0.0', 'role': 'normal',
+                          'port': cls.tester.get_port()}),
+        ]
+        )
 
         TwoRouterConnection.router('B',
-                    [
-                        ('router', {'mode': 'interior', 'id': 'B'}),
-                        ('listener', {'host': '0.0.0.0', 'role': 'normal',
-                                      'port': cls.B_normal_port_1}),
-                        ('listener', {'host': '0.0.0.0', 'role': 'normal',
-                                      'port': cls.B_normal_port_2}),
+                                   [
+                                       ('router', {'mode': 'interior', 'id': 'B'}),
+                                       ('listener', {'host': '0.0.0.0', 'role': 'normal',
+                                                     'port': cls.B_normal_port_1}),
+                                       ('listener', {'host': '0.0.0.0', 'role': 'normal',
+                                                     'port': cls.B_normal_port_2}),
 
-                    ]
-               )
+                                   ]
+                                   )
 
     def address(self):
         return self.routers[0].addresses[0]
@@ -1828,6 +1844,7 @@ class TwoRouterConnection(TestCase):
 
         self.assertTrue(self.success)
 
+
 class PropagationTest(TestCase):
 
     inter_router_port = None
@@ -1840,7 +1857,7 @@ class PropagationTest(TestCase):
         def router(name, extra_config):
 
             config = [
-                ('router', {'mode': 'interior', 'id': 'QDR.%s'%name}),
+                ('router', {'mode': 'interior', 'id': 'QDR.%s' % name}),
 
                 ('listener', {'port': cls.tester.get_port()}),
 
@@ -1865,6 +1882,7 @@ class PropagationTest(TestCase):
         self.assertEqual(None, test.error)
         self.assertEqual(test.received, 2)
 
+
 class CreateReceiver(MessagingHandler):
     def __init__(self, connection, address):
         super(CreateReceiver, self).__init__()
@@ -1873,6 +1891,7 @@ class CreateReceiver(MessagingHandler):
 
     def on_timer_task(self, event):
         event.container.create_receiver(self.connection, self.address)
+
 
 class DelayedSend(MessagingHandler):
     def __init__(self, connection, address, message):
@@ -1883,6 +1902,7 @@ class DelayedSend(MessagingHandler):
 
     def on_timer_task(self, event):
         event.container.create_sender(self.connection, self.address).send(self.message)
+
 
 class MulticastTestClient(MessagingHandler):
     def __init__(self, router1, router2):
@@ -1992,7 +2012,7 @@ class StreamingLinkScrubberTest(TestCase):
                "-t", address,
                "-c", "1",
                "-sx"
-        ]
+               ]
         senders = [self.popen(cmd, env=env) for x in range(sender_count)]
 
         for tx in senders:
@@ -2032,7 +2052,7 @@ class TwoRouterExtensionStateTest(TestCase):
                 ('router', {'mode': 'interior',
                             'id': name}),
 
-                ('listener', {'port': cls.tester.get_port() }),
+                ('listener', {'port': cls.tester.get_port()}),
 
                 ('address', {'prefix': 'closest', 'distribution': 'closest'}),
                 ('address', {'prefix': 'balanced', 'distribution': 'balanced'}),
@@ -2058,9 +2078,6 @@ class TwoRouterExtensionStateTest(TestCase):
                                  ('connector', {'name': 'toRouterA',
                                                 'role': 'inter-router',
                                                 'port': inter_router_port}),
-
-
-
                                  ('listener', {'role': 'route-container',
                                                'host': '0.0.0.0',
                                                'port': service_port,
@@ -2074,7 +2091,6 @@ class TwoRouterExtensionStateTest(TestCase):
                                                 'direction': 'out'}),
                              ])
 
-
         cls.RouterA.wait_router_connected('RouterB')
         cls.RouterB.wait_router_connected('RouterA')
 
@@ -2087,16 +2103,16 @@ class TwoRouterExtensionStateTest(TestCase):
             This service saves any outcome and extension data that arrives in a
             transfer
             """
+
             def __init__(self, url, container_id=None):
                 self.remote_state = None
                 self.remote_data = None
                 super(MyExtendedService, self).__init__(url, container_id)
 
             def on_message(self, event):
-                self.remote_state = event.delivery.remote_state;
-                self.remote_data = event.delivery.remote.data;
+                self.remote_state = event.delivery.remote_state
+                self.remote_data = event.delivery.remote.data
                 super(MyExtendedService, self).on_message(event)
-
 
         fs = MyExtendedService(self.RouterB.addresses[1],
                                container_id="FakeService")
@@ -2148,12 +2164,86 @@ class TwoRouterExtensionStateTest(TestCase):
                 pass
         self.assertEqual([1, 2, 3], ext_data)
 
+    def test_04_test_transactional_state(self):
+        """
+        Verifies that the data sent in the state field of the disposition
+        is forwarded all the way back to the client.
+        """
+        TRANS_STATE = 52
+        RESPONSE_LOCAL_DATA = ["MyTxnIDResp",
+                               Described(ulong(Delivery.ACCEPTED), [])]
+
+        class MyExtendedService(FakeService):
+            """
+            This service receives a transfer frame and sends back a
+            disposition frame with a state field.
+            For example, this service sends a disposition with the
+            following state field
+            state=@transactional-state(52) [txn-id="MyTxnIDResp", outcome=@accepted(36) []]
+            """
+            def __init__(self, url, container_id=None):
+                self.remote_state = None
+                self.remote_data = None
+                super(MyExtendedService, self).__init__(url, container_id,
+                                                        auto_accept=False,
+                                                        auto_settle=False)
+
+            def on_message(self, event):
+                self.remote_state = event.delivery.remote_state
+                self.remote_data = event.delivery.remote.data
+                if self.remote_state == TRANS_STATE and self.remote_data == ['MyTxnID']:
+                    # This will send a disposition with
+                    # state=@transactional-state(52) [txn-id="MyTxnIDResp", outcome=@accepted(36) []]
+                    # We will make sure that this state was received
+                    # by the sender.
+                    event.delivery.local.data = RESPONSE_LOCAL_DATA
+                    event.delivery.update(TRANS_STATE)
+                event.delivery.settle()
+
+        # Start the service that connects to the route-container listener
+        # on the router with container_id="FakeService"
+        fs = MyExtendedService(self.RouterB.addresses[1],
+                               container_id="FakeService")
+
+        self.RouterA.wait_address("RoutieMcRouteFace", remotes=1, count=2)
+
+        class MyTransactionStateSender(AsyncTestSender):
+            def on_sendable(self, event):
+                # Send just one delivery with a transactional state.
+                if self.sent < self.total:
+                    self.sent += 1
+                    dlv = event.sender.delivery(str(self.sent))
+                    dlv.local.data = ["MyTxnID"]
+                    # this will send a transfer frame to the router with
+                    # state=@transactional-state(52) [txn-id="MyTxnID"]
+                    dlv.update(TRANS_STATE)
+                    event.sender.stream(self._message.encode())
+                    event.sender.advance()
+
+            def on_settled(self, event):
+                self.remote_state = event.delivery.remote_state
+                self.remote_data = event.delivery.remote.data
+                if self.remote_state == TRANS_STATE and \
+                        self.remote_data == RESPONSE_LOCAL_DATA:
+                    # This means that the router is passing the state it
+                    # received from the service all the way back to the
+                    # client. This would not happen without the fix
+                    # for DISPATCH-2040
+                    self.accepted += 1
+                    self.test_passed = True
+
+        tx = MyTransactionStateSender(self.RouterA.addresses[0], "RoutieMcRouteFace")
+        tx.wait()
+        fs.join()
+        self.assertTrue(tx.test_passed)
+
 
 class MyExtendedSender(AsyncTestSender):
     """
     This sender sets a non-terminal outcome and data on the outgoing
     transfer
     """
+
     def on_sendable(self, event):
         if self.sent < self.total:
             dlv = event.sender.delivery(str(self.sent))
@@ -2169,6 +2259,7 @@ class MyExtendedReceiver(AsyncTestReceiver):
     This receiver stores any remote delivery state that arrives with a message
     transfer
     """
+
     def __init__(self, *args, **kwargs):
         self.remote_states = []
         super(MyExtendedReceiver, self).__init__(*args, **kwargs)
@@ -2194,6 +2285,7 @@ class ExtensionStateTester(MessagingHandler):
     extension state data.  The sender expects to find this new state associated
     with its delivery.
     """
+
     def __init__(self, ingress_router, egress_router, address):
         super(ExtensionStateTester, self).__init__(auto_settle=False,
                                                    auto_accept=False)
@@ -2221,6 +2313,7 @@ class ExtensionStateTester(MessagingHandler):
         self._receiver = event.container.create_receiver(self._recvr_conn,
                                                          source=self._address,
                                                          name="ExtensionReceiver")
+
     def _done(self, error=None):
         self.error = error or self.error
         self._sender.close()

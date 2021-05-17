@@ -18,26 +18,29 @@
  */
 
 #include "python_private.h"
-#include <qpid/dispatch/python_embedded.h>
-#include <qpid/dispatch.h>
-#include <qpid/dispatch/server.h>
-#include <qpid/dispatch/ctools.h>
-#include <qpid/dispatch/static_assert.h>
-#include <qpid/dispatch/alloc.h>
-#include <qpid/dispatch/discriminator.h>
-#include <stdlib.h>
-#include <inttypes.h>
+#include "qpid/dispatch/python_embedded.h"
+
+#include "qpid/dispatch.h"
 
 #include "config.h"
 #include "dispatch_private.h"
-#include "http.h"
-#include "log_private.h"
-#include "router_private.h"
-#include "message_private.h"
-#include "policy.h"
 #include "entity.h"
 #include "entity_cache.h"
+#include "http.h"
+#include "log_private.h"
+#include "message_private.h"
+#include "policy.h"
+#include "router_private.h"
+
+#include "qpid/dispatch/alloc.h"
+#include "qpid/dispatch/ctools.h"
+#include "qpid/dispatch/discriminator.h"
+#include "qpid/dispatch/server.h"
+#include "qpid/dispatch/static_assert.h"
+
 #include <dlfcn.h>
+#include <inttypes.h>
+#include <stdlib.h>
 
 /**
  * Private Function Prototypes
@@ -360,6 +363,10 @@ static void qd_dispatch_set_router_area(qd_dispatch_t *qd, char *_area) {
 void qd_dispatch_free(qd_dispatch_t *qd)
 {
     if (!qd) return;
+
+    /* Stop HTTP threads immediately */
+    qd_http_server_free(qd_server_http(qd->server));
+
     free(qd->sasl_config_path);
     free(qd->sasl_config_name);
     qd_connection_manager_free(qd->connection_manager);

@@ -19,9 +19,8 @@
 
 #include "http1_private.h"
 
-#include <stdio.h>
 #include <inttypes.h>
-
+#include <stdio.h>
 
 //
 // This file contains code for the HTTP/1.x protocol adaptor.  This file
@@ -83,16 +82,16 @@ void qdr_http1_connection_free(qdr_http1_connection_t *hconn)
 {
     if (hconn) {
         pn_raw_connection_t *rconn = 0;
+        qd_timer_t *timer = 0;
 
         // prevent core from activating this connection while it is being torn
         // down. Also prevent timer callbacks from running. see
-        // _core_connection_activate_CT, and _do_reconnect/_do_activate in
-        // http1_server.c
+        // _core_connection_activate_CT and _do_reconnect in http1_server.c
         //
         sys_mutex_lock(qdr_http1_adaptor->lock);
         {
             DEQ_REMOVE(qdr_http1_adaptor->connections, hconn);
-            qd_timer_free(hconn->server.reconnect_timer);
+            timer = hconn->server.reconnect_timer;
             hconn->server.reconnect_timer = 0;
             rconn = hconn->raw_conn;
             hconn->raw_conn = 0;
@@ -106,6 +105,10 @@ void qdr_http1_connection_free(qdr_http1_connection_t *hconn)
         }
         sys_mutex_unlock(qdr_http1_adaptor->lock);
 
+        // must free timer outside of lock since callback
+        // attempts to take lock:
+        qd_timer_free(timer);
+
         // cleanup outstanding requests
         //
         if (hconn->type == HTTP1_CONN_SERVER)
@@ -118,6 +121,8 @@ void qdr_http1_connection_free(qdr_http1_connection_t *hconn)
             pn_raw_connection_set_context(rconn, 0);
             pn_raw_connection_close(rconn);
         }
+
+        sys_atomic_destroy(&hconn->q2_restart);
 
         free(hconn->cfg.host);
         free(hconn->cfg.port);
@@ -412,6 +417,25 @@ void qdr_http1_free_written_buffers(qdr_http1_connection_t *hconn)
             }
         }
     }
+}
+
+
+// Per-message callback to resume receiving after Q2 is unblocked on the
+// incoming link (to HTTP app).  This routine runs on another I/O thread so it
+// must be thread safe!
+//
+void qdr_http1_q2_unblocked_handler(const qd_alloc_safe_ptr_t context)
+{
+    // prevent the hconn from being deleted while running:
+    sys_mutex_lock(qdr_http1_adaptor->lock);
+
+    qdr_http1_connection_t *hconn = (qdr_http1_connection_t*)qd_alloc_deref_safe_ptr(&context);
+    if (hconn && hconn->raw_conn) {
+        sys_atomic_set(&hconn->q2_restart, 1);
+        pn_raw_connection_wake(hconn->raw_conn);
+    }
+
+    sys_mutex_unlock(qdr_http1_adaptor->lock);
 }
 
 
