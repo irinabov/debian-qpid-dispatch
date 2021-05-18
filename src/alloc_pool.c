@@ -18,19 +18,25 @@
  */
 
 #include <Python.h>
-#include <qpid/dispatch/alloc.h>
-#include <qpid/dispatch/ctools.h>
-#include <qpid/dispatch/log.h>
-#include <memory.h>
-#include <inttypes.h>
-#include <stdio.h>
+
+#include "qpid/dispatch/alloc_pool.h"
+
+#include "config.h"
 #include "entity.h"
 #include "entity_cache.h"
-#include "config.h"
+
+#include "qpid/dispatch/alloc.h"
+#include "qpid/dispatch/ctools.h"
+#include "qpid/dispatch/log.h"
+
+#include <inttypes.h>
+#include <memory.h>
+#include <stdio.h>
 
 #ifdef QD_MEMORY_DEBUG
-#include <execinfo.h>
 #include "log_private.h"
+
+#include <execinfo.h>
 #endif
 
 const char *QD_ALLOCATOR_TYPE = "allocator";
@@ -77,14 +83,13 @@ DEQ_DECLARE(qd_alloc_type_t, qd_alloc_type_list_t);
 // Be a Good Citizen when adding unexpected leaks to this list and include the
 // corresponding JIRA in a comment!
 //
+// When nirvana is reached and we have fixed all of these then please remove
+// -DQD_MEMORY_DEBUG=1 from RuntimeChecks.cmake and .travis.yml when doing
+// RUNTIME=asan testing
+//
 #if QD_MEMORY_STATS
 static const char *leaking_types[] = {
-    // DISPATCH-1679:
-    "qd_timer_t", "qd_connector_t",
-
     "qd_hash_handle_t",       // DISPATCH-1696
-    "qdr_conn_identifier_t",  // DISPATCH-1697
-    "qdr_connection_ref_t",   // DISPATCH-1698
 
     // system_tests_edge_router (centos7)
     // DISPATCH-1699
@@ -92,6 +97,7 @@ static const char *leaking_types[] = {
     "qd_message_t",
     "qd_message_content_t",
     "qdr_delivery_t",
+    "qd_delivery_state_t", // DISPATCH-2082: See comments in JIRA
     "qd_link_ref_t",
 
     // system_tests_priority (centos7)
@@ -100,7 +106,6 @@ static const char *leaking_types[] = {
     "qd_iterator_t",
     "qdr_action_t",
     "qdr_field_t",
-    "qdr_link_work_t",
     "qd_buffer_t",
     "qd_bitmask_t",
 

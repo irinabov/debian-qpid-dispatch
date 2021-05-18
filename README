@@ -23,21 +23,6 @@ packages installed:
 - asciidoc (for building docs)
 - asciidoctor (for building docs)
 
-The unit tests are implemented using Python's unittest library.
-Python versions prior to 2.7 do not have this library.  In
-order to run the unit tests using older versions of python the
-"unittest2" module must be installed.
-
-This may be available from your Linux distribution or via pip:
-
-  pip install unittest2
-
-The command line arguments parsing is done using Python's argparse library.
-Python versions prior to 2.7 do not have this library. Similar to what happend
-with unittest2, this may be fixed via pip:
-
-  pip install argparse
-
 Dispatch will not build on Windows.
 
 To build formatted documentation (man pages, HTML, PDF) see the requirements in doc/README
@@ -94,6 +79,11 @@ you must also install the following dependency:
 And run the following command to generate grpc code:
   - python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. ./friendship.proto
 
+The system tests are implemented using Python's unittest library.  This library is
+used to run the tests by default.  The tests can be also run using `xmlrunner` or `pytest`.
+Pytest can generate a JUnit-compatible XML report containing an entry for each Python test method.
+After running the tests, all XML reports will be found under tests/junitxmls in your build directory:
+  - cmake .. -DPYTHON_TEST_COMMAND='-m;pytest;-vs;--junit-xml=junitxmls/${py_test_module}.xml;--pyargs;${py_test_module}'
 
 Test Suite Code Coverage (GNU tools only)
 =========================================
@@ -199,10 +189,17 @@ Applicable only to GCC versions >= 5.4 and Clang versions >= 6.0.
 
 To enable the address sanitizer set the RUNTIME_CHECK build flag to "asan":
 
-cmake .. -DRUNTIME_CHECK=asan
+cmake .. -DCMAKE_C_FLAGS=-DQD_MEMORY_DEBUG -DRUNTIME_CHECK=asan
+
+On Aarch64, a hardware-assisted address sanitizer is enabled with "hwasan":
+
+cmake .. -DCMAKE_C_FLAGS=-DQD_MEMORY_DEBUG -DRUNTIME_CHECK=hwasan
 
 The ASAN (libasan) and UBSAN (libubsan) libraries must be installed in
 order to use this option.
+
+Memory pool will produce false leak reports unless QD_MEMORY_DEBUG
+is also defined.
 
 False positive leak errors can be suppressed via the lsan.supp file in
 the tests directory.

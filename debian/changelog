@@ -1,3 +1,9 @@
+qpid-dispatch (1.16.0-1qpid+focal1) focal; urgency=medium
+
+  * Rebased to Dispatch 1.16.0
+
+ -- Kim van der Riet <kvanderr@redhat.com>  Tue, 18 May 2021 09:38:03 -0400
+
 qpid-dispatch (1.15.0-1qpid+focal1) focal; urgency=medium
 
   * Rebased to Dispatch 1.15.0 

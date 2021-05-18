@@ -17,26 +17,30 @@
  * under the License.
  */
 
-#include <qpid/dispatch/ctools.h>
-#include <qpid/dispatch/error.h>
-#include <qpid/dispatch/amqp.h>
-#include <qpid/dispatch/threading.h>
-#include <qpid/dispatch/iterator.h>
-#include <qpid/dispatch/log.h>
-#include <qpid/dispatch/buffer.h>
-#include <proton/object.h>
-#include "message_private.h"
+#include "qpid/dispatch/message.h"
+
+#include "aprintf.h"
 #include "compose_private.h"
 #include "connection_manager_private.h"
-#include "aprintf.h"
+#include "message_private.h"
 #include "policy.h"
-#include <string.h>
-#include <ctype.h>
-#include <stdio.h>
-#include <limits.h>
-#include <time.h>
-#include <inttypes.h>
+
+#include "qpid/dispatch/amqp.h"
+#include "qpid/dispatch/buffer.h"
+#include "qpid/dispatch/ctools.h"
+#include "qpid/dispatch/error.h"
+#include "qpid/dispatch/iterator.h"
+#include "qpid/dispatch/log.h"
+#include "qpid/dispatch/threading.h"
+
+#include <proton/object.h>
+
 #include <assert.h>
+#include <ctype.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
 
 #define LOCK   sys_mutex_lock
 #define UNLOCK sys_mutex_unlock
@@ -1036,6 +1040,11 @@ void qd_message_free(qd_message_t *in_msg)
         // zero we can free it.
         //
         LOCK(content->lock);
+
+        // DISPATCH-2099: ensure all outstanding stream_data items associated
+        // with this message have been returned since the underlying buffers
+        // may be released
+        assert(DEQ_IS_EMPTY(msg->stream_data_list));
 
         const bool was_blocked = !qd_message_Q2_holdoff_should_unblock(in_msg);
         qd_buffer_t *buf = msg->cursor.buffer;
@@ -2350,6 +2359,23 @@ void qd_message_compose_4(qd_message_t *msg, qd_composed_field_t *field1, qd_com
     DEQ_APPEND(content->buffers, (*field3_buffers));
 }
 
+void qd_message_compose_5(qd_message_t *msg, qd_composed_field_t *field1, qd_composed_field_t *field2, qd_composed_field_t *field3, qd_composed_field_t *field4, bool receive_complete)
+{
+    qd_message_content_t *content        = MSG_CONTENT(msg);
+    content->receive_complete            = receive_complete;
+    qd_buffer_list_t     *field1_buffers = qd_compose_buffers(field1);
+    qd_buffer_list_t     *field2_buffers = qd_compose_buffers(field2);
+    qd_buffer_list_t     *field3_buffers = qd_compose_buffers(field3);
+    qd_buffer_list_t     *field4_buffers = qd_compose_buffers(field4);
+
+    content->buffers = *field1_buffers;
+    DEQ_INIT(*field1_buffers);
+    DEQ_APPEND(content->buffers, (*field2_buffers));
+    DEQ_APPEND(content->buffers, (*field3_buffers));
+    DEQ_APPEND(content->buffers, (*field4_buffers));
+
+}
+
 
 int qd_message_extend(qd_message_t *msg, qd_composed_field_t *field, bool *q2_blocked)
 {
@@ -2513,6 +2539,10 @@ int qd_message_stream_data_buffers(qd_message_stream_data_t *stream_data, pn_raw
     size_t       data_offset  = stream_data->payload.offset;
     size_t       payload_len  = stream_data->payload.length;
 
+    qd_message_pvt_t    *owning_message = stream_data->owning_message;
+
+
+    LOCK(owning_message->content->lock);
     //
     // Skip the buffer offset
     //
@@ -2543,6 +2573,7 @@ int qd_message_stream_data_buffers(qd_message_stream_data_t *stream_data, pn_raw
         buffer = DEQ_NEXT(buffer);
         idx++;
     }
+    UNLOCK(owning_message->content->lock);
 
     return idx;
 }

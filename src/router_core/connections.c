@@ -17,18 +17,19 @@
  * under the License.
  */
 
-#include <qpid/dispatch/router_core.h>
-#include <qpid/dispatch/discriminator.h>
-#include <qpid/dispatch/static_assert.h>
-#include "route_control.h"
-#include <qpid/dispatch/amqp.h>
-#include <stdio.h>
-#include <strings.h>
-#include <inttypes.h>
-#include "router_core_private.h"
 #include "core_link_endpoint.h"
 #include "delivery.h"
+#include "route_control.h"
+#include "router_core_private.h"
 
+#include "qpid/dispatch/amqp.h"
+#include "qpid/dispatch/discriminator.h"
+#include "qpid/dispatch/router_core.h"
+#include "qpid/dispatch/static_assert.h"
+
+#include <inttypes.h>
+#include <stdio.h>
+#include <strings.h>
 
 static void qdr_connection_opened_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_connection_closed_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
@@ -383,6 +384,7 @@ int qdr_connection_process(qdr_connection_t *conn)
             sys_mutex_lock(conn->work_lock);
             link_work = DEQ_HEAD(link->work_list);
             if (link_work) {
+                // link_work ref transfered to local link_work
                 DEQ_REMOVE_HEAD(link->work_list);
                 link_work->processing = true;
             }
@@ -437,14 +439,15 @@ int qdr_connection_process(qdr_connection_t *conn)
 
                 sys_mutex_lock(conn->work_lock);
                 if (link_work->work_type == QDR_LINK_WORK_DELIVERY && link_work->value > 0 && !link->detach_received) {
+                    // link_work ref transfered from link_work to work_list
                     DEQ_INSERT_HEAD(link->work_list, link_work);
                     link_work->processing = false;
                     link_work = 0; // Halt work processing
                 } else {
-                    qdr_error_free(link_work->error);
-                    free_qdr_link_work_t(link_work);
+                    qdr_link_work_release(link_work);
                     link_work = DEQ_HEAD(link->work_list);
                     if (link_work) {
+                        // link_work ref transfered to local link_work
                         DEQ_REMOVE_HEAD(link->work_list);
                         link_work->processing = true;
                     }
@@ -610,6 +613,15 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
     link->strip_annotations_in  = conn->strip_annotations_in;
     link->strip_annotations_out = conn->strip_annotations_out;
 
+    //
+    // Adjust the delivery's identity
+    //
+
+    if (initial_delivery) {
+        initial_delivery->conn_id = link->conn->identity;
+        initial_delivery->link_id = link->identity;
+    }
+
     if      (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_ROUTER_CONTROL))
         link->link_type = QD_LINK_CONTROL;
     else if (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_ROUTER_DATA))
@@ -718,6 +730,8 @@ void qdr_link_enqueue_work_CT(qdr_core_t      *core,
     qdr_connection_t *conn = link->conn;
 
     sys_mutex_lock(conn->work_lock);
+    // expect: caller transfers refcount:
+    assert(sys_atomic_get(&work->ref_count) > 0);
     DEQ_INSERT_TAIL(link->work_list, work);
     qdr_add_link_ref(&conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
     sys_mutex_unlock(conn->work_lock);
@@ -737,7 +751,7 @@ static void qdr_generate_link_name(const char *label, char *buffer, size_t lengt
 }
 
 
-static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link)
+void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link, bool on_shutdown)
 {
     //
     // Clean up the lists of deliveries on this link
@@ -757,6 +771,10 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
         if (d->presettled)
             core->dropped_presettled_deliveries++;
         d->where = QDR_DELIVERY_NOWHERE;
+        if (on_shutdown)
+            d->tracking_addr = 0;
+        qdr_link_work_release(d->link_work);
+        d->link_work = 0;
         d = DEQ_NEXT(d);
     }
 
@@ -765,6 +783,10 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
     while (d) {
         assert(d->where == QDR_DELIVERY_IN_UNSETTLED);
         d->where = QDR_DELIVERY_NOWHERE;
+        qdr_link_work_release(d->link_work);
+        d->link_work = 0;
+        if (on_shutdown)
+            d->tracking_addr = 0;
         d = DEQ_NEXT(d);
     }
 
@@ -773,6 +795,10 @@ static void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *c
     while (d) {
         assert(d->where == QDR_DELIVERY_IN_SETTLED);
         d->where = QDR_DELIVERY_NOWHERE;
+        qdr_link_work_release(d->link_work);
+        d->link_work = 0;
+        if (on_shutdown)
+            d->tracking_addr = 0;
         d = DEQ_NEXT(d);
     }
     sys_mutex_unlock(conn->work_lock);
@@ -953,7 +979,7 @@ static void qdr_link_abort_undelivered_CT(qdr_core_t *core, qdr_link_t *link)
 static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link, const char *log_text)
 {
     //
-    // Remove the link from the master list of links and possibly the streaming
+    // Remove the link from the overall list of links and possibly the streaming
     // link pool
     //
     DEQ_REMOVE(core->open_links, link);
@@ -1001,15 +1027,14 @@ static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_li
     qdr_link_work_t *link_work = DEQ_HEAD(work_list);
     while (link_work) {
         DEQ_REMOVE_HEAD(work_list);
-        qdr_error_free(link_work->error);
-        free_qdr_link_work_t(link_work);
+        qdr_link_work_release(link_work);
         link_work = DEQ_HEAD(work_list);
     }
 
     //
     // Clean up any remaining deliveries
     //
-    qdr_link_cleanup_deliveries_CT(core, conn, link);
+    qdr_link_cleanup_deliveries_CT(core, conn, link, false);
 
     //
     // Remove all references to this link in the connection's and owning
@@ -1168,9 +1193,9 @@ void qdr_link_outbound_detach_CT(qdr_core_t *core, qdr_link_t *link, qdr_error_t
     //
     // tell the I/O thread to do the detach
     //
-    qdr_link_work_t *work = new_qdr_link_work_t();
-    ZERO(work);
-    work->work_type  = ++link->detach_count == 1 ? QDR_LINK_WORK_FIRST_DETACH : QDR_LINK_WORK_SECOND_DETACH;
+
+    link->detach_count += 1;
+    qdr_link_work_t *work = qdr_link_work(link->detach_count == 1 ? QDR_LINK_WORK_FIRST_DETACH : QDR_LINK_WORK_SECOND_DETACH);
     work->close_link = close;
 
     if (error)
@@ -1443,6 +1468,7 @@ qdr_link_t *qdr_connection_new_streaming_link_CT(qdr_core_t *core, qdr_connectio
 
     if (out_link) {
         out_link->streaming = true;
+        out_link->priority = 4;
         if (!conn->has_streaming_links) {
             qdr_add_connection_ref(&core->streaming_connections, conn);
             conn->has_streaming_links = true;
@@ -1622,6 +1648,7 @@ static void qdr_link_process_initial_delivery_CT(qdr_core_t *core, qdr_link_t *l
         case QDR_DELIVERY_IN_UNDELIVERED:
             DEQ_REMOVE(old_link->undelivered, dlv);
             dlv->where = QDR_DELIVERY_NOWHERE;
+            qdr_link_work_release(dlv->link_work);
             dlv->link_work = 0;
             // expect: caller holds reference to dlv (in action)
             assert(sys_atomic_get(&dlv->ref_count) > 1);
@@ -1644,12 +1671,6 @@ static void qdr_link_process_initial_delivery_CT(qdr_core_t *core, qdr_link_t *l
         }
         sys_mutex_unlock(old_link->conn->work_lock);
     }
-
-    //
-    // Adjust the delivery's identity
-    //
-    dlv->conn_id = link->conn->identity;
-    dlv->link_id = link->identity;
 
     //
     // Enqueue the delivery onto the new link's undelivered list
@@ -1945,8 +1966,6 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
         return;
     }
 
-    qdr_address_t *addr = link->owning_addr;
-
     if (link->detach_received)
         return;
 
@@ -1956,123 +1975,123 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
     if (link->core_endpoint) {
         qdrc_endpoint_do_detach_CT(core, link->core_endpoint, error, dt);
         return;
+    }
 
+    //
+    // ensure a pooled link is no longer available for use
+    //
+    if (link->streaming) {
+        if (link->in_streaming_pool) {
+            DEQ_REMOVE_N(STREAMING_POOL, conn->streaming_link_pool, link);
+            link->in_streaming_pool = false;
+        }
+    }
+
+    //
+    // For routed links, propagate the detach
+    //
+    if (link->connected_link) {
+        //
+        // If the connected link is outgoing and there is a delivery on the connected link's undelivered
+        // list that is not receive-complete, we must flag that delivery as aborted or it will forever
+        // block the propagation of the detach.
+        //
+        if (link->connected_link->link_direction == QD_OUTGOING)
+            qdr_link_abort_undelivered_CT(core, link->connected_link);
+
+        if (dt != QD_LOST)
+            qdr_link_outbound_detach_CT(core, link->connected_link, error, QDR_CONDITION_NONE, dt == QD_CLOSED);
+        else {
+            qdr_link_outbound_detach_CT(core, link->connected_link, 0, QDR_CONDITION_ROUTED_LINK_LOST, !link->terminus_survives_disconnect);
+            qdr_error_free(error);
+        }
+
+        //
+        // If the link is completely detached, release its resources
+        //
+        if (link->detach_send_done)
+            qdr_link_cleanup_protected_CT(core, conn, link, "Link detached");
+
+        return;
+    }
+
+    //
+    // For auto links, switch the auto link to failed state and record the error
+    //
+    if (link->auto_link) {
+        link->auto_link->link  = 0;
+        link->auto_link->state = QDR_AUTO_LINK_STATE_FAILED;
+        free(link->auto_link->last_error);
+        link->auto_link->last_error = qdr_error_description(error);
+
+        //
+        // The auto link has failed. Periodically retry setting up the auto link until
+        // it succeeds.
+        //
+        qdr_route_auto_link_detached_CT(core, link);
+    }
+
+
+
+    qdr_address_t *addr = link->owning_addr;
+    if (addr)
+        addr->ref_count++;
+
+    if (link->link_direction == QD_INCOMING) {
+        qdrc_event_link_raise(core, QDRC_EVENT_LINK_IN_DETACHED, link);
+        //
+        // Handle incoming link cases
+        //
+        switch (link->link_type) {
+        case QD_LINK_ENDPOINT:
+            if (addr) {
+                //
+                // Drain the undelivered list to ensure deliveries don't get dropped by a detach.
+                //
+                qdr_drain_inbound_undelivered_CT(core, link, addr);
+
+                //
+                // Unbind the address and the link.
+                //
+                qdr_core_unbind_address_link_CT(core, addr, link);
+
+                //
+                // If this is an edge data link, raise a link event to indicate its detachment.
+                //
+                if (link->conn->role == QDR_ROLE_EDGE_CONNECTION)
+                    qdrc_event_link_raise(core, QDRC_EVENT_LINK_EDGE_DATA_DETACHED, link);
+            }
+            break;
+
+        case QD_LINK_CONTROL:
+            break;
+
+        case QD_LINK_ROUTER:
+            break;
+
+        case QD_LINK_EDGE_DOWNLINK:
+            break;
+        }
     } else {
-
         //
-        // ensure a pooled link is no longer available for use
+        // Handle outgoing link cases
         //
-        if (link->streaming) {
-            if (link->in_streaming_pool) {
-                DEQ_REMOVE_N(STREAMING_POOL, conn->streaming_link_pool, link);
-                link->in_streaming_pool = false;
+        qdrc_event_link_raise(core, QDRC_EVENT_LINK_OUT_DETACHED, link);
+        switch (link->link_type) {
+        case QD_LINK_ENDPOINT:
+        case QD_LINK_EDGE_DOWNLINK:
+            if (addr) {
+                qdr_core_unbind_address_link_CT(core, addr, link);
             }
-        }
+            break;
 
-        //
-        // For routed links, propagate the detach
-        //
-        if (link->connected_link) {
-            //
-            // If the connected link is outgoing and there is a delivery on the connected link's undelivered
-            // list that is not receive-complete, we must flag that delivery as aborted or it will forever
-            // block the propagation of the detach.
-            //
-            if (link->connected_link->link_direction == QD_OUTGOING)
-                qdr_link_abort_undelivered_CT(core, link->connected_link);
+        case QD_LINK_CONTROL:
+            qdr_detach_link_control_CT(core, conn, link);
+            break;
 
-            if (dt != QD_LOST)
-                qdr_link_outbound_detach_CT(core, link->connected_link, error, QDR_CONDITION_NONE, dt == QD_CLOSED);
-            else {
-                qdr_link_outbound_detach_CT(core, link->connected_link, 0, QDR_CONDITION_ROUTED_LINK_LOST, !link->terminus_survives_disconnect);
-                qdr_error_free(error);
-            }
-
-            //
-            // If the link is completely detached, release its resources
-            //
-            if (link->detach_send_done)
-                qdr_link_cleanup_protected_CT(core, conn, link, "Link detached");
-
-            return;
-        }
-
-        //
-        // For auto links, switch the auto link to failed state and record the error
-        //
-        if (link->auto_link) {
-            link->auto_link->link  = 0;
-            link->auto_link->state = QDR_AUTO_LINK_STATE_FAILED;
-            free(link->auto_link->last_error);
-            link->auto_link->last_error = qdr_error_description(error);
-
-            //
-            // The auto link has failed. Periodically retry setting up the auto link until
-            // it succeeds.
-            //
-            qdr_route_auto_link_detached_CT(core, link);
-        }
-
-        if (link->link_direction == QD_INCOMING) {
-            qdrc_event_link_raise(core, QDRC_EVENT_LINK_IN_DETACHED, link);
-            //
-            // Handle incoming link cases
-            //
-            switch (link->link_type) {
-            case QD_LINK_ENDPOINT:
-                if (addr) {
-                    //
-                    // Drain the undelivered list to ensure deliveries don't get dropped by a detach.
-                    //
-                    qdr_drain_inbound_undelivered_CT(core, link, addr);
-
-                    //
-                    // Unbind the address and the link.
-                    //
-                    addr->ref_count++;
-                    qdr_core_unbind_address_link_CT(core, addr, link);
-                    addr->ref_count--;
-
-                    //
-                    // If this is an edge data link, raise a link event to indicate its detachment.
-                    //
-                    if (link->conn->role == QDR_ROLE_EDGE_CONNECTION)
-                        qdrc_event_link_raise(core, QDRC_EVENT_LINK_EDGE_DATA_DETACHED, link);
-                }
-                break;
-
-            case QD_LINK_CONTROL:
-                break;
-
-            case QD_LINK_ROUTER:
-                break;
-
-            case QD_LINK_EDGE_DOWNLINK:
-                break;
-            }
-        } else {
-            //
-            // Handle outgoing link cases
-            //
-            qdrc_event_link_raise(core, QDRC_EVENT_LINK_OUT_DETACHED, link);
-            switch (link->link_type) {
-            case QD_LINK_ENDPOINT:
-            case QD_LINK_EDGE_DOWNLINK:
-                if (addr) {
-                    addr->ref_count++;
-                    qdr_core_unbind_address_link_CT(core, addr, link);
-                    addr->ref_count--;
-                }
-                break;
-
-            case QD_LINK_CONTROL:
-                qdr_detach_link_control_CT(core, conn, link);
-                break;
-
-            case QD_LINK_ROUTER:
-                qdr_detach_link_data_CT(core, conn, link);
-                break;
-            }
+        case QD_LINK_ROUTER:
+            qdr_detach_link_data_CT(core, conn, link);
+            break;
         }
     }
 
@@ -2082,7 +2101,7 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
         //
         // Handle the disposition of any deliveries that remain on the link
         //
-        qdr_link_cleanup_deliveries_CT(core, conn, link);
+        qdr_link_cleanup_deliveries_CT(core, conn, link, false);
 
         //
         // If the detach occurred via protocol, send a detach back.
@@ -2103,8 +2122,10 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
     // If there was an address associated with this link, check to see if any address-related
     // cleanup has to be done.
     //
-    if (addr)
+    if (addr) {
+        addr->ref_count--;
         qdr_check_addr_CT(core, addr);
+    }
 
     if (error)
         qdr_error_free(error);
