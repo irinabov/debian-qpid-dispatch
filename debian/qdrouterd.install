@@ -3,7 +3,7 @@ etc/sasl2/qdrouterd.conf
 usr/sbin/qdrouterd
 #usr/share/man/man5/qdrouterd.conf.5
 #usr/share/man/man8/qdrouterd.8
-usr/lib/*/libqpid-dispatch.so
+#usr/lib/*/libqpid-dispatch.so
 usr/lib/qpid-dispatch/python/qpid_dispatch_internal/*.py
 usr/lib/qpid-dispatch/python/qpid_dispatch_internal/compat/*.py
 usr/lib/qpid-dispatch/python/qpid_dispatch_internal/management/*.py
