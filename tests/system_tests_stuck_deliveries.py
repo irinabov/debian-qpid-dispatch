@@ -17,11 +17,6 @@
 # under the License.
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 from proton import Message
 from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, MgmtMsgProxy, TestTimeout, PollTimeout
 from system_test import unittest
@@ -82,7 +77,7 @@ class RouterTest(TestCase):
                                      self.routers[0].addresses[0],
                                      'dest.01', 10, [2], False)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_02_delayed_settlement_different_edges_check_sender(self):
         test = DelayedSettlementTest(self.routers[2].addresses[0],
@@ -90,7 +85,7 @@ class RouterTest(TestCase):
                                      self.routers[2].addresses[0],
                                      'dest.02', 10, [2, 3, 8], False)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_03_delayed_settlement_different_edges_check_receiver(self):
         test = DelayedSettlementTest(self.routers[2].addresses[0],
@@ -98,7 +93,7 @@ class RouterTest(TestCase):
                                      self.routers[5].addresses[0],
                                      'dest.03', 10, [2, 4, 9], False)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_04_delayed_settlement_different_edges_check_interior(self):
         test = DelayedSettlementTest(self.routers[2].addresses[0],
@@ -106,7 +101,7 @@ class RouterTest(TestCase):
                                      self.routers[0].addresses[0],
                                      'dest.04', 10, [0, 2, 3, 8], False)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_05_no_settlement_same_interior(self):
         test = DelayedSettlementTest(self.routers[0].addresses[0],
@@ -114,7 +109,7 @@ class RouterTest(TestCase):
                                      self.routers[0].addresses[0],
                                      'dest.05', 10, [0, 2, 4, 9], True)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_06_no_settlement_different_edges_check_sender(self):
         test = DelayedSettlementTest(self.routers[2].addresses[0],
@@ -122,7 +117,7 @@ class RouterTest(TestCase):
                                      self.routers[2].addresses[0],
                                      'dest.06', 10, [9], True)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_07_no_settlement_different_edges_check_receiver(self):
         test = DelayedSettlementTest(self.routers[2].addresses[0],
@@ -130,7 +125,7 @@ class RouterTest(TestCase):
                                      self.routers[5].addresses[0],
                                      'dest.07', 10, [0, 9], True)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_08_no_settlement_different_edges_check_interior(self):
         test = DelayedSettlementTest(self.routers[2].addresses[0],
@@ -138,17 +133,17 @@ class RouterTest(TestCase):
                                      self.routers[0].addresses[0],
                                      'dest.08', 10, [1, 2, 3, 4, 5, 6, 7, 8], True)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_09_receiver_link_credit_test(self):
         test = RxLinkCreditTest(self.routers[0].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_10_sender_link_credit_test(self):
         test = TxLinkCreditTest(self.routers[0].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
 
 class DelayedSettlementTest(MessagingHandler):

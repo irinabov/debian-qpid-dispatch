@@ -17,11 +17,6 @@
 # under the License
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 import json
 import os
 import sys
@@ -37,7 +32,7 @@ from system_test import QdManager
 
 DUMMY = "org.apache.qpid.dispatch.dummy"
 
-CONNECTION_PROPERTIES_UNICODE_STRING = {u'connection': u'properties', u'int_property': 6451}
+CONNECTION_PROPERTIES_UNICODE_STRING = {'connection': 'properties', 'int_property': 6451}
 
 TOTAL_ENTITIES = 35   # for tests that check the total # of entities
 
@@ -53,6 +48,8 @@ class QdmanageTest(TestCase):
     def setUpClass(cls):
         super(QdmanageTest, cls).setUpClass()
         cls.inter_router_port = cls.tester.get_port()
+        cls.secure_port = cls.tester.get_port()
+        cls.secure_user_port = cls.tester.get_port()
         config_1 = Qdrouterd.Config([
             ('router', {'mode': 'interior', 'id': 'R1'}),
             ('sslProfile', {'name': 'server-ssl',
@@ -67,7 +64,15 @@ class QdmanageTest(TestCase):
             ('linkRoute', {'name': 'test-link-route', 'prefix': 'xyz', 'direction': 'in'}),
             ('autoLink', {'name': 'test-auto-link', 'address': 'mnop', 'direction': 'out'}),
             ('listener', {'port': cls.tester.get_port(), 'sslProfile': 'server-ssl'}),
-            ('address', {'name': 'pattern-address', 'pattern': 'a/*/b/#/c', 'distribution': 'closest'})
+            ('address', {'name': 'pattern-address', 'pattern': 'a/*/b/#/c', 'distribution': 'closest'}),
+
+            # for testing SSL
+            ('listener', {'host': 'localhost', 'port': cls.secure_port,
+                          'sslProfile': 'server-ssl', 'requireSsl': 'yes'}),
+            ('listener', {'host': 'localhost', 'port': cls.secure_user_port,
+                          'sslProfile': 'server-ssl', 'requireSsl': 'yes',
+                          'authenticatePeer': 'yes',
+                          'saslMechanisms': 'EXTERNAL'})
         ])
 
         config_2 = Qdrouterd.Config([
@@ -91,11 +96,11 @@ class QdmanageTest(TestCase):
         try:
             p.teardown()
         except Exception as e:
-            raise Exception(out if out else str(e))
+            raise sys.exc_info()[0](out if out else str(e))
         return out
 
     def assert_entity_equal(self, expect, actual, copy=None):
-        """Copy keys in copy from actual to idenity, then assert maps equal."""
+        """Copy keys in copy from actual to expect, then assert maps equal."""
         if copy:
             for k in copy:
                 expect[k] = actual[k]
@@ -158,18 +163,18 @@ class QdmanageTest(TestCase):
     def test_query(self):
 
         def long_type(name):
-            return u'org.apache.qpid.dispatch.' + name
+            return 'org.apache.qpid.dispatch.' + name
 
         types = ['listener', 'log', 'router']
         long_types = [long_type(name) for name in types]
 
         qall = json.loads(self.run_qdmanage('query'))
-        qall_types = set([e['type'] for e in qall])
+        qall_types = {e['type'] for e in qall}
         for t in long_types:
             self.assertIn(t, qall_types)
 
         qlistener = json.loads(self.run_qdmanage('query --type=listener'))
-        self.assertEqual([long_type('listener')] * 2, [e['type'] for e in qlistener])
+        self.assertEqual([long_type('listener')] * 4, [e['type'] for e in qlistener])
         self.assertEqual(self.router_1.ports[0], int(qlistener[0]['port']))
 
         qattr = json.loads(self.run_qdmanage('query type name'))
@@ -211,11 +216,11 @@ class QdmanageTest(TestCase):
     def test_get_operations(self):
         out = json.loads(self.run_qdmanage("get-operations"))
         self.assertEqual(len(out), TOTAL_ENTITIES)
-        self.assertEqual(out['org.apache.qpid.dispatch.sslProfile'], [u'CREATE', u'DELETE', u'READ'])
+        self.assertEqual(out['org.apache.qpid.dispatch.sslProfile'], ['CREATE', 'DELETE', 'READ'])
 
     def test_get_types_with_ssl_profile_type(self):
         out = json.loads(self.run_qdmanage("get-types --type=org.apache.qpid.dispatch.sslProfile"))
-        self.assertEqual(out['org.apache.qpid.dispatch.sslProfile'], [u'org.apache.qpid.dispatch.configurationEntity', u'org.apache.qpid.dispatch.entity'])
+        self.assertEqual(out['org.apache.qpid.dispatch.sslProfile'], ['org.apache.qpid.dispatch.configurationEntity', 'org.apache.qpid.dispatch.entity'])
 
     def test_get_ssl_profile_type_attributes(self):
         out = json.loads(self.run_qdmanage('get-attributes --type=org.apache.qpid.dispatch.sslProfile'))
@@ -241,7 +246,7 @@ class QdmanageTest(TestCase):
         logs = json.loads(self.run_qdmanage("get-log limit=20"))
         found = False
         for log in logs:
-            if u'get-log' in log[2] and ['AGENT', 'debug'] == log[0:2]:
+            if 'get-log' in log[2] and ['AGENT', 'debug'] == log[0:2]:
                 found = True
         self.assertTrue(found)
 
@@ -543,30 +548,29 @@ class QdmanageTest(TestCase):
         # This qdmanage query command would fail without the fix
         # for DISPATCH-974
         query_command = 'QUERY --type=org.apache.qpid.dispatch.router.address'
-        outs = json.loads(self.run_qdmanage(query_command))
-
-        sender_addresses = 0
-        receiver_addresses = 0
-
-        for out in outs:
-            if ADDRESS_SENDER in out['name']:
-                sender_addresses += 1
-            if ADDRESS_RECEIVER in out['name']:
-                receiver_addresses += 1
+        for i in range(3):
+            sender_addresses = 0
+            receiver_addresses = 0
+            outs = json.loads(self.run_qdmanage(query_command))
+            for out in outs:
+                if ADDRESS_SENDER in out['name']:
+                    sender_addresses += 1
+                if ADDRESS_RECEIVER in out['name']:
+                    receiver_addresses += 1
+            if sender_addresses < COUNT or receiver_addresses < COUNT:
+                sleep(2)
+            else:
+                break
 
         self.assertEqual(sender_addresses, COUNT)
         self.assertEqual(receiver_addresses, COUNT)
 
         query_command = 'QUERY --type=link'
-        outs = json.loads(self.run_qdmanage(query_command))
-
-        out_links = 0
-        in_links = 0
         success = False
-
-        i = 0
-        while i < 3:
-            i += 1
+        for i in range(3):
+            out_links = 0
+            in_links = 0
+            outs = json.loads(self.run_qdmanage(query_command))
             for out in outs:
                 if out.get('owningAddr'):
                     if ADDRESS_SENDER in out['owningAddr']:
@@ -581,7 +585,6 @@ class QdmanageTest(TestCase):
             if out_links < COUNT or in_links < COUNT:
                 self.logger.log("out_links=%s, in_links=%s" % (str(out_links), str(in_links)))
                 sleep(2)
-                outs = json.loads(self.run_qdmanage(query_command))
             else:
                 self.logger.log("Test success!")
                 success = True
@@ -618,6 +621,59 @@ class QdmanageTest(TestCase):
             # @TODO(kgiusti) - update test to handle other platforms as support
             # is added
             self.assertTrue(mem is None)
+
+    def test_ssl_connection(self):
+        """Verify qdmanage can securely connect via SSL"""
+        ssl_address = "amqps://localhost:%s" % self.secure_port
+        ssl_user_address = "amqps://localhost:%s" % self.secure_user_port
+        query = 'QUERY --type org.apache.qpid.dispatch.router'
+
+        # this should fail: no trustfile
+        with self.assertRaises(RuntimeError,
+                               msg="failure expected: no trustfile") as exc:
+            self.run_qdmanage(query, address=ssl_address)
+        self.assertIn("certificate verify failed", str(exc.exception),
+                      "unexpected exception: %s" % str(exc.exception))
+
+        # this should pass:
+        self.run_qdmanage(query + " --ssl-trustfile " +
+                          self.ssl_file('ca-certificate.pem'),
+                          address=ssl_address)
+
+        # this should fail: wrong hostname
+        with self.assertRaises(RuntimeError,
+                               msg="failure expected: wrong hostname") as exc:
+            self.run_qdmanage(query + " --ssl-trustfile " +
+                              self.ssl_file('ca-certificate.pem'),
+                              address="amqps://127.0.0.1:%s" % self.secure_port)
+        self.assertIn("certificate verify failed", str(exc.exception),
+                      "unexpected exception: %s" % str(exc.exception))
+
+        # this should pass: disable hostname check:
+        self.run_qdmanage(query + " --ssl-trustfile " +
+                          self.ssl_file('ca-certificate.pem') +
+                          " --ssl-disable-peer-name-verify",
+                          address="amqps://127.0.0.1:%s" % self.secure_port)
+
+        # this should fail: router requires client to authenticate
+        with self.assertRaises(RuntimeError,
+                               msg="client authentication should fail") as exc:
+            self.run_qdmanage(query + " --ssl-trustfile " +
+                              self.ssl_file('ca-certificate.pem'),
+                              address=ssl_user_address)
+        self.assertIn("SSL Failure", str(exc.exception),
+                      "unexpected exception: %s" % str(exc.exception))
+
+        # this should pass: qdmanage provides credentials
+        self.run_qdmanage(query + " --ssl-trustfile " +
+                          self.ssl_file('ca-certificate.pem') +
+                          " --ssl-certificate " +
+                          self.ssl_file('client-certificate.pem') +
+                          " --ssl-password-file " +
+                          self.ssl_file('client-password-file.txt') +
+                          " --ssl-key " +
+                          self.ssl_file('client-private-key.pem'),
+                          address=ssl_user_address)
 
 
 if __name__ == '__main__':

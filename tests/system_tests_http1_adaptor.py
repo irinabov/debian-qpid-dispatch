@@ -21,22 +21,12 @@
 # Test the HTTP/1.x Adaptor
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
-
 import errno
 import io
 import select
 import socket
 from time import sleep, time
-
-try:
-    from http.client import HTTPConnection
-except ImportError:
-    from httplib import HTTPConnection
+from http.client import HTTPConnection
 
 from proton import Message
 from system_test import TestCase, unittest, main_module, Qdrouterd, QdManager
@@ -47,6 +37,8 @@ from http1_tests import ThreadedTestClient, Http1OneRouterTestBase
 from http1_tests import CommonHttp1OneRouterTest
 from http1_tests import CommonHttp1Edge2EdgeTest
 from http1_tests import Http1Edge2EdgeTestBase
+from http1_tests import Http1ClientCloseTestsMixIn
+from http1_tests import Http1CurlTestsMixIn
 
 
 class Http1AdaptorManagementTest(TestCase):
@@ -115,8 +107,8 @@ class Http1AdaptorManagementTest(TestCase):
         mgmt.delete(type=CONNECTOR_TYPE, name="ServerConnector")
         self.assertEqual(0, len(mgmt.query(type=CONNECTOR_TYPE).results))
 
-        hconns = 0
         retry = 20  # 20 * 0.25 = 5 sec
+        hconns = 0
         while retry:
             obj = mgmt.query(type=CONNECTION_TYPE,
                              attribute_names=["protocol"])
@@ -127,6 +119,7 @@ class Http1AdaptorManagementTest(TestCase):
                 break
             sleep(0.25)
             retry -= 1
+            hconns = 0
 
         self.assertEqual(0, hconns, msg="HTTP connection not deleted")
 
@@ -137,7 +130,7 @@ class Http1AdaptorManagementTest(TestCase):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("", self.http_server_port))
-        s.setblocking(1)
+        s.setblocking(True)
         s.settimeout(3)  # reconnect attempts every 2.5 seconds
         s.listen(1)
         with self.assertRaises(socket.timeout):
@@ -254,7 +247,10 @@ class Http1AdaptorOneRouterTest(Http1OneRouterTestBase,
             assert_approximately_equal(stats[1].get('bytesIn'), 8830)
 
 
-class Http1AdaptorEdge2EdgeTest(Http1Edge2EdgeTestBase, CommonHttp1Edge2EdgeTest):
+class Http1AdaptorEdge2EdgeTest(Http1Edge2EdgeTestBase,
+                                CommonHttp1Edge2EdgeTest,
+                                Http1ClientCloseTestsMixIn,
+                                Http1CurlTestsMixIn):
     """
     Test an HTTP servers and clients attached to edge routers separated by an
     interior router
@@ -313,6 +309,42 @@ class Http1AdaptorEdge2EdgeTest(Http1Edge2EdgeTestBase, CommonHttp1Edge2EdgeTest
         cls.INT_A.wait_address('EA1')
         cls.INT_A.wait_address('EA2')
 
+    def test_1001_client_request_close(self):
+        """
+        Simulate an HTTP client drop while sending a very large PUT
+        """
+        self.client_request_close_test(self.http_server11_port,
+                                       self.http_listener11_port,
+                                       self.EA2.management)
+
+    def test_1002_client_response_close(self):
+        """
+        Simulate an HTTP client drop while server sends very large response
+        """
+        self.client_response_close_test(self.http_server11_port,
+                                        self.http_listener11_port)
+
+    def test_2000_curl_get(self):
+        """
+        Perform a get via curl
+        """
+        self.curl_get_test("127.0.0.1", self.http_listener11_port,
+                           self.http_server11_port)
+
+    def test_2001_curl_put(self):
+        """
+        Perform a put via curl
+        """
+        self.curl_put_test("127.0.0.1", self.http_listener11_port,
+                           self.http_server11_port)
+
+    def test_2002_curl_post(self):
+        """
+        Perform a post via curl
+        """
+        self.curl_post_test("127.0.0.1", self.http_listener11_port,
+                            self.http_server11_port)
+
 
 class FakeHttpServerBase(object):
     """
@@ -353,7 +385,8 @@ class FakeHttpServerBase(object):
         sleep(0.5)  # fudge factor allow socket close to complete
 
 
-class Http1AdaptorBadEndpointsTest(TestCase):
+class Http1AdaptorBadEndpointsTest(TestCase,
+                                   Http1ClientCloseTestsMixIn):
     """
     Subject the router to mis-behaving HTTP endpoints.
     """
@@ -498,7 +531,8 @@ class Http1AdaptorBadEndpointsTest(TestCase):
 
         body_filler = "?" * 1024 * 300  # Q2
 
-        # fake server
+        # fake server - just to create a sink for the "fakeServer" address so
+        # credit will be granted.
         rx = AsyncTestReceiver(self.INT_A.listener,
                                source="fakeServer")
 
@@ -573,6 +607,21 @@ class Http1AdaptorBadEndpointsTest(TestCase):
                                   self.http_listener_port)
         self.assertIsNone(error)
         self.assertEqual(1, count)
+
+    def test_04_client_request_close(self):
+        """
+        Simulate an HTTP client drop while sending a very large PUT
+        """
+        self.client_request_close_test(self.http_server_port,
+                                       self.http_listener_port,
+                                       self.INT_A.management)
+
+    def test_05_client_response_close(self):
+        """
+        Simulate an HTTP client drop while server sends very large response
+        """
+        self.client_response_close_test(self.http_server_port,
+                                        self.http_listener_port)
 
 
 class Http1AdaptorQ2Standalone(TestCase):

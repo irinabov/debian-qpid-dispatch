@@ -19,11 +19,6 @@
 # under the License.
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 import argparse
 import selectors
 import signal
@@ -230,7 +225,25 @@ class TcpEchoServer:
                                                                split_chunk_for_display(recv_data)))
                 sel.modify(sock, selectors.EVENT_READ | selectors.EVENT_WRITE, data=data)
             else:
-                logger.log('%s Closing connection to %s:%d' % (self.prefix, data.addr[0], data.addr[1]))
+                while data.outb:
+                    logger.log('%s Client closed: flush client input to %s:%d' % (self.prefix, data.addr[0], data.addr[1]))
+                    try:
+                        sent = sock.send(data.outb)
+                        data.outb = data.outb[sent:]
+                    except IOError:
+                        logger.log('%s Connection to %s:%d IOError: %s' %
+                                   (self.prefix, data.addr[0], data.addr[1], traceback.format_exc()))
+                        sel.unregister(sock)
+                        sock.close()
+                        return 0
+                    except Exception:
+                        self.error = ('%s Connection to %s:%d exception: %s' %
+                                      (self.prefix, data.addr[0], data.addr[1], traceback.format_exc()))
+                        logger.log(self.error)
+                        sel.unregister(sock)
+                        sock.close()
+                        return 1
+                logger.log('%s Client closed: closing connection to %s:%d' % (self.prefix, data.addr[0], data.addr[1]))
                 sel.unregister(sock)
                 sock.close()
                 return 0

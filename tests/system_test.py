@@ -28,17 +28,11 @@ Features:
 - Sundry other tools.
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
-
 import errno
 import sys
 import time
 
 import __main__
-import functools
 import os
 import random
 import re
@@ -49,10 +43,7 @@ from copy import copy
 from datetime import datetime
 from subprocess import PIPE, STDOUT
 
-try:
-    import queue as Queue  # 3.x
-except ImportError:
-    import Queue as Queue  # 2.7
+import queue as Queue
 from threading import Thread
 from threading import Event
 import json
@@ -60,14 +51,15 @@ import uuid
 
 import unittest
 
+import proton
+import proton.utils
 from proton import Message
 from proton import Delivery
 from proton.handlers import MessagingHandler
 from proton.reactor import AtLeastOnce, Container
 from proton.reactor import AtMostOnce
 from qpid_dispatch.management.client import Node
-from qpid_dispatch_internal.compat import dict_iteritems
-
+from qpid_dispatch.management.error import NotFoundStatus
 
 # Optional modules
 MISSING_MODULES = []
@@ -83,9 +75,6 @@ try:
 except ImportError as err:
     qm = None  # pylint: disable=invalid-name
     MISSING_MODULES.append(str(err))
-
-
-is_python2 = sys.version_info[0] == 2
 
 
 def find_exe(program):
@@ -227,14 +216,14 @@ def wait_port(port, protocol_family='IPv4', **retry_kwargs):
 def wait_ports(ports, **retry_kwargs):
     """Wait up to timeout for all ports (on host) to be connectable.
     Takes same keyword arguments as retry to control the timeout"""
-    for port, protocol_family in dict_iteritems(ports):
+    for port, protocol_family in ports.items():
         wait_port(port=port, protocol_family=protocol_family, **retry_kwargs)
 
 
 def message(**properties):
     """Convenience to create a proton.Message with properties set"""
     m = Message()
-    for name, value in dict_iteritems(properties):
+    for name, value in properties.items():
         getattr(m, name)        # Raise exception if not a valid message attribute.
         setattr(m, name, value)
     return m
@@ -260,7 +249,7 @@ class Process(subprocess.Popen):
     def __init__(self, args, name=None, expect=EXIT_OK, **kwargs):
         """
         Takes same arguments as subprocess.Popen. Some additional/special args:
-        @param expect: Raise error if process staus not as expected at end of test:
+        @param expect: Raise error if process status not as expected at end of test:
             L{RUNNING} - expect still running.
             L{EXIT_OK} - expect process to have terminated with 0 exit status.
             L{EXIT_FAIL} - expect process to have terminated with exit status 1.
@@ -269,7 +258,8 @@ class Process(subprocess.Popen):
         @keyword stderr: Defaults to be the same as stdout
         """
         self.name = name or os.path.basename(args[0])
-        self.args, self.expect = args, expect
+        self.args = args
+        self.expect = expect
         self.outdir = os.getcwd()
         self.outfile = os.path.abspath(self.unique(self.name))
         self.torndown = False
@@ -309,39 +299,6 @@ class Process(subprocess.Popen):
             status = self.wait()
         if self.expect is not None and self.expect != status:
             error("exit code %s, expected %s" % (status, self.expect))
-
-    def wait(self, timeout=None):
-        """
-        Add support for a timeout when using Python 2
-        """
-        if timeout is None:
-            return super(Process, self).wait()
-
-        if is_python2:
-            start = time.time()
-            while True:
-                rc = super(Process, self).poll()
-                if rc is not None:
-                    return rc
-                if time.time() - start >= timeout:
-                    raise Exception("Process did not terminate")
-                time.sleep(0.1)
-        else:
-            return super(Process, self).wait(timeout=timeout)
-
-    def communicate(self, input=None, timeout=None):
-        """
-        Add support for a timeout when using Python 2
-        """
-        if timeout is None:
-            return super(Process, self).communicate(input=input)
-
-        if is_python2:
-            self.wait(timeout=timeout)
-            return super(Process, self).communicate(input=input)
-
-        return super(Process, self).communicate(input=input,
-                                                timeout=timeout)
 
 
 class Config(object):
@@ -441,7 +398,7 @@ class Qdrouterd(Process):
             """Fill in default values in gconfiguration"""
             for name, props in self:
                 if name in Qdrouterd.Config.DEFAULTS:
-                    for n, p in dict_iteritems(Qdrouterd.Config.DEFAULTS[name]):
+                    for n, p in Qdrouterd.Config.DEFAULTS[name].items():
                         props.setdefault(n, p)
 
         def __str__(self):
@@ -469,7 +426,7 @@ class Qdrouterd(Process):
                 return "".join(["%s%s: %s\n" % (tabs(level),
                                                 k,
                                                 value(v, level + 1))
-                                for k, v in dict_iteritems(e)])
+                                for k, v in e.items()])
 
             self.defaults()
             # top level list of tuples ('section-name', dict)
@@ -682,7 +639,7 @@ class Qdrouterd(Process):
             # endswith check is because of M0/L/R prefixes
             addrs = self.management.query(
                 type='org.apache.qpid.dispatch.router.address',
-                attribute_names=[u'name', u'subscriberCount', u'remoteCount', u'containerCount']).get_entities()
+                attribute_names=['name', 'subscriberCount', 'remoteCount', 'containerCount']).get_entities()
 
             addrs = [a for a in addrs if a['name'].endswith(address)]
 
@@ -700,8 +657,7 @@ class Qdrouterd(Process):
 
         def check():
             addrs = self.management.query(a_type).get_dicts()
-            rc = list(filter(lambda a: a['name'].find(address) != -1,
-                             addrs))
+            rc = [a for a in addrs if address in a['name']]
             count = 0
             for a in rc:
                 count += a['subscriberCount']
@@ -740,17 +696,24 @@ class Qdrouterd(Process):
         return self
 
     def is_router_connected(self, router_id, **retry_kwargs):
+        node = None
         try:
             self.management.read(identity="router.node/%s" % router_id)
             # TODO aconway 2015-01-29: The above check should be enough, we
-            # should not advertise a remote router in managment till it is fully
+            # should not advertise a remote router in management till it is fully
             # connected. However we still get a race where the router is not
             # actually ready for traffic. Investigate.
             # Meantime the following actually tests send-thru to the router.
             node = Node.connect(self.addresses[0], router_id, timeout=1)
             return retry_exception(lambda: node.query('org.apache.qpid.dispatch.router'))
-        except:
+        except (proton.ConnectionException, NotFoundStatus, proton.utils.LinkDetached):
+            # proton.ConnectionException: the router is not yet accepting connections
+            # NotFoundStatus: the queried router is not yet connected
+            # TODO(DISPATCH-2119) proton.utils.LinkDetached: should be removed, currently needed for DISPATCH-2033
             return False
+        finally:
+            if node:
+                node.close()
 
     def wait_router_connected(self, router_id, **retry_kwargs):
         retry(lambda: self.is_router_connected(router_id), **retry_kwargs)
@@ -885,47 +848,6 @@ class TestCase(unittest.TestCase, Tester):  # pylint: disable=too-many-public-me
             assert not re.search(regexp, text), msg or "Found %r in '%s'" % (regexp, text)
 
 
-class SkipIfNeeded(object):
-    """
-    Decorator class that can be used along with test methods
-    to provide skip test behavior when using both python2.6 or
-    a greater version.
-    This decorator can be used in test methods and a boolean
-    condition must be provided (skip parameter) to define whether
-    or not the test will be skipped.
-    """
-
-    def __init__(self, skip, reason):
-        """
-        :param skip: if True the method wont be called
-        :param reason: reason why test was skipped
-        """
-        self.skip = skip
-        self.reason = reason
-
-    def __call__(self, f):
-
-        @functools.wraps(f)
-        def wrap(*args, **kwargs):
-            """
-            Wraps original test method's invocation and dictates whether or
-            not the test will be executed based on value (boolean) of the
-            skip parameter.
-            When running test with python < 2.7, if the "skip" parameter is
-            true, the original method won't be called. If running python >= 2.7, then
-            skipTest will be called with given "reason" and original method
-            will be invoked.
-            :param args:
-            :return:
-            """
-            instance = args[0]
-            if self.skip:
-                instance.skipTest(self.reason)
-            return f(*args, **kwargs)
-
-        return wrap
-
-
 def main_module():
     """
     Return the module name of the __main__ module - i.e. the filename with the
@@ -947,6 +869,24 @@ class AsyncTestReceiver(MessagingHandler):
     """
     Empty = Queue.Empty
 
+    class MyQueue(Queue.Queue):
+        def __init__(self, receiver):
+            self._async_receiver = receiver
+            super(AsyncTestReceiver.MyQueue, self).__init__()
+
+        def get(self, timeout=TIMEOUT):
+            self._async_receiver.num_queue_gets += 1
+            msg = super(AsyncTestReceiver.MyQueue, self).get(timeout=timeout)
+            self._async_receiver._logger.log("message %d get"
+                                             % self._async_receiver.num_queue_gets)
+            return msg
+
+        def put(self, msg):
+            self._async_receiver.num_queue_puts += 1
+            super(AsyncTestReceiver.MyQueue, self).put(msg)
+            self._async_receiver._logger.log("message %d put"
+                                             % self._async_receiver.num_queue_puts)
+
     def __init__(self, address, source, conn_args=None, container_id=None,
                  wait=True, recover_link=False, msg_args=None):
         if msg_args is None:
@@ -955,7 +895,7 @@ class AsyncTestReceiver(MessagingHandler):
         self.address = address
         self.source = source
         self.conn_args = conn_args
-        self.queue = Queue.Queue()
+        self.queue = AsyncTestReceiver.MyQueue(self)
         self._conn = None
         self._container = Container(self)
         cid = container_id or "ATR-%s:%s" % (source, uuid.uuid4())
@@ -965,24 +905,34 @@ class AsyncTestReceiver(MessagingHandler):
         self._recover_count = 0
         self._stop_thread = False
         self._thread = Thread(target=self._main)
+        self._logger = Logger(title="AsyncTestReceiver %s" % cid)
         self._thread.daemon = True
         self._thread.start()
+        self.num_queue_puts = 0
+        self.num_queue_gets = 0
         if wait and self._ready.wait(timeout=TIMEOUT) is False:
             raise Exception("Timed out waiting for receiver start")
+        self.queue_stats = "self.num_queue_puts=%d, self.num_queue_gets=%d"
+
+    def get_queue_stats(self):
+        return self.queue_stats % (self.num_queue_puts, self.num_queue_gets)
 
     def _main(self):
         self._container.timeout = 0.5
         self._container.start()
+        self._logger.log("Starting reactor")
         while self._container.process():
             if self._stop_thread:
                 if self._conn:
                     self._conn.close()
                     self._conn = None
+        self._logger.log("reactor thread done")
 
     def stop(self, timeout=TIMEOUT):
         self._stop_thread = True
         self._container.wakeup()
         self._thread.join(timeout=TIMEOUT)
+        self._logger.log("thread done")
         if self._thread.is_alive():
             raise Exception("AsyncTestReceiver did not exit")
         del self._conn
@@ -995,14 +945,16 @@ class AsyncTestReceiver(MessagingHandler):
         self._conn = event.container.connect(**kwargs)
 
     def on_connection_opened(self, event):
+        self._logger.log("Connection opened")
         kwargs = {'source': self.source}
-        rcv = event.container.create_receiver(event.connection,
-                                              **kwargs)
+        event.container.create_receiver(event.connection, **kwargs)
 
     def on_link_opened(self, event):
+        self._logger.log("link opened")
         self._ready.set()
 
     def on_link_closing(self, event):
+        self._logger.log("link closing")
         event.link.close()
         if self._recover_link and not self._stop_thread:
             # lesson learned: the generated link name will be the same as the
@@ -1019,9 +971,13 @@ class AsyncTestReceiver(MessagingHandler):
     def on_disconnected(self, event):
         # if remote terminates the connection kill the thread else it will spin
         # on the cpu
+        self._logger.log("Disconnected")
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    def dump_log(self):
+        self._logger.dump()
 
 
 class AsyncTestSender(MessagingHandler):
@@ -1058,17 +1014,25 @@ class AsyncTestSender(MessagingHandler):
         self._link_name = "%s-%s" % (cid, "tx")
         self._thread = Thread(target=self._main)
         self._thread.daemon = True
+        self._logger = Logger(title="AsyncTestSender %s" % cid)
         self._thread.start()
+        self.msg_stats = "self.sent=%d, self.accepted=%d, self.released=%d, self.modified=%d, self.rejected=%d"
 
     def _main(self):
         self._container.timeout = 0.5
         self._container.start()
+        self._logger.log("Starting reactor")
         while self._container.process():
             self._check_if_done()
+        self._logger.log("reactor thread done")
+
+    def get_msg_stats(self):
+        return self.msg_stats % (self.sent, self.accepted, self.released, self.modified, self.rejected)
 
     def wait(self):
         # don't stop it - wait until everything is sent
         self._thread.join(timeout=TIMEOUT)
+        self._logger.log("thread done")
         assert not self._thread.is_alive(), "sender did not complete"
         if self.error:
             raise AsyncTestSender.TestSenderException(self.error)
@@ -1080,6 +1044,7 @@ class AsyncTestSender(MessagingHandler):
         self._conn = self._container.connect(self.address)
 
     def on_connection_opened(self, event):
+        self._logger.log("Connection opened")
         option = AtMostOnce if self.presettle else AtLeastOnce
         self._sender = self._container.create_sender(self._conn,
                                                      target=self.target,
@@ -1090,6 +1055,7 @@ class AsyncTestSender(MessagingHandler):
         if self.sent < self.total:
             self._sender.send(self._message)
             self.sent += 1
+            self._logger.log("message %d sent" % self.sent)
 
     def _check_if_done(self):
         done = (self.sent == self.total
@@ -1101,10 +1067,12 @@ class AsyncTestSender(MessagingHandler):
                                             self.address)
             self._conn.close()
             self._conn = None
+            self._logger.log("Connection closed")
 
     def on_accepted(self, event):
         self.accepted += 1
         event.delivery.settle()
+        self._logger.log("message %d accepted" % self.accepted)
 
     def on_released(self, event):
         # for some reason Proton 'helpfully' calls on_released even though the
@@ -1113,17 +1081,21 @@ class AsyncTestSender(MessagingHandler):
             return self.on_modified(event)
         self.released += 1
         event.delivery.settle()
+        self._logger.log("message %d released" % self.released)
 
     def on_modified(self, event):
         self.modified += 1
         event.delivery.settle()
+        self._logger.log("message %d modified" % self.modified)
 
     def on_rejected(self, event):
         self.rejected += 1
         event.delivery.settle()
+        self._logger.log("message %d rejected" % self.rejected)
 
     def on_link_error(self, event):
         self.error = "link error:%s" % str(event.link.remote_condition)
+        self._logger.log(self.error)
         if self._conn:
             self._conn.close()
             self._conn = None
@@ -1132,9 +1104,13 @@ class AsyncTestSender(MessagingHandler):
         # if remote terminates the connection kill the thread else it will spin
         # on the cpu
         self.error = "connection to remote dropped"
+        self._logger.log(self.error)
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    def dump_log(self):
+        self._logger.dump()
 
 
 class QdManager(object):
@@ -1319,6 +1295,7 @@ class TestTimeout(object):
     A callback object for MessagingHandler class
     parent: A MessagingHandler with a timeout() method
     """
+    __test__ = False
 
     def __init__(self, parent):
         self.parent = parent
@@ -1430,3 +1407,42 @@ class Logger(object):
             lines.append("%s %s" % (ts, msg))
         res = str('\n'.join(lines))
         return res
+
+
+def curl_available():
+    """
+    Check if the curl command line tool is present on the system.
+    Return a tuple containing the version if found, otherwise
+    return false.
+    """
+    popen_args = ['curl', '--version']
+    try:
+        process = Process(popen_args,
+                          name='curl_check',
+                          stdout=PIPE,
+                          expect=None,
+                          universal_newlines=True)
+        out = process.communicate()[0]
+        if process.returncode == 0:
+            # return curl version as a tuple (major, minor[,fix])
+            # expects --version outputs "curl X.Y.Z ..."
+            return tuple([int(x) for x in out.split()[1].split('.')])
+    except:
+        pass
+    return False
+
+
+def run_curl(args, input=None, timeout=TIMEOUT):
+    """
+    Run the curl command with the given argument list.
+    Pass optional input to curls stdin.
+    Return tuple of (return code, stdout, stderr)
+    """
+    popen_args = ['curl'] + args
+    if timeout is not None:
+        popen_args = popen_args + ["--max-time", str(timeout)]
+    stdin_value = PIPE if input is not None else None
+    with subprocess.Popen(popen_args, stdin=stdin_value, stdout=PIPE,
+                          stderr=PIPE, universal_newlines=True) as p:
+        out = p.communicate(input, timeout)
+        return p.returncode, out[0], out[1]

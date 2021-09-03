@@ -17,11 +17,6 @@
 # under the License.
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 from proton import Message, symbol, int32
 from system_test import TestCase, Qdrouterd, main_module, TIMEOUT
 from system_test import unittest, TestTimeout
@@ -65,12 +60,12 @@ class RouterTest(TestCase):
     def test_01_reject_higher_version_hello(self):
         test = RejectHigherVersionHelloTest(self.routers[0].addresses[3])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_02_reject_higher_version_mar(self):
         test = RejectHigherVersionMARTest(self.routers[0].addresses[3], self.routers[0].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
 
 class RejectHigherVersionHelloTest(MessagingHandler):
@@ -140,6 +135,7 @@ class RejectHigherVersionMARTest(MessagingHandler):
         self.receiver    = None
         self.hello_count = 0
         self.mar_count   = 0
+        self.finished    = False
 
     def timeout(self):
         self.error = "Timeout Expired - hello_count: %d, mar_count: %d" % (self.hello_count, self.mar_count)
@@ -173,6 +169,8 @@ class RejectHigherVersionMARTest(MessagingHandler):
             self.sender.target.capabilities.put_object(symbol("qd.router"))
 
     def on_message(self, event):
+        if self.finished:
+            return
         opcode = event.message.properties['opcode']
         body   = event.message.body
         rid    = body['id']
@@ -188,6 +186,7 @@ class RejectHigherVersionMARTest(MessagingHandler):
 
         elif opcode == 'RA':
             if self.mar_count > 2:
+                self.finished = True
                 self.fail(None)
                 return
 

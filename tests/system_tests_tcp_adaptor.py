@@ -17,12 +17,8 @@
 # under the License.
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 import io
+import json
 import os
 import sys
 import time
@@ -32,12 +28,12 @@ from system_test import Logger
 from system_test import main_module
 from system_test import Process
 from system_test import Qdrouterd
-from system_test import SkipIfNeeded
 from system_test import TestCase
 from system_test import TIMEOUT
 from system_test import unittest
 
 from subprocess import PIPE
+from subprocess import STDOUT
 
 # Tests in this file are organized by classes that inherit TestCase.
 # The first instance is TcpAdaptor(TestCase).
@@ -92,6 +88,20 @@ Q2_TEST_MESSAGE_SIZE = 10000000
 echo_timeout = 30
 
 
+def ncat_available():
+    popen_args = ['ncat', '--version']
+    try:
+        process = Process(popen_args,
+                          name='ncat_check',
+                          stdout=PIPE,
+                          expect=None,
+                          universal_newlines=True)
+        out = process.communicate()[0]
+        return True
+    except:
+        return False
+
+
 #
 # Test concurrent clients
 #
@@ -137,10 +147,12 @@ class EchoClientRunner():
         self.name = "%s_%s_%s_%s" % \
                     (self.test_name, self.client_n, self.size, self.count)
         self.client_prefix = "ECHO_CLIENT %s" % self.name
+
+        parent_path = os.path.dirname(os.getcwd())
         self.client_logger = Logger(title=self.client_prefix,
                                     print_to_console=self.print_client_logs,
                                     save_for_dump=False,
-                                    ofilename="../setUpClass/TcpAdaptor_echo_client_%s.log" % self.name)
+                                    ofilename=os.path.join(parent_path, "setUpClass/TcpAdaptor_echo_client_%s.log" % self.name))
 
         try:
             self.e_client = TcpEchoClient(prefix=self.client_prefix,
@@ -310,11 +322,12 @@ class TcpAdaptor(TestCase):
 
         # define logging levels
         cls.print_logs_server = False
-        cls.print_logs_client = True
+        cls.print_logs_client = False
+        parent_path = os.path.dirname(os.getcwd())
         cls.logger = Logger(title="TcpAdaptor-testClass",
                             print_to_console=True,
                             save_for_dump=False,
-                            ofilename='../setUpClass/TcpAdaptor.log')
+                            ofilename=os.path.join(parent_path, "setUpClass/TcpAdaptor.log"))
         # Write a dummy log line for scraper.
         cls.logger.log("SERVER (info) Container Name: TCP_TEST")
 
@@ -324,13 +337,14 @@ class TcpAdaptor(TestCase):
 
         # start echo servers immediately after the echo server
         # ports are assigned.
+        parent_path = os.path.dirname(os.getcwd())
         for rtr in cls.router_order:
             test_name = "TcpAdaptor"
             server_prefix = "ECHO_SERVER %s ES_%s" % (test_name, rtr)
             server_logger = Logger(title=test_name,
                                    print_to_console=cls.print_logs_server,
                                    save_for_dump=False,
-                                   ofilename="../setUpClass/TcpAdaptor_echo_server_%s.log" % rtr)
+                                   ofilename=os.path.join(parent_path, "setUpClass/TcpAdaptor_echo_server_%s.log" % rtr))
             cls.logger.log("TCP_TEST Launching echo server '%s'" % server_prefix)
             server = TcpEchoServer(prefix=server_prefix,
                                    port=cls.tcp_server_listener_ports[rtr],
@@ -344,7 +358,7 @@ class TcpAdaptor(TestCase):
         server_logger = Logger(title="TcpAdaptor",
                                print_to_console=cls.print_logs_server,
                                save_for_dump=False,
-                               ofilename="../setUpClass/TcpAdaptor_echo_server_NS_CONN_STALL.log")
+                               ofilename=os.path.join(parent_path, "setUpClass/TcpAdaptor_echo_server_NS_CONN_STALL.log"))
         cls.logger.log("TCP_TEST Launching echo server '%s'" % server_prefix)
         server = TcpEchoServer(prefix=server_prefix,
                                port=cls.EC2_conn_stall_connector_port,
@@ -460,13 +474,15 @@ class TcpAdaptor(TestCase):
             cls.logger.log("TCP_TEST %s" % line)
 
         # write to shell script
-        with open("../setUpClass/TcpAdaptor-ports.sh", 'w') as o_file:
+        parent_path = os.path.dirname(os.getcwd())
+        file_name = os.path.join(parent_path, "setUpClass/TcpAdaptor-ports.sh")
+        with open(file_name, 'w') as o_file:
             for line in p_out:
                 o_file.write("set %s\n" % line)
 
         # Write a script to run scraper on this test's log files
         scraper_abspath = os.path.join(os.environ.get('BUILD_DIR'), 'tests', 'scraper', 'scraper.py')
-        logs_dir     = os.path.abspath("../setUpClass")
+        logs_dir     = os.path.join(parent_path, "setUpClass")
         main_log     = "TcpAdaptor.log"
         echo_logs    = "TcpAdaptor_echo*"
         big_test_log = "TcpAdaptor_all.log"
@@ -474,8 +490,7 @@ class TcpAdaptor(TestCase):
         edge_logs    = "E*.log"
         log_modules_spec = "--log-modules TCP_ADAPTOR,TCP_TEST,ECHO_SERVER,ECHO_CLIENT"
         html_output  = "TcpAdaptor.html"
-
-        with open("../setUpClass/TcpAdaptor-run-scraper.sh", 'w') as o_file:
+        with open(os.path.join(parent_path, "setUpClass/TcpAdaptor-run-scraper.sh"), 'w') as o_file:
             o_file.write("#!/bin/bash\n\n")
             o_file.write("# Script to run scraper on test class TcpAdaptor test result\n")
             o_file.write("# cd into logs directory\n")
@@ -490,6 +505,8 @@ class TcpAdaptor(TestCase):
 
         # wait for server addresses (mobile ES_<rtr>) to propagate to all interior routers
         interior_rtrs = [rtr for rtr in cls.router_order if rtr.startswith('I')]
+        poll_loops = 100
+        poll_loop_delay = 0.5  # seconds
         found_all = False
         while not found_all:
             found_all = True
@@ -513,6 +530,15 @@ class TcpAdaptor(TestCase):
                     unseen = [srv for srv in cls.router_order if "ES_" + srv not in seen]
                     cls.logger.log("TCP_TEST Router %s sees only %d of %d addresses. Waiting for %s" %
                                    (rtr, len(server_lines), len(cls.router_order), unseen))
+                if poll_loops == 1:
+                    # last poll loop
+                    for line in lines:
+                        cls.logger.log("TCP_TEST Router %s : %s" % (rtr, line))
+            poll_loops -= 1
+            if poll_loops == 0:
+                assert False, "TCP_TEST TCP_Adaptor test setup failed. Echo tests never executed."
+            else:
+                time.sleep(poll_loop_delay)
         cls.logger.log("TCP_TEST Done poll wait")
 
     @classmethod
@@ -527,6 +553,19 @@ class TcpAdaptor(TestCase):
             cls.logger.log("TCP_TEST Stopping echo server NS_EC2_CONN_STALL")
             cls.echo_server_NS_CONN_STALL.wait()
         super(TcpAdaptor, cls).tearDownClass()
+
+    def run_qdmanage(self, cmd, input=None, expect=Process.EXIT_OK, address=None):
+        p = self.popen(
+            ['qdmanage'] + cmd.split(' ') + ['--bus', address or str(self.router_dict['INTA'].addresses[0]),
+                                             '--indent=-1', '--timeout', str(TIMEOUT)],
+            stdin=PIPE, stdout=PIPE, stderr=STDOUT, expect=expect,
+            universal_newlines=True)
+        out = p.communicate(input)[0]
+        try:
+            p.teardown()
+        except Exception as e:
+            raise Exception(out if out else str(e))
+        return out
 
     class EchoPair():
         """
@@ -741,7 +780,7 @@ class TcpAdaptor(TestCase):
     #
     # Tests run by ctest
     #
-    @SkipIfNeeded(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
+    @unittest.skipIf(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
     def test_01_tcp_basic_connectivity(self):
         """
         Echo a series of 1-byte messages, one at a time, to prove general connectivity.
@@ -761,7 +800,7 @@ class TcpAdaptor(TestCase):
                 self.logger.log("TCP_TEST test_01_tcp_basic_connectivity Stop %s SUCCESS" % name)
 
     # larger messages
-    @SkipIfNeeded(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
+    @unittest.skipIf(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
     def test_10_tcp_INTA_INTA_100(self):
         name = "test_10_tcp_INTA_INTA_100"
         self.logger.log("TCP_TEST Start %s" % name)
@@ -773,7 +812,7 @@ class TcpAdaptor(TestCase):
         assert result is None, "TCP_TEST Stop %s FAIL: %s" % (name, result)
         self.logger.log("TCP_TEST Stop %s SUCCESS" % name)
 
-    @SkipIfNeeded(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
+    @unittest.skipIf(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
     def test_11_tcp_INTA_INTA_1000(self):
         name = "test_11_tcp_INTA_INTA_1000"
         self.logger.log("TCP_TEST Start %s" % name)
@@ -785,7 +824,7 @@ class TcpAdaptor(TestCase):
         assert result is None, "TCP_TEST Stop %s FAIL: %s" % (name, result)
         self.logger.log("TCP_TEST Stop %s SUCCESS" % name)
 
-    @SkipIfNeeded(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
+    @unittest.skipIf(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
     def test_12_tcp_INTA_INTA_500000(self):
         name = "test_12_tcp_INTA_INTA_500000"
         self.logger.log("TCP_TEST Start %s" % name)
@@ -797,7 +836,7 @@ class TcpAdaptor(TestCase):
         assert result is None, "TCP_TEST Stop %s FAIL: %s" % (name, result)
         self.logger.log("TCP_TEST Stop %s SUCCESS" % name)
 
-    @SkipIfNeeded(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
+    @unittest.skipIf(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
     def test_13_tcp_EA1_EC2_500000(self):
         name = "test_12_tcp_EA1_EC2_500000"
         self.logger.log("TCP_TEST Start %s" % name)
@@ -808,7 +847,7 @@ class TcpAdaptor(TestCase):
             sys.stdout.flush()
         assert result is None, "TCP_TEST Stop %s FAIL: %s" % (name, result)
 
-    @SkipIfNeeded(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
+    @unittest.skipIf(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
     def test_20_tcp_connect_disconnect(self):
         name = "test_20_tcp_connect_disconnect"
         self.logger.log("TCP_TEST Start %s" % name)
@@ -822,7 +861,7 @@ class TcpAdaptor(TestCase):
         self.logger.log("TCP_TEST Stop %s SUCCESS" % name)
 
     # concurrent messages
-    @SkipIfNeeded(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
+    @unittest.skipIf(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
     def test_50_concurrent(self):
         name = "test_50_concurrent_AtoA_BtoB"
         self.logger.log("TCP_TEST Start %s" % name)
@@ -836,7 +875,7 @@ class TcpAdaptor(TestCase):
         self.logger.log("TCP_TEST Stop %s SUCCESS" % name)
 
     # Q2 holdoff
-    @SkipIfNeeded(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
+    @unittest.skipIf(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
     def test_60_q2_holdoff(self):
         # for now, Q2 is disabled to avoid stalling TCP backpressure
         self.skipTest("Q2 is disabled on TCP adaptor")
@@ -876,6 +915,71 @@ class TcpAdaptor(TestCase):
         # Declare success
         self.logger.log("TCP_TEST Stop %s SUCCESS" % name)
 
+    def run_ncat(self, port, logger, expect=Process.EXIT_OK, timeout=2, data=b'abcd'):
+        ncat_cmd = ['ncat', '127.0.0.1', str(port)]
+        logger.log("Starting ncat '%s' and input '%s'" % (ncat_cmd, str(data)))
+        p = self.popen(
+            ncat_cmd,
+            stdin=PIPE, stdout=PIPE, stderr=PIPE, expect=expect,
+            universal_newlines=True)
+        out = p.communicate(input='abcd', timeout=timeout)[0]
+        try:
+            p.teardown()
+        except Exception as e:
+            raise Exception(out if out else str(e))
+        return out
+
+    def ncat_runner(self, tname, client, server, logger):
+        name = "%s_%s_%s" % (tname, client, server)
+        logger.log(name + " Start")
+        out = self.run_ncat(TcpAdaptor.tcp_client_listener_ports[client][server], logger, data=b'abcd')
+        logger.log("run_ncat returns: '%s'" % out)
+        assert(len(out) > 0)
+        assert("abcd" in out)
+        logger.log(tname + " Stop")
+
+    # half-closed handling
+    def test_70_half_closed(self):
+        if DISABLE_SELECTOR_TESTS:
+            self.skipTest(DISABLE_SELECTOR_REASON)
+        if not ncat_available():
+            self.skipTest("Ncat utility is not available")
+        name = "test_70_half_closed"
+        self.logger.log("TCP_TEST Start %s" % name)
+        self.ncat_runner(name, "INTA", "INTA", self.logger)
+        self.ncat_runner(name, "INTA", "INTB", self.logger)
+        self.ncat_runner(name, "INTA", "INTC", self.logger)
+        self.ncat_runner(name, "EA1",  "EA1", self.logger)
+        self.ncat_runner(name, "EA1",  "EB1", self.logger)
+        self.ncat_runner(name, "EA1",  "EC2", self.logger)
+        self.logger.log("TCP_TEST Stop %s SUCCESS" % name)
+
+    # connector/listener stats
+    def test_80_stats(self):
+        tname = "test_80 check stats in qdmanage"
+        self.logger.log(tname + " START")
+        # Verify listener stats
+        query_command = 'QUERY --type=tcpListener'
+        outputs = json.loads(self.run_qdmanage(query_command))
+        for output in outputs:
+            if output['name'].startswith("ES"):
+                # Check only echo server listeners
+                assert("connectionsOpened" in output)
+                assert(output["connectionsOpened"] > 0)
+                assert(output["connectionsOpened"] == output["connectionsClosed"])
+                assert(output["bytesIn"] == output["bytesOut"])
+        # Verify connector stats
+        query_command = 'QUERY --type=tcpConnector'
+        outputs = json.loads(self.run_qdmanage(query_command))
+        for output in outputs:
+            assert(output['address'].startswith("ES"))
+            assert("connectionsOpened" in output)
+            assert(output["connectionsOpened"] > 0)
+            # egress_dispatcher connection opens and should never close
+            assert(output["connectionsOpened"] == output["connectionsClosed"] + 1)
+            assert(output["bytesIn"] == output["bytesOut"])
+        self.logger.log(tname + " SUCCESS")
+
 
 class TcpAdaptorManagementTest(TestCase):
     """
@@ -905,17 +1009,18 @@ class TcpAdaptorManagementTest(TestCase):
         # Start the echo server. This is the server that the tcpConnector
         # will be connecting to.
         server_prefix = "ECHO_SERVER ES_%s" % cls.test_name
+        parent_path = os.path.dirname(os.getcwd())
         cls.logger = Logger(title="TcpAdaptor",
                             print_to_console=True,
                             save_for_dump=False,
-                            ofilename="../setUpClass/TcpAdaptor_echo_server.log")
+                            ofilename=os.path.join(parent_path, "setUpClass/TcpAdaptor_echo_server.log"))
         cls.echo_server = TcpEchoServer(prefix=server_prefix,
                                         port=cls.tcp_server_port,
                                         logger=cls.logger)
         # The router and the echo server are running at this point.
         assert cls.echo_server.is_running
 
-    @SkipIfNeeded(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
+    @unittest.skipIf(DISABLE_SELECTOR_TESTS, DISABLE_SELECTOR_REASON)
     def test_01_mgmt(self):
         """
         Create and delete TCP connectors and listeners

@@ -17,11 +17,6 @@
 # under the License.
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 from proton import Message
 from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, TestTimeout, PollTimeout, unittest
 from proton.handlers import MessagingHandler
@@ -89,7 +84,7 @@ class RouterTest(TestCase):
                                     self.routers[2].addresses[0],
                                     'queue.01', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_02_dest_sender_same_interior(self):
         test = LRDestSenderFlowTest(self.routers[0].addresses[0],
@@ -97,7 +92,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.02', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_03_dest_sender_edge_edge(self):
         test = LRDestSenderFlowTest(self.routers[2].addresses[0],
@@ -105,7 +100,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.03', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_04_dest_sender_interior_interior(self):
         test = LRDestSenderFlowTest(self.routers[0].addresses[0],
@@ -113,7 +108,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.04', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_05_dest_sender_edge_interior(self):
         test = LRDestSenderFlowTest(self.routers[2].addresses[0],
@@ -121,7 +116,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.05', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_06_dest_sender_interior_edge(self):
         test = LRDestSenderFlowTest(self.routers[0].addresses[0],
@@ -129,7 +124,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.06', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_07_dest_sender_edge_interior_interior_edge(self):
         test = LRDestSenderFlowTest(self.routers[2].addresses[0],
@@ -137,7 +132,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.07', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_08_dest_sender_initial_credit_same_edge(self):
         test = LRDestSenderFlowTest(self.routers[2].addresses[0],
@@ -145,7 +140,7 @@ class RouterTest(TestCase):
                                     self.routers[2].addresses[0],
                                     'queue.08', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_09_dest_sender_initial_credit_same_interior(self):
         test = LRDestSenderFlowTest(self.routers[0].addresses[0],
@@ -153,7 +148,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.09', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_10_dest_sender_initial_credit_edge_edge(self):
         test = LRDestSenderFlowTest(self.routers[2].addresses[0],
@@ -161,7 +156,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.10', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_11_dest_sender_initial_credit_interior_interior(self):
         test = LRDestSenderFlowTest(self.routers[0].addresses[0],
@@ -169,7 +164,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.11', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_12_dest_sender_initial_credit_edge_interior(self):
         test = LRDestSenderFlowTest(self.routers[2].addresses[0],
@@ -177,7 +172,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.12', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_13_dest_sender_initial_credit_interior_edge(self):
         test = LRDestSenderFlowTest(self.routers[0].addresses[0],
@@ -185,7 +180,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.13', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_14_dest_sender_initial_credit_edge_interior_interior_edge(self):
         test = LRDestSenderFlowTest(self.routers[2].addresses[0],
@@ -193,7 +188,7 @@ class RouterTest(TestCase):
                                     self.routers[0].addresses[0],
                                     'queue.14', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_15_dest_receiver_same_edge(self):
         test = LRDestReceiverFlowTest(self.routers[2].addresses[1],
@@ -201,7 +196,7 @@ class RouterTest(TestCase):
                                       self.routers[2].addresses[0],
                                       'queue.15', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_16_dest_receiver_same_interior(self):
         test = LRDestReceiverFlowTest(self.routers[0].addresses[1],
@@ -209,7 +204,7 @@ class RouterTest(TestCase):
                                       self.routers[0].addresses[0],
                                       'queue.16', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_17_dest_receiver_edge_edge(self):
         test = LRDestReceiverFlowTest(self.routers[2].addresses[1],
@@ -217,7 +212,7 @@ class RouterTest(TestCase):
                                       self.routers[0].addresses[0],
                                       'queue.17', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_18_dest_receiver_interior_interior(self):
         test = LRDestReceiverFlowTest(self.routers[0].addresses[1],
@@ -225,7 +220,7 @@ class RouterTest(TestCase):
                                       self.routers[0].addresses[0],
                                       'queue.18', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_19_dest_receiver_edge_interior(self):
         test = LRDestReceiverFlowTest(self.routers[2].addresses[1],
@@ -233,7 +228,7 @@ class RouterTest(TestCase):
                                       self.routers[0].addresses[0],
                                       'queue.19', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_20_dest_receiver_interior_edge(self):
         test = LRDestReceiverFlowTest(self.routers[0].addresses[1],
@@ -241,7 +236,7 @@ class RouterTest(TestCase):
                                       self.routers[0].addresses[0],
                                       'queue.20', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_21_dest_receiver_edge_interior_interior_edge(self):
         test = LRDestReceiverFlowTest(self.routers[2].addresses[1],
@@ -249,7 +244,7 @@ class RouterTest(TestCase):
                                       self.routers[1].addresses[0],
                                       'queue.21', 0)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_22_dest_receiver_initial_credit_same_edge(self):
         test = LRDestReceiverFlowTest(self.routers[2].addresses[1],
@@ -257,7 +252,7 @@ class RouterTest(TestCase):
                                       self.routers[2].addresses[0],
                                       'queue.22', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_23_dest_receiver_initial_credit_same_interior(self):
         test = LRDestReceiverFlowTest(self.routers[0].addresses[1],
@@ -265,7 +260,7 @@ class RouterTest(TestCase):
                                       self.routers[0].addresses[0],
                                       'queue.23', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_24_dest_receiver_initial_credit_edge_edge(self):
         test = LRDestReceiverFlowTest(self.routers[2].addresses[1],
@@ -273,7 +268,7 @@ class RouterTest(TestCase):
                                       self.routers[0].addresses[0],
                                       'queue.24', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_25_dest_receiver_initial_credit_interior_interior(self):
         test = LRDestReceiverFlowTest(self.routers[0].addresses[1],
@@ -281,7 +276,7 @@ class RouterTest(TestCase):
                                       self.routers[0].addresses[0],
                                       'queue.25', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_26_dest_receiver_initial_credit_edge_interior(self):
         test = LRDestReceiverFlowTest(self.routers[2].addresses[1],
@@ -289,7 +284,7 @@ class RouterTest(TestCase):
                                       self.routers[0].addresses[0],
                                       'queue.26', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_27_dest_receiver_initial_credit_interior_edge(self):
         test = LRDestReceiverFlowTest(self.routers[0].addresses[1],
@@ -297,7 +292,7 @@ class RouterTest(TestCase):
                                       self.routers[0].addresses[0],
                                       'queue.27', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_28_dest_receiver_initial_credit_edge_interior_interior_edge(self):
         test = LRDestReceiverFlowTest(self.routers[2].addresses[1],
@@ -305,12 +300,12 @@ class RouterTest(TestCase):
                                       self.routers[1].addresses[0],
                                       'queue.28', 5)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_29_fast_teardown_test(self):
         test = LRFastTeardownTest(self.routers[2].addresses[0], "normal.29")
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
 
 class Entity(object):
