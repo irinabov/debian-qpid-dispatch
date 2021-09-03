@@ -17,14 +17,10 @@
 # under the License.
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 import sys
+
 from proton import Message
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, SkipIfNeeded, TestTimeout
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, TestTimeout
 from system_test import unittest
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, LinkOption, ApplicationEvent, EventInjector
@@ -502,49 +498,49 @@ class DistributionTests (TestCase):
         cls.C_addr = router_C.addresses[0]
         cls.D_addr = router_D.addresses[0]
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_01'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_01'], 'Test skipped during development.')
     def test_01_targeted_sender_AC(self):
         name = 'test_01'
         test = TargetedSenderTest(name, self.A_addr, self.C_addr, "closest/01")
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_02'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_02'], 'Test skipped during development.')
     def test_02_targeted_sender_DC(self):
         name = 'test_02'
         test = TargetedSenderTest(name, self.D_addr, self.C_addr, "closest/02")
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_03'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_03'], 'Test skipped during development.')
     def test_03_anonymous_sender_AC(self):
         name = 'test_03'
         test = AnonymousSenderTest(name, self.A_addr, self.C_addr)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_04'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_04'], 'Test skipped during development.')
     def test_04_anonymous_sender_DC(self):
         name = 'test_04'
         test = AnonymousSenderTest(name, self.D_addr, self.C_addr)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_05'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_05'], 'Test skipped during development.')
     def test_05_dynamic_reply_to_AC(self):
         name = 'test_05'
         test = DynamicReplyTo(name, self.A_addr, self.C_addr)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_06'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_06'], 'Test skipped during development.')
     def test_06_dynamic_reply_to_DC(self):
         name = 'test_06'
         test = DynamicReplyTo(name, self.D_addr, self.C_addr)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_07'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_07'], 'Test skipped during development.')
     def test_07_linkroute(self):
         name = 'test_07'
         test = LinkAttachRouting(name,
@@ -555,9 +551,9 @@ class DistributionTests (TestCase):
                                  "addr_07"
                                  )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_08'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_08'], 'Test skipped during development.')
     def test_08_linkroute_check_only(self):
         name = 'test_08'
         test = LinkAttachRoutingCheckOnly(name,
@@ -568,9 +564,9 @@ class DistributionTests (TestCase):
                                           "addr_08"
                                           )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_09'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_09'], 'Test skipped during development.')
     def test_09_closest_linear(self):
         name = 'test_09'
         test = ClosestTest(name,
@@ -581,9 +577,9 @@ class DistributionTests (TestCase):
                            print_debug=False
                            )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_10'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_10'], 'Test skipped during development.')
     def test_10_closest_mesh(self):
         name = 'test_10'
         test = ClosestTest(name,
@@ -593,7 +589,7 @@ class DistributionTests (TestCase):
                            "addr_10"
                            )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
         #
         #     Cost picture for balanced distribution tests.
@@ -663,7 +659,7 @@ class DistributionTests (TestCase):
         #     100     55           33           12
         #
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_11'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_11'], 'Test skipped during development.')
     def test_11_balanced_linear(self):
         name = 'test_11'
         # slop is how much the second two values may diverge from
@@ -692,9 +688,9 @@ class DistributionTests (TestCase):
                             omit_middle_receiver
                             )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_12'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_12'], 'Test skipped during development.')
     def test_12_balanced_linear_omit_middle_receiver(self):
         name = 'test_12'
         # If we omit the middle receiver, then router A will count
@@ -731,7 +727,7 @@ class DistributionTests (TestCase):
                             omit_middle_receiver
                             )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
         #     Reasoning for the triangular balanced case:
         #
@@ -790,7 +786,7 @@ class DistributionTests (TestCase):
         #       3. B and D are both with 1 of their expected values.
         #
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_13'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_13'], 'Test skipped during development.')
     def test_13_balanced_mesh(self):
         name = 'test_13'
         total      = 100
@@ -812,9 +808,9 @@ class DistributionTests (TestCase):
                             omit_middle_receiver
                             )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_14'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_14'], 'Test skipped during development.')
     def test_14_multicast_linear(self):
         name = 'test_14'
         test = MulticastTest(name,
@@ -824,9 +820,9 @@ class DistributionTests (TestCase):
                              "addr_14"
                              )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_15'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_15'], 'Test skipped during development.')
     def test_15_multicast_mesh(self):
         name = 'test_15'
         test = MulticastTest(name,
@@ -836,10 +832,10 @@ class DistributionTests (TestCase):
                              "addr_15"
                              )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_16'], 'Test skipped during development.')
-    def test_16_linkroute_linear_all_local(self) :
+    @unittest.skipIf(DistributionSkipMapper.skip['test_16'], 'Test skipped during development.')
+    def test_16_linkroute_linear_all_local(self):
         name = 'test_16'
         """
         This test should route all senders' link-attaches
@@ -923,10 +919,10 @@ class DistributionTests (TestCase):
                            n_remote_routers
                            )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_17'], 'Test skipped during development.')
-    def test_17_linkroute_linear_all_B(self) :
+    @unittest.skipIf(DistributionSkipMapper.skip['test_17'], 'Test skipped during development.')
+    def test_17_linkroute_linear_all_B(self):
         name = 'test_17'
         """
         This test should route all senders' link-attaches
@@ -1010,10 +1006,10 @@ class DistributionTests (TestCase):
                            n_remote_routers
                            )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_18'], 'Test skipped during development.')
-    def test_18_linkroute_linear_all_C(self) :
+    @unittest.skipIf(DistributionSkipMapper.skip['test_18'], 'Test skipped during development.')
+    def test_18_linkroute_linear_all_C(self):
         name = 'test_18'
         """
         This test should route all senders' link-attaches
@@ -1097,10 +1093,10 @@ class DistributionTests (TestCase):
                            n_remote_routers
                            )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_19'], 'Test skipped during development.')
-    def test_19_linkroute_linear_kill(self) :
+    @unittest.skipIf(DistributionSkipMapper.skip['test_19'], 'Test skipped during development.')
+    def test_19_linkroute_linear_kill(self):
         name = 'test_19'
         """
         Start out as usual, making four senders and seeing their link-attaches
@@ -1244,10 +1240,10 @@ class DistributionTests (TestCase):
                            n_remote_routers
                            )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_20'], 'Test skipped during development.')
-    def test_20_linkroute_mesh_all_local(self) :
+    @unittest.skipIf(DistributionSkipMapper.skip['test_20'], 'Test skipped during development.')
+    def test_20_linkroute_mesh_all_local(self):
         name = 'test_20'
         #
         #                c           c
@@ -1344,10 +1340,10 @@ class DistributionTests (TestCase):
                            n_remote_routers
                            )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_21'], 'Test skipped during development.')
-    def test_21_linkroute_mesh_nonlocal(self) :
+    @unittest.skipIf(DistributionSkipMapper.skip['test_21'], 'Test skipped during development.')
+    def test_21_linkroute_mesh_nonlocal(self):
         name = 'test_21'
         #
         #                            c
@@ -1444,10 +1440,10 @@ class DistributionTests (TestCase):
                            n_remote_routers
                            )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_22'], 'Test skipped during development.')
-    def test_22_linkroute_mesh_kill(self) :
+    @unittest.skipIf(DistributionSkipMapper.skip['test_22'], 'Test skipped during development.')
+    def test_22_linkroute_mesh_kill(self):
         name = 'test_22'
 
         #               c           c
@@ -1599,10 +1595,10 @@ class DistributionTests (TestCase):
                            n_remote_routers
                            )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_23'], 'Test skipped during development.')
-    def test_23_waypoint(self) :
+    @unittest.skipIf(DistributionSkipMapper.skip['test_23'], 'Test skipped during development.')
+    def test_23_waypoint(self):
         name = 'test_23'
         test = WaypointTest(name,
                             self.container_ids[1],
@@ -1612,9 +1608,9 @@ class DistributionTests (TestCase):
                             self.waypoint_prefix_1 + '.waypoint'
                             )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_24'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_24'], 'Test skipped during development.')
     def test_24_serial_waypoint_test(self):
         name = 'test_24'
         test = SerialWaypointTest(name,
@@ -1625,9 +1621,9 @@ class DistributionTests (TestCase):
                                   self.waypoint_prefix_2 + '.waypoint'
                                   )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
-    @SkipIfNeeded(DistributionSkipMapper.skip['test_25'], 'Test skipped during development.')
+    @unittest.skipIf(DistributionSkipMapper.skip['test_25'], 'Test skipped during development.')
     def test_25_parallel_waypoint_test(self):
         name = 'test_25'
         test = ParallelWaypointTest(name,
@@ -1638,7 +1634,7 @@ class DistributionTests (TestCase):
                                     self.waypoint_prefix_3 + '.waypoint'
                                     )
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
 
 # ================================================================

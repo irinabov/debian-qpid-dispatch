@@ -152,32 +152,9 @@ void qdr_core_free(qdr_core_t *core)
     core->router_id = 0;
     core->router_area = 0;
 
-    // discard any left over actions
-
-    qdr_action_list_t  action_list;
-    DEQ_MOVE(core->action_list, action_list);
-    DEQ_APPEND(action_list, core->action_list_background);
-    qdr_action_t *action = DEQ_HEAD(action_list);
-    while (action) {
-        DEQ_REMOVE_HEAD(action_list);
-        action->action_handler(core, action, true);
-        free_qdr_action_t(action);
-        action = DEQ_HEAD(action_list);
-    }
-
-    // Drain the general work lists
-    qdr_general_handler(core);
-
     //
     // Free the core resources
     //
-    sys_thread_free(core->thread);
-    sys_cond_free(core->action_cond);
-    sys_mutex_free(core->action_lock);
-    sys_mutex_free(core->work_lock);
-    sys_mutex_free(core->id_lock);
-    qd_timer_free(core->work_timer);
-
     for (int i = 0; i <= QD_TREATMENT_LINK_BALANCED; ++i) {
         if (core->forwarders[i]) {
             free(core->forwarders[i]);
@@ -188,6 +165,19 @@ void qdr_core_free(qdr_core_t *core)
     while ( (link_route = DEQ_HEAD(core->link_routes))) {
         DEQ_REMOVE_HEAD(core->link_routes);
         qdr_core_delete_link_route(core, link_route);
+    }
+
+    //
+    // The connection based link routes need to be removed before we call
+    // qdr_core_remove_address(addr) on all core->addrs
+    //
+    qdr_connection_t *conn = DEQ_HEAD(core->open_connections);
+    while (conn) {
+        while ((link_route = DEQ_HEAD(conn->conn_link_routes))) {
+            DEQ_REMOVE_HEAD(conn->conn_link_routes);
+            qdr_core_delete_link_route(core, link_route);
+        }
+        conn = DEQ_NEXT(conn);
     }
 
     qdr_auto_link_t *auto_link = 0;
@@ -259,6 +249,33 @@ void qdr_core_free(qdr_core_t *core)
         link = DEQ_HEAD(core->open_links);
     }
 
+    // finalize modules while we can still submit new actions
+    // this must happen after qdrc_endpoint_do_cleanup_CT calls
+    qdr_modules_finalize(core);
+
+    // discard any left over actions
+
+    qdr_action_list_t  action_list;
+    DEQ_MOVE(core->action_list, action_list);
+    DEQ_APPEND(action_list, core->action_list_background);
+    qdr_action_t *action = DEQ_HEAD(action_list);
+    while (action) {
+        DEQ_REMOVE_HEAD(action_list);
+        action->action_handler(core, action, true);
+        free_qdr_action_t(action);
+        action = DEQ_HEAD(action_list);
+    }
+
+    // Drain the general work lists
+    qdr_general_handler(core);
+
+    sys_thread_free(core->thread);
+    sys_cond_free(core->action_cond);
+    sys_mutex_free(core->action_lock);
+    sys_mutex_free(core->work_lock);
+    sys_mutex_free(core->id_lock);
+    qd_timer_free(core->work_timer);
+
     //
     // Clean up any qdr_delivery_cleanup_t's that are still left in the core->delivery_cleanup_list
     //
@@ -273,7 +290,7 @@ void qdr_core_free(qdr_core_t *core)
         cleanup = DEQ_HEAD(core->delivery_cleanup_list);
     }
 
-    qdr_connection_t *conn = DEQ_HEAD(core->open_connections);
+    conn = DEQ_HEAD(core->open_connections);
     while (conn) {
         DEQ_REMOVE_HEAD(core->open_connections);
 
@@ -306,8 +323,6 @@ void qdr_core_free(qdr_core_t *core)
 
     // at this point all the conn identifiers have been freed
     qd_hash_free(core->conn_id_hash);
-
-    qdr_modules_finalize(core);
 
     qdr_agent_free(core->mgmt_agent);
 
@@ -664,8 +679,12 @@ void qdr_core_bind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_li
     // If this link is configured as no-route, don't create any functional linkage between the
     // link and the address beyond the owning_addr.
     //
-    if (link->no_route)
+    if (link->no_route) {
+        link->owning_addr->ref_count++;
+        // The no_route link's address has been bound. Set no_route_bound to true.
+        link->no_route_bound = true;
         return;
+    }
 
     if (link->link_direction == QD_OUTGOING) {
         qdr_add_link_ref(&addr->rlinks, link, QDR_LINK_LIST_CLASS_ADDRESS);

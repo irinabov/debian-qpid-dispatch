@@ -569,6 +569,15 @@ static void qdr_link_setup_histogram(qdr_connection_t *conn, qd_direction_t dir,
 }
 
 
+// used by the TSAN suppression file to mask the read/write races
+// caused by modifying the deliveries' conn_id and link_id while in flight
+void tsan_reset_delivery_ids(qdr_delivery_t *dlv, uint64_t conn_id, uint64_t link_id)
+{
+    dlv->conn_id = conn_id;
+    dlv->link_id = link_id;
+}
+
+
 qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
                                   qd_direction_t    dir,
                                   qdr_terminus_t   *source,
@@ -618,8 +627,7 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
     //
 
     if (initial_delivery) {
-        initial_delivery->conn_id = link->conn->identity;
-        initial_delivery->link_id = link->identity;
+        tsan_reset_delivery_ids(initial_delivery, link->conn->identity, link->identity);
     }
 
     if      (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_ROUTER_CONTROL))
@@ -885,7 +893,7 @@ void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *conn, qd
         }
 
         if (!qdr_delivery_receive_complete(dlv)) {
-            qdr_delivery_set_aborted(dlv, true);
+            qdr_delivery_set_aborted(dlv);
             qdr_delivery_continue_peers_CT(core, dlv, false);
         }
 
@@ -934,7 +942,7 @@ void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *conn, qd
         DEQ_REMOVE_HEAD(settled);
 
         if (!qdr_delivery_receive_complete(dlv)) {
-            qdr_delivery_set_aborted(dlv, true);
+            qdr_delivery_set_aborted(dlv);
             qdr_delivery_continue_peers_CT(core, dlv, false);
         }
 
@@ -969,7 +977,7 @@ static void qdr_link_abort_undelivered_CT(qdr_core_t *core, qdr_link_t *link)
     qdr_delivery_t *dlv = DEQ_HEAD(link->undelivered);
     while (dlv) {
         if (!qdr_delivery_receive_complete(dlv))
-            qdr_delivery_set_aborted(dlv, true);
+            qdr_delivery_set_aborted(dlv);
         dlv = DEQ_NEXT(dlv);
     }
     sys_mutex_unlock(conn->work_lock);
@@ -2093,6 +2101,13 @@ static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, b
             qdr_detach_link_data_CT(core, conn, link);
             break;
         }
+    }
+
+    //
+    // We had increased the ref_count if the link->no_route was true. Now reduce the ref_count
+    //
+    if (addr && link->no_route && link->no_route_bound) {
+        addr->ref_count--;
     }
 
     link->owning_addr = 0;

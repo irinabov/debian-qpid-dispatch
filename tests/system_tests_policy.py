@@ -17,11 +17,6 @@
 # under the License.
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 import unittest as unittest
 import os
 import json
@@ -38,7 +33,6 @@ from proton.handlers import MessagingHandler
 from proton.reactor import Container, ReceiverOption
 from proton.utils import BlockingConnection, LinkDetached, SyncRequestResponse
 from qpid_dispatch_internal.policy.policy_util import is_ipv6_enabled
-from qpid_dispatch_internal.compat import dict_iteritems
 from test_broker import FakeBroker
 
 
@@ -123,7 +117,7 @@ class LoadPolicyFromFolder(TestCase):
                 with open(policy_config_path + "/" + f[:-3], 'w') as outfile:
                     with open(policy_config_path + "/" + f) as infile:
                         for line in infile:
-                            for src, target in dict_iteritems(replacements):
+                            for src, target in replacements.items():
                                 if ipv6_enabled:
                                     line = line.replace(src, target)
                                 else:
@@ -340,8 +334,10 @@ class SenderReceiverLimits(TestCase):
         # In some emulated environments the router log file writes may lag test execution.
         # To accomodate the file lag this test may retry reading the log file.
         verified = False
-        for tries in range(5):
-            with open('../setUpClass/SenderReceiverLimits.log', 'r') as router_log:
+
+        # We will wait a total of 5 seconds for the log files to appear.
+        for tries in range(25):
+            with open(self.router.logfile_path, 'r') as router_log:
                 log_lines = router_log.read().split("\n")
                 close_lines = [s for s in log_lines if "senders_denied=1, receivers_denied=1" in s]
                 verified = len(close_lines) == 1
@@ -349,7 +345,8 @@ class SenderReceiverLimits(TestCase):
                 break
             print("system_tests_policy, SenderReceiverLimits, test_verify_z_connection_stats: delay to wait for log to be written")
             sys.stdout.flush()
-            time.sleep(1)
+            # Sleep for 0.2 seconds before trying again.
+            time.sleep(0.2)
         if not verified:
             deny_lines = [s for s in log_lines if "DENY" in s]
             resources_lines = [s for s in log_lines if "closed with resources" in s]
@@ -570,7 +567,7 @@ class VhostPolicyNameField(TestCase):
                 with open(policy_config_path + "/" + f[:-3], 'w') as outfile:
                     with open(policy_config_path + "/" + f) as infile:
                         for line in infile:
-                            for src, target in dict_iteritems(replacements):
+                            for src, target in replacements.items():
                                 if ipv6_enabled:
                                     line = line.replace(src, target)
                                 else:

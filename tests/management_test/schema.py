@@ -20,24 +20,9 @@
 
 # pylint: disable=wildcard-import,missing-docstring,too-many-public-methods
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 import unittest
 import json
-from collections import OrderedDict
 from qpid_dispatch_internal.management.schema import Schema, BooleanType, EnumType, AttributeType, ValidationError, EnumValue, EntityType
-
-
-def replace_od(thing):
-    """Replace OrderedDict with dict"""
-    if isinstance(thing, OrderedDict):
-        return dict((k, replace_od(v)) for k, v in thing.iteritems())
-    if isinstance(thing, list):
-        return [replace_od(t) for t in thing]
-    return thing
 
 
 SCHEMA_1 = {

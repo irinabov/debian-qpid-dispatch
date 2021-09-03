@@ -19,29 +19,24 @@
 
 import os
 import sys
+import hashlib
+import unittest
 from time import sleep
 import system_test
-from system_test import TestCase, Qdrouterd, QdManager, Process, SkipIfNeeded
+from system_test import TestCase, Qdrouterd, QdManager, Process
+from system_test import curl_available, TIMEOUT
 from subprocess import PIPE
+
+h2hyper_installed = True
+try:
+    import h2.connection # noqa F401: imported but unused
+except ImportError:
+    h2hyper_installed = False
 
 
 def python_37_available():
     if sys.version_info >= (3, 7):
         return True
-
-
-def curl_available():
-    popen_args = ['curl', '--version']
-    try:
-        process = Process(popen_args,
-                          name='curl_check',
-                          stdout=PIPE,
-                          expect=None,
-                          universal_newlines=True)
-        out = process.communicate()[0]
-        return True
-    except:
-        return False
 
 
 def quart_available():
@@ -73,52 +68,69 @@ def skip_test():
     return True
 
 
+def skip_h2_test():
+    if python_37_available() and h2hyper_installed and curl_available():
+        return False
+    return True
+
+
+def get_digest(file_path):
+    h = hashlib.sha256()
+
+    with open(file_path, 'rb') as file:
+        while True:
+            # Reading is buffered, so we can read smaller chunks.
+            chunk = file.read(h.block_size)
+            if not chunk:
+                break
+            h.update(chunk)
+
+    return h.hexdigest()
+
+
+def image_file(name):
+    return os.path.join(system_test.DIR, 'images', name)
+
+
 class Http2TestBase(TestCase):
-    def run_curl(self, args=None, regexp=None, timeout=system_test.TIMEOUT, address=None):
-        # Tell with -m / --max-time the maximum time, in seconds, that you
-        # allow the command line to spend before curl exits with a
-        # timeout error code (28).
-        local_args = ["--http2-prior-knowledge"]
+    def run_curl(self, address, args=None, input=None, timeout=TIMEOUT):
+        """
+        Run the curl command using the HTTP/2 protocol
+        """
+        local_args = [str(address), "--http2-prior-knowledge"]
         if args:
-            local_args =  args + ["--http2-prior-knowledge"]
+            local_args +=  args
 
-        popen_args = ['curl',
-                      str(address),
-                      '--max-time', str(timeout)] + local_args
-        p = self.popen(popen_args,
-                       name='curl-' + self.id(), stdout=PIPE, expect=None,
-                       universal_newlines=True)
+        status, out, err = system_test.run_curl(local_args, input=input,
+                                                timeout=timeout)
+        if status != 0:
+            print("CURL ERROR (%s): %s %s" % (status, out, err), flush=True)
 
-        out = p.communicate()[0]
-
-        if p.returncode != 0:
-            print(p.returncode)
-            print(out)
-
-        assert (p.returncode == 0)
+        assert status == 0
         return out
 
 
-class CommonHttp2Tests():
+class CommonHttp2Tests:
     """
     Common Base class containing all tests. These tests are run by all
     topologies of routers.
     """
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     # Tests the HTTP2 head request
     def test_head_request(self):
         # Run curl 127.0.0.1:port --http2-prior-knowledge --head
         address = self.router_qdra.http_addresses[0]
-        out = self.run_curl(args=["--head"], address=address)
+        out = self.run_curl(address, args=["--head"])
         self.assertIn('HTTP/2 200', out)
         self.assertIn('server: hypercorn-h2', out)
         self.assertIn('content-type: text/html; charset=utf-8', out)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_get_request(self):
         # Run curl 127.0.0.1:port --http2-prior-knowledge
         address = self.router_qdra.http_addresses[0]
-        out = self.run_curl(address=address)
+        out = self.run_curl(address)
         i = 0
         ret_string = ""
         while (i < 1000):
@@ -126,86 +138,90 @@ class CommonHttp2Tests():
             i += 1
         self.assertIn(ret_string, out)
 
-    # @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    # @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     # def test_large_get_request(self):
         # Tests a large get request. Response is more than 50k which means it
         # will span many qd_http2_buffer_t objects.
         # Run curl 127.0.0.1:port/largeget --http2-prior-knowledge
     #    address = self.router_qdra.http_addresses[0] + "/largeget"
-    #    out = self.run_curl(address=address)
+    #    out = self.run_curl(address)
     #    self.assertIn("49996,49997,49998,49999", out)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_post_request(self):
         # curl -d "fname=John&lname=Doe" -X POST 127.0.0.1:9000/myinfo --http2-prior-knowledge
         address = self.router_qdra.http_addresses[0] + "/myinfo"
-        out = self.run_curl(args=['-d', 'fname=John&lname=Doe', '-X', 'POST'], address=address)
+        out = self.run_curl(address, args=['-d', 'fname=John&lname=Doe', '-X', 'POST'])
         self.assertIn('Success! Your first name is John, last name is Doe', out)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    def test_post_upload_large_image_jpg(self):
+        # curl  -X POST -H "Content-Type: multipart/form-data"  -F "data=@/home/gmurthy/opensource/test.jpg"
+        # http://127.0.0.1:9000/upload --http2-prior-knowledge
+        address = self.router_qdra.http_addresses[0] + "/upload"
+        out = self.run_curl(address, args=['-X', 'POST', '-H', 'Content-Type: multipart/form-data',
+                                           '-F', 'data=@' + image_file('test.jpg')])
+        self.assertIn('Success', out)
+
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_delete_request(self):
         # curl -X DELETE "http://127.0.0.1:9000/myinfo/delete/22122" -H  "accept: application/json" --http2-prior-knowledge
         address = self.router_qdra.http_addresses[0] + "/myinfo/delete/22122"
-        out = self.run_curl(args=['-X', 'DELETE'], address=address)
+        out = self.run_curl(address, args=['-X', 'DELETE'])
         self.assertIn('{"fname": "John", "lname": "Doe", "id": "22122"}', out)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_put_request(self):
         # curl -d "fname=John&lname=Doe" -X PUT 127.0.0.1:9000/myinfo --http2-prior-knowledge
         address = self.router_qdra.http_addresses[0] + "/myinfo"
-        out = self.run_curl(args=['-d', 'fname=John&lname=Doe', '-X', 'PUT'], address=address)
+        out = self.run_curl(address, args=['-d', 'fname=John&lname=Doe', '-X', 'PUT'])
         self.assertIn('Success! Your first name is John, last name is Doe', out)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_patch_request(self):
         # curl -d "fname=John&lname=Doe" -X PATCH 127.0.0.1:9000/myinfo --http2-prior-knowledge
         address = self.router_qdra.http_addresses[0] + "/patch"
-        out = self.run_curl(args=['--data', '{\"op\":\"add\",\"path\":\"/user\",\"value\":\"jane\"}', '-X', 'PATCH'], address=address)
+        out = self.run_curl(address, args=['--data', '{\"op\":\"add\",\"path\":\"/user\",\"value\":\"jane\"}', '-X', 'PATCH'])
         self.assertIn('"op":"add"', out)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_404(self):
-        # Run curl 127.0.0.1:port/unavilable --http2-prior-knowledge
-        address = self.router_qdra.http_addresses[0] + "/unavilable"
+        # Run curl 127.0.0.1:port/unavailable --http2-prior-knowledge
+        address = self.router_qdra.http_addresses[0] + "/unavailable"
         out = self.run_curl(address=address)
         self.assertIn('404 Not Found', out)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_500(self):
-        # Run curl 127.0.0.1:port/unavilable --http2-prior-knowledge
+        # Run curl 127.0.0.1:port/test/500 --http2-prior-knowledge
         address = self.router_qdra.http_addresses[0] + "/test/500"
-        out = self.run_curl(address=address)
+        out = self.run_curl(address)
         self.assertIn('500 Internal Server Error', out)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_get_image_png(self):
-        # Run curl 127.0.0.1:port --http2-prior-knowledge
-        passed = False
-        try:
-            address = self.router_qdra.http_addresses[0] + "/images/balanced-routing.png"
-            self.run_curl(address=address)
-        except UnicodeDecodeError as u:
-            if "codec can't decode byte 0x89" in str(u):
-                passed = True
-        self.assertTrue(passed)
+        # Run curl 127.0.0.1:port --output images/balanced-routing.png --http2-prior-knowledge
+        image_file_name = '/balanced-routing.png'
+        address = self.router_qdra.http_addresses[0] + "/images" + image_file_name
+        self.run_curl(address, args=['--output', self.router_qdra.outdir + image_file_name])
+        digest_of_server_file = get_digest(image_file(image_file_name[1:]))
+        digest_of_response_file = get_digest(self.router_qdra.outdir + image_file_name)
+        self.assertEqual(digest_of_server_file, digest_of_response_file)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_get_image_jpg(self):
-        # Run curl 127.0.0.1:port --http2-prior-knowledge
-        passed = False
-        try:
-            address = self.router_qdra.http_addresses[0] + "/images/apache.jpg"
-            self.run_curl(address=address)
-        except UnicodeDecodeError as u:
-            print(u)
-            if "codec can't decode byte 0xff" in str(u):
-                passed = True
-        self.assertTrue(passed)
+        # Run curl 127.0.0.1:port --output images/apache.jpg --http2-prior-knowledge
+        image_file_name = '/apache.jpg'
+        address = self.router_qdra.http_addresses[0] + "/images" + image_file_name
+        self.run_curl(address, args=['--output', self.router_qdra.outdir + image_file_name])
+        digest_of_server_file = get_digest(image_file(image_file(image_file_name[1:])))
+        digest_of_response_file = get_digest(self.router_qdra.outdir + image_file_name)
+        self.assertEqual(digest_of_server_file, digest_of_response_file)
 
     def check_connector_delete(self, client_addr, server_addr):
         # Run curl 127.0.0.1:port --http2-prior-knowledge
         # We are first making sure that the http request goes thru successfully.
-        out = self.run_curl(address=client_addr)
+        out = self.run_curl(client_addr)
 
         # Run a qdmanage query on connections to see how many qdr_connections are
         # there on the egress router
@@ -247,7 +263,7 @@ class CommonHttp2Tests():
         # Now, run a curl client GET request with a timeout
         request_timed_out = False
         try:
-            out = self.run_curl(address=client_addr, timeout=5)
+            out = self.run_curl(client_addr, timeout=5)
             print(out)
         except Exception as e:
             request_timed_out = True
@@ -269,7 +285,7 @@ class CommonHttp2Tests():
                 conn_present = True
         self.assertTrue(conn_present)
 
-        out = self.run_curl(address=client_addr)
+        out = self.run_curl(client_addr)
         ret_string = ""
         i = 0
         while (i < 1000):
@@ -310,23 +326,23 @@ class Http2TestOneStandaloneRouter(Http2TestBase, CommonHttp2Tests):
         ])
         cls.router_qdra = cls.tester.qdrouterd(name, config, wait=True)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_zzz_http_connector_delete(self):
         self.check_connector_delete(client_addr=self.router_qdra.http_addresses[0],
                                     server_addr=self.router_qdra.addresses[0])
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_000_stats(self):
         # Run curl 127.0.0.1:port --http2-prior-knowledge
         address = self.router_qdra.http_addresses[0]
         qd_manager = QdManager(self, address=self.router_qdra.addresses[0])
 
         # First request
-        out = self.run_curl(address=address)
+        out = self.run_curl(address)
 
         # Second request
         address = self.router_qdra.http_addresses[0] + "/myinfo"
-        out = self.run_curl(args=['-d', 'fname=Mickey&lname=Mouse', '-X', 'POST'], address=address)
+        out = self.run_curl(address, args=['-d', 'fname=Mickey&lname=Mouse', '-X', 'POST'])
         self.assertIn('Success! Your first name is Mickey, last name is Mouse', out)
 
         stats = qd_manager.query('org.apache.qpid.dispatch.httpRequestInfo')
@@ -393,7 +409,7 @@ class Http2TestOneEdgeRouter(Http2TestBase, CommonHttp2Tests):
         ])
         cls.router_qdra = cls.tester.qdrouterd(name, config, wait=True)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_zzz_http_connector_delete(self):
         self.check_connector_delete(client_addr=self.router_qdra.http_addresses[0],
                                     server_addr=self.router_qdra.addresses[0])
@@ -431,7 +447,7 @@ class Http2TestOneInteriorRouter(Http2TestBase, CommonHttp2Tests):
         ])
         cls.router_qdra = cls.tester.qdrouterd(name, config, wait=True)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_zzz_http_connector_delete(self):
         self.check_connector_delete(client_addr=self.router_qdra.http_addresses[0],
                                     server_addr=self.router_qdra.addresses[0])
@@ -487,7 +503,7 @@ class Http2TestTwoRouter(Http2TestBase, CommonHttp2Tests):
 
         sleep(2)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_000_stats(self):
         # Run curl 127.0.0.1:port --http2-prior-knowledge
         address = self.router_qdra.http_addresses[0]
@@ -495,11 +511,11 @@ class Http2TestTwoRouter(Http2TestBase, CommonHttp2Tests):
         stats_a = qd_manager_a.query('org.apache.qpid.dispatch.httpRequestInfo')
 
         # First request
-        self.run_curl(address=address)
+        self.run_curl(address)
         address = self.router_qdra.http_addresses[0] + "/myinfo"
 
         # Second request
-        out = self.run_curl(args=['-d', 'fname=Mickey&lname=Mouse', '-X', 'POST'], address=address)
+        out = self.run_curl(address, args=['-d', 'fname=Mickey&lname=Mouse', '-X', 'POST'])
         self.assertIn('Success! Your first name is Mickey, last name is Mouse', out)
 
         # Give time for the core thread to augment the stats.
@@ -536,7 +552,7 @@ class Http2TestTwoRouter(Http2TestBase, CommonHttp2Tests):
         self.assertEqual(stats_b[0].get('bytesOut'), 24)
         self.assertEqual(stats_b[0].get('bytesIn'), 3944)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_zzz_http_connector_delete(self):
         self.check_connector_delete(client_addr=self.router_qdra.http_addresses[0],
                                     server_addr=self.router_qdrb.addresses[0])
@@ -688,7 +704,173 @@ class Http2TestEdgeToEdgeViaInteriorRouter(Http2TestBase, CommonHttp2Tests):
         cls.router_qdrb = cls.tester.qdrouterd("edge-router-b", config_edge_b)
         sleep(5)
 
-    @SkipIfNeeded(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
+    @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_zzz_http_connector_delete(self):
         self.check_connector_delete(client_addr=self.router_qdra.http_addresses[0],
                                     server_addr=self.router_qdrb.addresses[0])
+
+
+class Http2TestGoAway(Http2TestBase):
+    @classmethod
+    def setUpClass(cls):
+        super(Http2TestGoAway, cls).setUpClass()
+        if skip_h2_test():
+            return
+        cls.http2_server_name = "hyperh2_server"
+        os.environ['SERVER_LISTEN_PORT'] = str(cls.tester.get_port())
+        cls.http2_server = cls.tester.http2server(name=cls.http2_server_name,
+                                                  listen_port=int(os.getenv('SERVER_LISTEN_PORT')),
+                                                  py_string='python3',
+                                                  server_file="hyperh2_server.py")
+        name = "http2-test-router"
+        cls.connector_name = 'connectorToBeDeleted'
+        cls.connector_props = {
+            'port': os.getenv('SERVER_LISTEN_PORT'),
+            'address': 'examples',
+            'host': '127.0.0.1',
+            'protocolVersion': 'HTTP2',
+            'name': cls.connector_name
+        }
+        config = Qdrouterd.Config([
+            ('router', {'mode': 'standalone', 'id': 'QDR'}),
+            ('listener', {'port': cls.tester.get_port(), 'role': 'normal', 'host': '0.0.0.0'}),
+
+            ('httpListener', {'port': cls.tester.get_port(), 'address': 'examples',
+                              'host': '127.0.0.1', 'protocolVersion': 'HTTP2'}),
+            ('httpConnector', cls.connector_props)
+        ])
+        cls.router_qdra = cls.tester.qdrouterd(name, config, wait=True)
+
+    @unittest.skipIf(skip_h2_test(),
+                     "Python 3.7 or greater, hyper-h2 and curl needed to run hyperhttp2 tests")
+    def test_goaway(self):
+        # Executes a request against the router at the /goaway_test_1 URL
+        # The router in turn forwards the request to the http2 server which
+        # responds with a GOAWAY frame. The router propagates this
+        # GOAWAY frame to the client and issues a HTTP 503 to the client
+        address = self.router_qdra.http_addresses[0] + "/goaway_test_1"
+        out = self.run_curl(address, args=["-i"])
+        self.assertIn("HTTP/2 503", out)
+
+
+class Http2Q2OneRouterTest(Http2TestBase):
+    @classmethod
+    def setUpClass(cls):
+        super(Http2Q2OneRouterTest, cls).setUpClass()
+        if skip_h2_test():
+            return
+        cls.http2_server_name = "http2_slow_q2_server"
+        os.environ['SERVER_LISTEN_PORT'] = str(cls.tester.get_port())
+        cls.http2_server = cls.tester.http2server(name=cls.http2_server_name,
+                                                  listen_port=int(os.getenv('SERVER_LISTEN_PORT')),
+                                                  py_string='python3',
+                                                  server_file="http2_slow_q2_server.py")
+        name = "http2-test-router"
+        cls.connector_name = 'connectorToServer'
+        cls.connector_props = {
+            'port': os.getenv('SERVER_LISTEN_PORT'),
+            'address': 'examples',
+            'host': '127.0.0.1',
+            'protocolVersion': 'HTTP2',
+            'name': cls.connector_name
+        }
+        config = Qdrouterd.Config([
+            ('router', {'mode': 'standalone', 'id': 'QDR'}),
+            ('listener', {'port': cls.tester.get_port(), 'role': 'normal', 'host': '0.0.0.0'}),
+
+            ('httpListener', {'port': cls.tester.get_port(), 'address': 'examples',
+                              'host': '127.0.0.1', 'protocolVersion': 'HTTP2'}),
+            ('httpConnector', cls.connector_props)
+        ])
+        cls.router_qdra = cls.tester.qdrouterd(name, config, wait=True)
+
+    @unittest.skipIf(skip_h2_test(),
+                     "Python 3.7 or greater, hyper-h2 and curl needed to run hyperhttp2 tests")
+    def test_q2_block_unblock(self):
+        # curl  -X POST -H "Content-Type: multipart/form-data"  -F "data=@/home/gmurthy/opensource/test.jpg"
+        # http://127.0.0.1:9000/upload --http2-prior-knowledge
+        address = self.router_qdra.http_addresses[0] + "/upload"
+        out = self.run_curl(address, args=['-X', 'POST', '-H', 'Content-Type: multipart/form-data',
+                                           '-F', 'data=@' + image_file('test.jpg')])
+        self.assertIn('Success', out)
+        num_blocked = 0
+        num_unblocked = 0
+        blocked = "q2 is blocked"
+        unblocked = "q2 is unblocked"
+        with open(self.router_qdra.logfile_path, 'r') as router_log:
+            log_lines = router_log.read().split("\n")
+            for log_line in log_lines:
+                if unblocked in log_line:
+                    num_unblocked += 1
+                elif blocked in log_line:
+                    num_blocked += 1
+
+        self.assertGreater(num_blocked, 0)
+        self.assertGreater(num_unblocked, 0)
+
+
+class Http2Q2TwoRouterTest(Http2TestBase):
+    @classmethod
+    def setUpClass(cls):
+        super(Http2Q2TwoRouterTest, cls).setUpClass()
+        if skip_h2_test():
+            return
+        cls.http2_server_name = "http2_server"
+        os.environ['SERVER_LISTEN_PORT'] = str(cls.tester.get_port())
+        cls.http2_server = cls.tester.http2server(name=cls.http2_server_name,
+                                                  listen_port=int(os.getenv('SERVER_LISTEN_PORT')),
+                                                  py_string='python3',
+                                                  server_file="http2_slow_q2_server.py")
+        qdr_a = "QDR.A"
+        inter_router_port = cls.tester.get_port()
+        config_qdra = Qdrouterd.Config([
+            ('router', {'mode': 'interior', 'id': 'QDR.A'}),
+            ('listener', {'port': cls.tester.get_port(), 'role': 'normal', 'host': '0.0.0.0'}),
+            ('httpListener', {'port': cls.tester.get_port(), 'address': 'examples',
+                              'host': '127.0.0.1', 'protocolVersion': 'HTTP2'}),
+            ('connector', {'name': 'connectorToB', 'role': 'inter-router',
+                           'port': inter_router_port,
+                           'verifyHostname': 'no'})
+        ])
+
+        qdr_b = "QDR.B"
+        cls.connector_name = 'serverConnector'
+        cls.http_connector_props = {
+            'port': os.getenv('SERVER_LISTEN_PORT'),
+            'address': 'examples',
+            'host': '127.0.0.1',
+            'protocolVersion': 'HTTP2',
+            'name': cls.connector_name
+        }
+        config_qdrb = Qdrouterd.Config([
+            ('router', {'mode': 'interior', 'id': 'QDR.B'}),
+            ('httpConnector', cls.http_connector_props),
+            ('listener', {'role': 'inter-router', 'maxSessionFrames': '10', 'port': inter_router_port})
+        ])
+        cls.router_qdrb = cls.tester.qdrouterd(qdr_b, config_qdrb, wait=True)
+        cls.router_qdra = cls.tester.qdrouterd(qdr_a, config_qdra, wait=True)
+        cls.router_qdra.wait_router_connected('QDR.B')
+
+    @unittest.skipIf(skip_h2_test(),
+                     "Python 3.7 or greater, hyper-h2 and curl needed to run hyperhttp2 tests")
+    def test_q2_block_unblock(self):
+        # curl  -X POST -H "Content-Type: multipart/form-data"  -F "data=@/home/gmurthy/opensource/test.jpg"
+        # http://127.0.0.1:9000/upload --http2-prior-knowledge
+        address = self.router_qdra.http_addresses[0] + "/upload"
+        out = self.run_curl(address, args=['-X', 'POST', '-H', 'Content-Type: multipart/form-data',
+                                           '-F', 'data=@' + image_file('test.jpg')])
+        self.assertIn('Success', out)
+        num_blocked = 0
+        num_unblocked = 0
+        blocked = "q2 is blocked"
+        unblocked = "q2 is unblocked"
+        with open(self.router_qdra.logfile_path, 'r') as router_log:
+            log_lines = router_log.read().split("\n")
+            for log_line in log_lines:
+                if unblocked in log_line:
+                    num_unblocked += 1
+                elif blocked in log_line:
+                    num_blocked += 1
+
+        self.assertGreater(num_blocked, 0)
+        self.assertGreater(num_unblocked, 0)

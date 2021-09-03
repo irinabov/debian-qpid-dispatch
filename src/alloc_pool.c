@@ -24,6 +24,7 @@
 #include "config.h"
 #include "entity.h"
 #include "entity_cache.h"
+#include "qd_asan_interface.h"
 
 #include "qpid/dispatch/alloc.h"
 #include "qpid/dispatch/ctools.h"
@@ -345,6 +346,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
     //
     qd_alloc_item_t *item = pop_stack(&pool->free_list);
     if (item) {
+        ASAN_UNPOISON_MEMORY_REGION(&item[1], desc->total_size);
 #ifdef QD_MEMORY_DEBUG
         item->desc   = desc;
         item->backtrace_size = backtrace(item->backtrace, STACK_DEPTH);
@@ -402,6 +404,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
                 break;
             }
             item->sequence = 0;
+            ASAN_POISON_MEMORY_REGION(&item[1], desc->total_size);
 #if QD_MEMORY_STATS
             desc->stats->held_by_threads++;
             desc->stats->total_alloc_from_heap++;
@@ -412,6 +415,7 @@ void *qd_alloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool)
 
     item = pop_stack(&pool->free_list);
     if (item) {
+        ASAN_UNPOISON_MEMORY_REGION(&item[1], desc->total_size);
 #ifdef QD_MEMORY_DEBUG
         item->desc = desc;
         item->backtrace_size = backtrace(item->backtrace, STACK_DEPTH);
@@ -453,6 +457,7 @@ void qd_dealloc(qd_alloc_type_desc_t *desc, qd_alloc_pool_t **tpool, char *p)
     item->desc = 0;
     QD_MEMORY_FILL(p, QD_MEMORY_FREE, desc->total_size);
 #endif
+    ASAN_POISON_MEMORY_REGION(p, desc->total_size);
 
     //
     // If this is the thread's first pass through here, allocate the
@@ -579,6 +584,7 @@ void qd_alloc_finalize(void)
         free_stack_chunks(&desc->global_pool->free_list);
         free(desc->global_pool);
         desc->global_pool = 0;
+        desc->header = 0;  // reset header, so we can initialize again later in qd_alloc (in subsequent test)
 
         //
         // Reclaim the items on thread pools
@@ -668,6 +674,7 @@ void qd_alloc_finalize(void)
     if (debug_dump) {
         fclose(dump_file);
         free(debug_dump);
+        debug_dump = 0;
     }
 
 #ifdef QD_MEMORY_DEBUG

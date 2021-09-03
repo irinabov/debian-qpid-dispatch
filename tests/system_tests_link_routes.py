@@ -17,11 +17,6 @@
 # under the License.
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 from time import sleep, time
 from threading import Event
 from subprocess import PIPE, STDOUT
@@ -321,8 +316,8 @@ class LinkRouteTest(TestCase):
         # Connect to the router acting like the broker (QDR.A) and check the deliveriesIngress and deliveriesEgress
         local_node = Node.connect(self.routers[0].addresses[0], timeout=TIMEOUT)
 
-        self.assertEqual(u'QDR.A', local_node.query(type='org.apache.qpid.dispatch.router',
-                                                    attribute_names=[u'id']).results[0][0])
+        self.assertEqual('QDR.A', local_node.query(type='org.apache.qpid.dispatch.router',
+                                                   attribute_names=['id']).results[0][0])
 
         self.assertEqual(1, local_node.read(type='org.apache.qpid.dispatch.router.address',
                                             name='M0org.apache.dev').deliveriesEgress)
@@ -663,37 +658,37 @@ class LinkRouteTest(TestCase):
         qdstat_address = self.routers[2].addresses[0]
         test = DeliveryTagsTest(sender_address, listening_address, qdstat_address)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_yyy_invalid_delivery_tag(self):
         test = InvalidTagTest(self.routers[2].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_close_with_unsettled(self):
         test = CloseWithUnsettledTest(self.routers[1].addresses[0], self.routers[1].addresses[1])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_www_drain_support_all_messages(self):
         drain_support = DrainMessagesHandler(self.routers[2].addresses[0])
         drain_support.run()
-        self.assertEqual(None, drain_support.error)
+        self.assertIsNone(drain_support.error)
 
     def test_www_drain_support_one_message(self):
         drain_support = DrainOneMessageHandler(self.routers[2].addresses[0])
         drain_support.run()
-        self.assertEqual(None, drain_support.error)
+        self.assertIsNone(drain_support.error)
 
     def test_www_drain_support_no_messages(self):
         drain_support = DrainNoMessagesHandler(self.routers[2].addresses[0])
         drain_support.run()
-        self.assertEqual(None, drain_support.error)
+        self.assertIsNone(drain_support.error)
 
     def test_www_drain_support_no_more_messages(self):
         drain_support = DrainNoMoreMessagesHandler(self.routers[2].addresses[0])
         drain_support.run()
-        self.assertEqual(None, drain_support.error)
+        self.assertIsNone(drain_support.error)
 
     def test_link_route_terminus_address(self):
         # The receiver is attaching to router B to a listener that has link route for address 'pulp.task' setup.
@@ -716,29 +711,29 @@ class LinkRouteTest(TestCase):
     def test_dynamic_source(self):
         test = DynamicSourceTest(self.routers[1].addresses[0], self.routers[1].addresses[1])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_dynamic_target(self):
         test = DynamicTargetTest(self.routers[1].addresses[0], self.routers[1].addresses[1])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_detach_without_close(self):
         test = DetachNoCloseTest(self.routers[1].addresses[0], self.routers[1].addresses[1])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_detach_mixed_close(self):
         test = DetachMixedCloseTest(self.routers[1].addresses[0], self.routers[1].addresses[1])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def _multi_link_send_receive(self, send_host, receive_host, name):
         senders = ["%s/%s" % (send_host, address) for address in ["org.apache.foo", "org.apache.bar"]]
         receivers = ["%s/%s" % (receive_host, address) for address in ["org.apache.foo", "org.apache.bar"]]
         test = MultiLinkSendReceive(senders, receivers, name)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_same_name_route_receivers_through_B(self):
         self._multi_link_send_receive(self.routers[0].addresses[0], self.routers[1].addresses[0], "recv_through_B")
@@ -762,7 +757,7 @@ class LinkRouteTest(TestCase):
         """
         test = EchoDetachReceived(self.routers[2].addresses[0], self.routers[2].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_bad_link_route_config(self):
         """
@@ -1002,7 +997,7 @@ class DynamicSourceTest(MessagingHandler):
         if event.connection == self.conn_route:
             self.conn_normal = event.container.connect(self.normal_addr)
         elif event.connection == self.conn_normal:
-            self.receiver = event.container.create_receiver(self.conn_normal, None, dynamic=True, options=DynamicNodeProperties({"x-opt-qd.address": u"pulp.task.abc"}))
+            self.receiver = event.container.create_receiver(self.conn_normal, None, dynamic=True, options=DynamicNodeProperties({"x-opt-qd.address": "pulp.task.abc"}))
 
     def on_link_opened(self, event):
         if event.receiver == self.receiver:
@@ -1059,7 +1054,7 @@ class DynamicTargetTest(MessagingHandler):
         if event.connection == self.conn_route:
             self.conn_normal = event.container.connect(self.normal_addr)
         elif event.connection == self.conn_normal:
-            self.sender = event.container.create_sender(self.conn_normal, None, options=[DynamicTarget(), DynamicNodeProperties({"x-opt-qd.address": u"pulp.task.abc"})])
+            self.sender = event.container.create_sender(self.conn_normal, None, options=[DynamicTarget(), DynamicNodeProperties({"x-opt-qd.address": "pulp.task.abc"})])
 
     def on_link_opened(self, event):
         if event.sender == self.sender:
@@ -2121,8 +2116,7 @@ class ConnectionLinkRouteTest(TestCase):
 
     def _get_address(self, mgmt, addr):
         a_type = 'org.apache.qpid.dispatch.router.address'
-        return list(filter(lambda a: a['name'].endswith(addr),
-                           mgmt.query(a_type)))
+        return [a for a in mgmt.query(a_type) if a['name'].endswith(addr)]
 
     def test_config_file_bad(self):
         # verify that specifying a connection link route in the configuration
@@ -2587,13 +2581,13 @@ class Dispatch1428(TestCase):
 
         first = SendReceive("%s/foo" % self.routers[1].addresses[0], "%s/foo" % self.routers[0].addresses[0])
         first.run()
-        self.assertEqual(None, first.error)
+        self.assertIsNone(first.error)
         second = SendReceive("%s/bar" % self.routers[1].addresses[0], "%s/bar" % self.routers[0].addresses[0])
         second.run()
-        self.assertEqual(None, second.error)
+        self.assertIsNone(second.error)
         third = SendReceive("%s/baz" % self.routers[1].addresses[0], "%s/baz" % self.routers[0].addresses[0])
         third.run()
-        self.assertEqual(None, third.error)
+        self.assertIsNone(third.error)
 
 
 class SendReceive(MessagingHandler):
@@ -2797,7 +2791,7 @@ class LinkRoute3Hop(TestCase):
         same session.
         """
         send_clients = 10
-        send_batch = 10
+        send_batch = 5
         total = send_clients * send_batch
 
         fake_service = FakeService(self.QDR_A.addresses[1],
@@ -2809,7 +2803,8 @@ class LinkRoute3Hop(TestCase):
         rx = self.popen(["test-receiver",
                          "-a", self.QDR_C.addresses[0],
                          "-c", str(total),
-                         "-s", "closest/test-client"],
+                         "-s", "closest/test-client",
+                         "-d"],
                         env=env,
                         expect=Process.EXIT_OK)
 
@@ -2819,7 +2814,8 @@ class LinkRoute3Hop(TestCase):
                                "-c", str(send_batch),
                                "-i", "TestSender-%s" % x,
                                "-sx",   # huge message size to trigger Q2/Q3
-                               "-t", "closest/test-client"],
+                               "-t", "closest/test-client",
+                               "-d"],
                               env=env,
                               expect=Process.EXIT_OK)
 
@@ -2868,7 +2864,7 @@ class LinkRoute3Hop(TestCase):
         sniffer = DispositionSniffer("%s/closest/test-client" %
                                      self.QDR_C.addresses[0])
         sniffer.run()
-        self.assertEqual(None, sniffer.error)
+        self.assertIsNone(sniffer.error)
         state = sniffer.delivery.remote
         self.assertTrue(state.failed)
         self.assertTrue(state.undeliverable)
@@ -2906,7 +2902,7 @@ class LinkRoute3Hop(TestCase):
         sniffer = DispositionSniffer("%s/closest/test-client" %
                                      self.QDR_C.addresses[0])
         sniffer.run()
-        self.assertEqual(None, sniffer.error)
+        self.assertIsNone(sniffer.error)
         state = sniffer.delivery.remote
         self.assertTrue(state.condition is not None)
         self.assertEqual("condition-name", state.condition.name)
