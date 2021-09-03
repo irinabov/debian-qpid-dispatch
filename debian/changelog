@@ -1,3 +1,9 @@
+qpid-dispatch (1.17.0-1qpid+bionic1) bionic; urgency=medium
+
+  * Rebased to 1.17.0
+
+ -- Kim van der Riet <kpvdr@redhat.com>  Fri, 03 Sep 2021 15:58:55 -0400
+
 qpid-dispatch (1.16.0-1qpid+bionic1) bionic; urgency=medium
 
   * Rebased to 1.16.0 
