@@ -17,11 +17,6 @@
 # under the License.
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 from time import sleep
 import json
 import os
@@ -42,7 +37,7 @@ from proton.handlers import MessagingHandler
 from proton.reactor import Container, AtLeastOnce
 from proton.utils import BlockingConnection
 from qpid_dispatch.management.client import Node
-CONNECTION_PROPERTIES_UNICODE_STRING = {u'connection': u'properties', u'int_property': 6451}
+CONNECTION_PROPERTIES_UNICODE_STRING = {'connection': 'properties', 'int_property': 6451}
 
 
 class TwoRouterTest(TestCase):
@@ -124,7 +119,7 @@ class TwoRouterTest(TestCase):
     def test_01_pre_settled(self):
         test = DeliveriesInTransit(self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
         local_node = Node.connect(self.routers[0].addresses[0], timeout=TIMEOUT)
         outs = local_node.query(type='org.apache.qpid.dispatch.router')
@@ -137,22 +132,22 @@ class TwoRouterTest(TestCase):
     def test_02a_multicast_unsettled(self):
         test = MulticastUnsettled(self.routers[0].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_02c_sender_settles_first(self):
         test = SenderSettlesFirst(self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_03_message_annotations(self):
         test = MessageAnnotationsTest(self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_03a_test_strip_message_annotations_no(self):
         test = MessageAnnotationsStripTest(self.routers[0].addresses[1], self.routers[1].addresses[1])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_03a_test_strip_message_annotations_no_add_trace(self):
         test = MessageAnnotationsStripAddTraceTest(self.routers[0].addresses[1], self.routers[1].addresses[1])
@@ -160,48 +155,48 @@ class TwoRouterTest(TestCase):
         # Dump the logger output only if there is a test error, otherwise dont bother
         if test.error:
             test.logger.dump()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_03a_test_strip_message_annotations_both_add_ingress_trace(self):
         test = MessageAnnotationsStripBothAddIngressTrace(self.routers[0].addresses[2], self.routers[1].addresses[2])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_03a_test_strip_message_annotations_out(self):
         test = MessageAnnotationsStripMessageAnnotationsOut(self.routers[0].addresses[3], self.routers[1].addresses[3])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_03a_test_strip_message_annotations_in(self):
         test = MessageAnnotationStripMessageAnnotationsIn(self.routers[0].addresses[4], self.routers[1].addresses[4])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_04_management(self):
         test = ManagementTest(self.routers[0].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_06_semantics_closest_is_local(self):
         test = SemanticsClosestIsLocal(self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_07_semantics_closest_is_remote(self):
         test = SemanticsClosestIsRemote(self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_08_semantics_balanced(self):
         test = SemanticsBalanced(self.routers[0].addresses[0], self.routers[0].addresses[1],
                                  self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_09_to_override(self):
         test = MessageAnnotaionsPreExistingOverride(self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_10_propagated_disposition(self):
         test = PropagatedDisposition(self, self.routers[0].addresses[0], self.routers[1].addresses[0])
@@ -224,12 +219,12 @@ class TwoRouterTest(TestCase):
         """
         test = ExcessDeliveriesReleasedTest(self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_15_attach_on_inter_router(self):
         test = AttachOnInterRouterTest(self.routers[0].addresses[5])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_17_address_wildcard(self):
         # verify proper distribution is selected by wildcard
@@ -290,12 +285,12 @@ class TwoRouterTest(TestCase):
     def test_17_large_streaming_test(self):
         test = LargeMessageStreamTest(self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_18_single_char_dest_test(self):
         test = SingleCharacterDestinationTest(self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_19_delete_inter_router_connection(self):
         """
@@ -445,8 +440,8 @@ class DeleteConnectionWithReceiver(MessagingHandler):
             request = Message()
             request.address = "amqp:/_local/$management"
             request.properties = {
-                u'type': u'org.apache.qpid.dispatch.connection',
-                u'operation': u'QUERY'}
+                'type': 'org.apache.qpid.dispatch.connection',
+                'operation': 'QUERY'}
             request.reply_to = self.mgmt_receiver.remote_source.address
             self.mgmt_sender.send(request)
 
@@ -465,20 +460,20 @@ class DeleteConnectionWithReceiver(MessagingHandler):
                             request = Message()
                             request.address = "amqp:/_local/$management"
                             request.properties = {
-                                u'identity': identity,
-                                u'type': u'org.apache.qpid.dispatch.connection',
-                                u'operation': u'UPDATE'
+                                'identity': identity,
+                                'type': 'org.apache.qpid.dispatch.connection',
+                                'operation': 'UPDATE'
                             }
                             request.body = {
-                                u'adminStatus': u'deleted'}
+                                'adminStatus': 'deleted'}
                             request.reply_to = self.mgmt_receiver_1.remote_source.address
                             self.mgmt_sender.send(request)
         elif event.receiver == self.mgmt_receiver_1:
             if event.message.properties['statusDescription'] == 'OK' and event.message.body['adminStatus'] == 'deleted':
                 request = Message()
                 request.address = "amqp:/_local/$management"
-                request.properties = {u'type': u'org.apache.qpid.dispatch.connection',
-                                      u'operation': u'QUERY'}
+                request.properties = {'type': 'org.apache.qpid.dispatch.connection',
+                                      'operation': 'QUERY'}
                 request.reply_to = self.mgmt_receiver_2.remote_source.address
                 self.mgmt_sender.send(request)
 
@@ -877,7 +872,7 @@ class ManagementTest(MessagingHandler):
             request = Message()
             request.correlation_id = "C1"
             request.address = "amqp:/_local/$management"
-            request.properties = {u'type': u'org.amqp.management', u'name': u'self', u'operation': u'GET-MGMT-NODES'}
+            request.properties = {'type': 'org.amqp.management', 'name': 'self', 'operation': 'GET-MGMT-NODES'}
             request.reply_to = self.receiver.remote_source.address
             self.sender.send(request)
 
@@ -885,7 +880,7 @@ class ManagementTest(MessagingHandler):
             request.address = "amqp:/_topo/0/QDR.B/$management"
             request.correlation_id = "C2"
             request.reply_to = self.receiver.remote_source.address
-            request.properties = {u'type': u'org.amqp.management', u'name': u'self', u'operation': u'GET-MGMT-NODES'}
+            request.properties = {'type': 'org.amqp.management', 'name': 'self', 'operation': 'GET-MGMT-NODES'}
             self.sender.send(request)
 
     def on_message(self, event):
@@ -1592,21 +1587,21 @@ class PropagatedDisposition(MessagingHandler):
 
     def check(self):
         unique_list = sorted(list(dict.fromkeys(self.settled)))
-        if unique_list == [u'accept', u'modified', u'reject']:
+        if unique_list == ['accept', 'modified', 'reject']:
             self.passed = True
             self.sender_conn.close()
             self.receiver_conn.close()
             self.timer.cancel()
 
     def on_message(self, event):
-        if event.message.body == u'accept':
+        if event.message.body == 'accept':
             event.delivery.update(Delivery.ACCEPTED)
             event.delivery.settle()
-        elif event.message.body == u'reject':
+        elif event.message.body == 'reject':
             self.set_rejected_data(event.delivery.local)
             event.delivery.update(Delivery.REJECTED)
             event.delivery.settle()
-        elif event.message.body == u'modified':
+        elif event.message.body == 'modified':
             self.set_modified_data(event.delivery.local)
             event.delivery.update(Delivery.MODIFIED)
             event.delivery.settle()
@@ -1879,7 +1874,7 @@ class PropagationTest(TestCase):
     def test_propagation_of_locally_undefined_address(self):
         test = MulticastTestClient(self.routers[0].addresses[0], self.routers[1].addresses[0])
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
         self.assertEqual(test.received, 2)
 
 
@@ -1998,7 +1993,8 @@ class StreamingLinkScrubberTest(TestCase):
         cmd = ["test-receiver",
                "-a", self.RouterB.listener,
                "-s", address,
-               "-c", str(sender_count)]
+               "-c", str(sender_count),
+               "-d"]
         rx = self.popen(cmd, env=env)
 
         self.RouterA.wait_address(address)
@@ -2011,7 +2007,8 @@ class StreamingLinkScrubberTest(TestCase):
                "-a", self.RouterA.listener,
                "-t", address,
                "-c", "1",
-               "-sx"
+               "-sx",
+               "-d"
                ]
         senders = [self.popen(cmd, env=env) for x in range(sender_count)]
 
@@ -2133,7 +2130,7 @@ class TwoRouterExtensionStateTest(TestCase):
                                     self.RouterB.addresses[0],
                                     "closest/fleabag")
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_03_multicast(self):
         """

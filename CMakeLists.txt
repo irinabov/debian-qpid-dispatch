@@ -104,13 +104,16 @@ endif ()
 if (NOT DEFINED Python_FIND_FRAMEWORK)
     set(Python_FIND_FRAMEWORK "LAST")
 endif ()
-find_package(Python REQUIRED COMPONENTS Interpreter Development)
+find_package(Python 3.6.8 REQUIRED COMPONENTS Interpreter Development)
 find_package(Threads REQUIRED)
 find_package(Proton 0.34.0 REQUIRED COMPONENTS Core Proactor)
 message(STATUS "Found Proton: ${Proton_LIBRARIES} (found version \"${Proton_VERSION}\")" )
 ##
 ## Optional dependencies
 ##
+
+# google benchmark tests are disabled by default
+OPTION(BUILD_BENCHMARKS "Enable building and running benchmarks with Google Benchmark" OFF)
 
 # http2 support is optional
 find_package(libnghttp2 1.33.0)
@@ -141,13 +144,6 @@ if (LIBWEBSOCKETS_FOUND AND LIBWEBSOCKETS_VERSION_STRING)
   endif()
 
 endif(LIBWEBSOCKETS_FOUND AND LIBWEBSOCKETS_VERSION_STRING)
-
-# Python
-if (Python_VERSION_MAJOR STREQUAL 3)
-    set(PY_STRING "python3")
-elseif(Python_VERSION_MAJOR STREQUAL 2)
-    set(PY_STRING "python")
-endif()
 
 if (NOT DEFINED DISPATCH_TEST_TIMEOUT)
     set(DISPATCH_TEST_TIMEOUT "600")
@@ -222,7 +218,12 @@ if(QD_ENABLE_ASSERTIONS)
     if(NOT uppercase_CMAKE_BUILD_TYPE STREQUAL "DEBUG")
         # NOTE: use `add_compile_options` rather than `add_definitions` since
         # `add_definitions` does not support generator expressions.
-        add_compile_options($<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:-UNDEBUG>)
+        if(${CMAKE_VERSION} VERSION_LESS "3.11.4")
+            add_compile_options(-UNDEBUG)
+        else()
+            add_compile_options($<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:-UNDEBUG>)
+        endif()
+
 
         # Also remove /D NDEBUG to avoid MSVC warnings about conflicting defines.
         foreach (flags_var_to_scrub
@@ -264,9 +265,6 @@ install(FILES include/qpid/dispatch.h DESTINATION ${INCLUDE_INSTALL_DIR}/qpid)
 install(FILES etc/qdrouterd.conf DESTINATION ${SYSCONF_INSTALL_DIR}/qpid-dispatch)
 install(FILES etc/sasl2/qdrouterd.conf DESTINATION ${SYSCONF_INSTALL_DIR}/sasl2)
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tools/qdstat.in ${CMAKE_CURRENT_SOURCE_DIR}/tools/qdstat)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tools/qdmanage.in ${CMAKE_CURRENT_SOURCE_DIR}/tools/qdmanage)
-
 
 # Tools
 install(PROGRAMS
@@ -280,19 +278,13 @@ install(FILES
   README
   DESTINATION ${QD_DOC_INSTALL_DIR})
 
-add_subdirectory(src) # Build src first so other subdirs can use QPID_DISPATCH_LIB
-
-# run.py environment runner script - needs QPID_DISPATCH_LIB
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run.py.in ${CMAKE_CURRENT_BINARY_DIR}/run.py)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run.py.in ${CMAKE_CURRENT_BINARY_DIR}/tests/run.py)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/authservice.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/authservice.py)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/failoverserver.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/failoverserver.py)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_authz_service_plugin.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_authz_service_plugin.py)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_handle_failover.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_handle_failover.py)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_http.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_http.py)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_topology_disposition.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_topology_disposition.py)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/python/qpid_dispatch_internal/management/agent.py.in ${CMAKE_CURRENT_SOURCE_DIR}/python/qpid_dispatch_internal/management/agent.py)
 execute_process(COMMAND ${RUN} --sh OUTPUT_FILE config.sh)
+
+add_subdirectory(src) # Build src first so other subdirs can use qpid-dispatch library
 
 if (NOT UNITTEST_MISSING)
   file(GLOB SCRAPER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tools/scraper/*.py)

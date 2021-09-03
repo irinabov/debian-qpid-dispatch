@@ -383,6 +383,16 @@ size_t qd_message_stream_data_payload_length(const qd_message_stream_data_t *str
 void qd_message_stream_data_release(qd_message_stream_data_t *stream_data);
 
 
+/**
+ * qd_message_stream_data_release_up_to
+ *
+ * Release this stream data and all the previous ones also.
+ *
+ * @param stream_data Pointer to a body data object returned by qd_message_next_stream_data
+ */
+void qd_message_stream_data_release_up_to(qd_message_stream_data_t *stream_data);
+
+
 typedef enum {
     QD_MESSAGE_STREAM_DATA_BODY_OK,      // A valid body data object has been returned
     QD_MESSAGE_STREAM_DATA_FOOTER_OK,    // A valid footer has been returned
@@ -403,6 +413,18 @@ typedef enum {
  * @return The stream_data_result describing the result of this operation
  */
 qd_message_stream_data_result_t qd_message_next_stream_data(qd_message_t *msg, qd_message_stream_data_t **stream_data);
+
+
+/**
+ * qd_message_stream_data_footer_append
+ *
+ * Constructs a footer field by calling the qd_compose(QD_PERFORMATIVE_FOOTER, field);
+ * It then inserts the passed in buffer list to the composed field and proceeds to disable q2 before finally adding the footer
+ * field to the message.
+ *
+ * Use this function if you have the complete footer data available in the passed in buffer list
+ */
+int qd_message_stream_data_footer_append(qd_message_t *message, qd_buffer_list_t *footer_props);
 
 
 /**
@@ -535,29 +557,12 @@ void qd_message_add_fanout(qd_message_t *in_msg,
 /**
  * Disable the Q2-holdoff for this message.
  *
+ * Note: this call may invoke the Q2 unblock hander routine associated with
+ * this message.  See qd_message_set_q2_unblocked_handler().
+ *
  * @param msg A pointer to the message
  */
 void qd_message_Q2_holdoff_disable(qd_message_t *msg);
-
-/**
- * Test if attempt to retrieve message data through qd_message_recv should block
- * due to Q2 input holdoff limit being exceeded. This message has enough
- * buffers in the internal buffer chain and any calls to to qd_message_receive
- * will not result in a call to pn_link_receive to retrieve more data.
- *
- * @param msg A pointer to the message
- */
-bool qd_message_Q2_holdoff_should_block(qd_message_t *msg);
-
-/**
- * Test if a message that is blocked by Q2 input holdoff has enough room
- * to begin receiving again. This message has transmitted and disposed of
- * enough buffers to begin receiving more data from the underlying proton link.
- *
- * @param msg A pointer to the message
- */
-bool qd_message_Q2_holdoff_should_unblock(qd_message_t *msg);
-
 
 /**
  * Check if a message has hit its Q2 limit and is currently blocked.
@@ -594,9 +599,8 @@ bool qd_message_aborted(const qd_message_t *msg);
 /**
  * Set the aborted flag on the message.
  * @param msg A pointer to the message
- * @param aborted
  */
-void qd_message_set_aborted(const qd_message_t *msg, bool aborted);
+void qd_message_set_aborted(const qd_message_t *msg);
 
 /**
  * Return message priority

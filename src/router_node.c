@@ -410,10 +410,11 @@ static void log_link_message(qd_connection_t *conn, pn_link_t *pn_link, qd_messa
     if (!conn || !pn_link || !msg) return;
     const qd_server_config_t *cf = qd_connection_config(conn);
     if (!cf) return;
-    char buf[qd_message_repr_len()];
+    size_t repr_len = qd_message_repr_len();
+    char *buf = qd_malloc(repr_len);
     const char *msg_str = qd_message_oversize(msg) ? "oversize message" :
-                          qd_message_aborted(msg) ? "aborted message" : 
-                          qd_message_repr(msg, buf, sizeof(buf), cf->log_bits);
+                          qd_message_aborted(msg) ? "aborted message" :
+                          qd_message_repr(msg, buf, repr_len, cf->log_bits);
     if (msg_str) {
         const char *src = pn_terminus_get_address(pn_link_source(pn_link));
         const char *tgt = pn_terminus_get_address(pn_link_target(pn_link));
@@ -426,6 +427,7 @@ static void log_link_message(qd_connection_t *conn, pn_link_t *pn_link, qd_messa
                src ? src : "",
                tgt ? tgt : "");
     }
+    free(buf);
 }
 
 /**
@@ -1111,10 +1113,14 @@ static int AMQP_link_detach_handler(void* context, qd_link_t *link, qd_detach_ty
             if (msg) {
                 if (!qd_message_receive_complete(msg)) {
                     qd_link_set_q2_limit_unbounded(link, true);
+
+                    // since this thread owns link we can call the
+                    // rx_hander directly rather than schedule it via
+                    // the unblock handler:
+                    qd_message_clear_q2_unblocked_handler(msg);
                     qd_message_Q2_holdoff_disable(msg);
-                    qd_link_t_sp *safe_ptr = NEW(qd_link_t_sp);
-                    set_safe_ptr_qd_link_t(link, safe_ptr);
-                    deferred_AMQP_rx_handler(safe_ptr, false);
+                    while (AMQP_rx_handler((qd_router_t*) context, link))
+                           ;
                 }
             }
         }
@@ -1614,14 +1620,10 @@ static qd_node_type_t router_node = {"router", 0, 0,
                                      AMQP_inbound_opened_handler,
                                      AMQP_outbound_opened_handler,
                                      AMQP_closed_handler};
-static int type_registered = 0;
 
 qd_router_t *qd_router(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area, const char *id)
 {
-    if (!type_registered) {
-        type_registered = 1;
-        qd_container_register_node_type(qd, &router_node);
-    }
+    qd_container_register_node_type(qd, &router_node);
 
     size_t dplen = 9 + strlen(area) + strlen(id);
     node_id = (char*) qd_malloc(dplen);
@@ -2067,7 +2069,6 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
     if (disp && !pn_delivery_settled(pnd)) {
         uint64_t ignore = 0;
         qd_delivery_state_t *dstate = qdr_delivery_take_local_delivery_state(dlv, &ignore);
-        assert(ignore == disp); // expected: since both are from the same dlv
 
         // update if the disposition has changed or there is new state associated with it
         if (disp != pn_delivery_local_state(pnd) || dstate) {
@@ -2107,10 +2108,6 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
                 // and if it is blocked by Q2 holdoff, get the link rolling again.
                 //
                 qd_message_Q2_holdoff_disable(msg);
-
-                qd_link_t_sp *safe_ptr = NEW(qd_link_t_sp);
-                set_safe_ptr_qd_link_t(link, safe_ptr);
-                qd_connection_invoke_deferred(qd_conn, deferred_AMQP_rx_handler, safe_ptr);
             }
         }
     }

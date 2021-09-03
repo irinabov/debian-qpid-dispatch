@@ -801,9 +801,7 @@ qd_error_t qd_entity_refresh_connector(qd_entity_t* entity, void *impl)
     int arr_length = get_failover_info_length(conn_info_list);
 
     // This is the string that will contain the comma separated failover list
-    char failover_info[arr_length + 1];
-    failover_info[0] = 0;
-
+    char *failover_info = qd_calloc(arr_length + 1, sizeof(char));
     while(item) {
 
         // Break out of the loop when we have hit all items in the list.
@@ -816,7 +814,7 @@ qd_error_t qd_entity_refresh_connector(qd_entity_t* entity, void *impl)
 
         // We need to go to the elements in the list to get to the
         // element that matches the connection index. This is the first
-        // url that the router will try to connect on ffailover.
+        // url that the router will try to connect on failover.
         if (conn_index == i) {
             num_items += 1;
             if (item->scheme) {
@@ -875,10 +873,12 @@ qd_error_t qd_entity_refresh_connector(qd_entity_t* entity, void *impl)
         && qd_entity_set_string(entity, "connectionMsg", connector->conn_msg) == 0) {
 
         sys_mutex_unlock(connector->lock);
+        free(failover_info);
         return QD_ERROR_NONE;
     }
 
     sys_mutex_unlock(connector->lock);
+    free(failover_info);
     return qd_error_code();
 }
 
@@ -993,6 +993,8 @@ void qd_connection_manager_free(qd_connection_manager_t *cm)
         config_sasl_plugin_free(cm, saslp);
         saslp = DEQ_HEAD(cm->config_sasl_plugins);
     }
+
+    free(cm);
 }
 
 
@@ -1079,16 +1081,19 @@ void qd_connection_manager_delete_connector(qd_dispatch_t *qd, void *impl)
         // cannot free the timer while holding ct->lock since the
         // timer callback may be running during the call to qd_timer_free
         qd_timer_t *timer = 0;
+        void *dct = qd_connection_new_qd_deferred_call_t();
         sys_mutex_lock(ct->lock);
         timer = ct->timer;
         ct->timer = 0;
         ct->state = CXTR_STATE_DELETED;
         qd_connection_t *conn = ct->qd_conn;
         if (conn && conn->pn_conn) {
-            qd_connection_invoke_deferred(conn, deferred_close, conn->pn_conn);
+            qd_connection_invoke_deferred_impl(conn, deferred_close, conn->pn_conn, dct);
+            sys_mutex_unlock(ct->lock);
+        } else {
+            sys_mutex_unlock(ct->lock);
+            qd_connection_free_qd_deferred_call_t(dct);
         }
-        sys_mutex_unlock(ct->lock);
-
         qd_timer_free(timer);
         DEQ_REMOVE(qd->connection_manager->connectors, ct);
         qd_connector_decref(ct);

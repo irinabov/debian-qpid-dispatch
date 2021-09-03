@@ -21,11 +21,6 @@
 # Test the multicast forwarder
 #
 
-from __future__ import unicode_literals
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 import sys
 from time import sleep
 
@@ -195,7 +190,7 @@ class MulticastLinearTest(TestCase):
         atype = 'org.apache.qpid.dispatch.allocator'
         q = mgmt.query(type=atype).get_dicts()
         for name in stats:
-            d[name] = list(filter(lambda a: a['typeName'] == name, q))[0]
+            d[name] = next(a for a in q if a['typeName'] == name)
         return d
 
     def _check_for_leaks(self):
@@ -226,7 +221,7 @@ class MulticastLinearTest(TestCase):
                                          detach=True,
                                          body=body)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_01_presettled_large_msg_rx_detach(self):
         self._presettled_large_msg_rx_detach(self.config, 10, ['R-EA1-1', 'R-EB1-2'])
@@ -240,7 +235,7 @@ class MulticastLinearTest(TestCase):
                                          detach=False,
                                          body=body)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_02_presettled_large_msg_rx_close(self):
         self._presettled_large_msg_rx_close(self.config, 10, ['R-EA1-2', 'R-EB1-1'])
@@ -251,7 +246,7 @@ class MulticastLinearTest(TestCase):
         body = " MCAST UNSETTLED LARGE RX DETACH " + LARGE_PAYLOAD
         test = MulticastUnsettledRxFail(self.config, count, drop_clients, detach=True, body=body)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_10_unsettled_large_msg_rx_detach(self):
         self._unsettled_large_msg_rx_detach(self.config, 10, ['R-EA1-1', 'R-EB1-2'])
@@ -262,7 +257,7 @@ class MulticastLinearTest(TestCase):
         body = " MCAST UNSETTLED LARGE RX CLOSE " + LARGE_PAYLOAD
         test = MulticastUnsettledRxFail(self.config, count, drop_clients, detach=False, body=body)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_11_unsettled_large_msg_rx_close(self):
         self._unsettled_large_msg_rx_close(self.config, 10, ['R-EA1-2', 'R-EB1-1', ])
@@ -283,14 +278,14 @@ class MulticastLinearTest(TestCase):
         body = " MCAST MAYBE PRESETTLED LARGE " + LARGE_PAYLOAD
         test = MulticastPresettled(self.config, 11, body, SendMixed())
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_52_presettled_large_msg(self):
         # Same as above, (pre-settled sender settle mode)
         body = " MCAST PRESETTLED LARGE " + LARGE_PAYLOAD
         test = MulticastPresettled(self.config, 13, body, SendPresettled())
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_60_unsettled_3ack(self):
         # Sender sends unsettled, waits for Outcome from Receiver then settles
@@ -298,7 +293,7 @@ class MulticastLinearTest(TestCase):
         body = " MCAST UNSETTLED "
         test = MulticastUnsettled3Ack(self.config, 10, body)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
         self.assertEqual(test.n_outcomes[Delivery.ACCEPTED], test.n_sent)
 
     def test_61_unsettled_3ack_large_msg(self):
@@ -306,7 +301,7 @@ class MulticastLinearTest(TestCase):
         body = " MCAST UNSETTLED LARGE " + LARGE_PAYLOAD
         test = MulticastUnsettled3Ack(self.config, 11, body=body)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
         self.assertEqual(test.n_outcomes[Delivery.ACCEPTED], test.n_sent)
 
     def _unsettled_3ack_outcomes(self,
@@ -320,7 +315,7 @@ class MulticastLinearTest(TestCase):
                                       body,
                                       outcomes=outcomes)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
         self.assertEqual(test.n_outcomes[expected], test.n_sent)
 
     def test_63_unsettled_3ack_outcomes(self):
@@ -373,20 +368,20 @@ class MulticastLinearTest(TestCase):
         body = " MCAST UNSETTLED 1ACK "
         test = MulticastUnsettled1Ack(self.config, 10, body)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_71_unsettled_1ack_large_msg(self):
         # Same as above but with multiframe streaming
         body = " MCAST UNSETTLED 1ACK LARGE " + LARGE_PAYLOAD
         test = MulticastUnsettled1Ack(self.config, 10, body)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_80_unsettled_3ack_message_annotations(self):
         body = " MCAST UNSETTLED 3ACK LARGE MESSAGE ANNOTATIONS " + LARGE_PAYLOAD
         test = MulticastUnsettled3AckMA(self.config, 10, body)
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_90_credit_no_subscribers(self):
         """
@@ -396,12 +391,12 @@ class MulticastLinearTest(TestCase):
                                       target='multicast/no/subscriber1')
 
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
         test = MulticastCreditBlocked(address=self.INT_A.listener,
                                       target='multicast/no/subscriber2')
         test.run()
-        self.assertEqual(None, test.error)
+        self.assertIsNone(test.error)
 
     def test_91_anonymous_sender(self):
         """
@@ -632,7 +627,7 @@ class MulticastBase(MessagingHandler):
                 mgmt = cfg['router'].management
                 atype = 'org.apache.qpid.dispatch.router.address'
                 addrs = mgmt.query(type=atype).get_dicts()
-                if list(filter(lambda a: a['name'].find(self.topic) != -1, addrs)):
+                if any(self.topic in a['name'] for a in addrs):
                     clean = False
                     break
             if not clean:
