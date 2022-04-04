@@ -18,10 +18,11 @@
 #
 
 from proton import Message, symbol, int32
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT
-from system_test import unittest, TestTimeout
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
+
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT
+from system_test import unittest, TestTimeout
 
 
 class RouterTest(TestCase):
@@ -202,6 +203,88 @@ class RejectHigherVersionMARTest(MessagingHandler):
 
     def run(self):
         Container(self).run()
+
+
+class HugeRouterIdTest(TestCase):
+    """
+    Ensure long router identifiers are advertized properly.
+
+    Deploy a mesh of four routers with ids > 64 octets in length.
+    """
+    MAX_ID_LEN = 127
+
+    @classmethod
+    def setUpClass(cls):
+        super(HugeRouterIdTest, cls).setUpClass()
+
+        def router(name, extra_config):
+
+            config = [
+                ('router', {'mode': 'interior', 'id': name}),
+                ('listener', {'port': cls.tester.get_port()})
+            ] + extra_config
+
+            config = Qdrouterd.Config(config)
+
+            r = cls.tester.qdrouterd(name[:32], config, wait=False)
+            cls.routers.append(r)
+            return r
+
+        cls.routers = []
+
+        ir_port_A = cls.tester.get_port()
+        ir_port_B = cls.tester.get_port()
+        ir_port_C = cls.tester.get_port()
+        ir_port_D = cls.tester.get_port()
+
+        name_suffix = "X" * (cls.MAX_ID_LEN - 2)
+
+        cls.RA_name = 'A.' + name_suffix
+        cls.RA = router(cls.RA_name,
+                        [('listener', {'role': 'inter-router', 'port': ir_port_A}),
+                         ('connector', {'role': 'inter-router', 'port': ir_port_B}),
+                         ('connector', {'role': 'inter-router', 'port': ir_port_C}),
+                         ('connector', {'role': 'inter-router', 'port': ir_port_D})])
+
+        cls.RB_name = 'B.' + name_suffix
+        cls.RB = router(cls.RB_name,
+                        [('listener', {'role': 'inter-router', 'port': ir_port_B}),
+                         ('connector', {'role': 'inter-router', 'port': ir_port_C}),
+                         ('connector', {'role': 'inter-router', 'port': ir_port_D})])
+
+        cls.RC_name = 'C.' + name_suffix
+        cls.RC = router(cls.RC_name,
+                        [('listener', {'role': 'inter-router', 'port': ir_port_C}),
+                         ('connector', {'role': 'inter-router', 'port': ir_port_D})])
+
+        cls.RD_name = 'D.' + name_suffix
+        cls.RD = router(cls.RD_name,
+                        [('listener', {'role': 'inter-router', 'port': ir_port_D})])
+
+        cls.RA.wait_ports()
+        cls.RB.wait_ports()
+        cls.RC.wait_ports()
+        cls.RD.wait_ports()
+
+    def test_01_wait_for_routers(self):
+        """
+        Wait until all the router in the mesh can see each other
+        """
+        self.RA.wait_router_connected(self.RB_name)
+        self.RA.wait_router_connected(self.RC_name)
+        self.RA.wait_router_connected(self.RD_name)
+
+        self.RB.wait_router_connected(self.RA_name)
+        self.RB.wait_router_connected(self.RC_name)
+        self.RB.wait_router_connected(self.RD_name)
+
+        self.RC.wait_router_connected(self.RA_name)
+        self.RC.wait_router_connected(self.RB_name)
+        self.RC.wait_router_connected(self.RD_name)
+
+        self.RD.wait_router_connected(self.RA_name)
+        self.RD.wait_router_connected(self.RB_name)
+        self.RD.wait_router_connected(self.RC_name)
 
 
 if __name__ == '__main__':

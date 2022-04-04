@@ -21,9 +21,11 @@ import os
 import re
 import unittest
 from subprocess import PIPE
+
 from proton import Url, SSLDomain, SSLUnavailable, SASL
-from system_test import main_module, TIMEOUT, TestCase, Qdrouterd, DIR
 from proton.utils import BlockingConnection
+
+from system_test import main_module, TIMEOUT, TestCase, Qdrouterd, DIR
 
 
 class QdstatTestBase(TestCase):
@@ -144,13 +146,13 @@ class QdstatTest(QdstatTestBase):
         out = self.run_qdstat(['--address'], regex=r'QDR.A')
         out = self.run_qdstat(['--address'], regex=r'\$management')
         parts = out.split("\n")
-        self.assertEqual(len(parts), 11)
+        self.assertEqual(len(parts), 12)
 
     def test_address_csv(self):
         out = self.run_qdstat(['--address'], regex=r'QDR.A')
         out = self.run_qdstat(['--address'], regex=r'\$management')
         parts = out.split("\n")
-        self.assertEqual(len(parts), 11)
+        self.assertEqual(len(parts), 12)
 
     def test_qdstat_no_args(self):
         outs = self.run_qdstat(args=None)
@@ -243,9 +245,6 @@ class QdstatTest(QdstatTestBase):
 
     def test_memory(self):
         out = self.run_qdstat(['--memory'])
-        if out.strip() == "No memory statistics available":
-            # router built w/o memory pools enabled]
-            return self.skipTest("Router's memory pools disabled")
         self.assertIn("QDR.A", out)
         self.assertIn("UTC", out)
         regexp = r'qdr_address_t\s+[0-9]+'
@@ -253,9 +252,6 @@ class QdstatTest(QdstatTestBase):
 
     def test_memory_csv(self):
         out = self.run_qdstat(['--memory', '--csv'])
-        if out.strip() == "No memory statistics available":
-            # router built w/o memory pools enabled]
-            return self.skipTest("Router's memory pools disabled")
         self.assertIn("QDR.A", out)
         self.assertIn("UTC", out)
         regexp = r'qdr_address_t","[0-9]+'
@@ -544,9 +540,9 @@ class QdstatLinkPriorityTest(QdstatTestBase):
             ('listener', {'port': cls.tester.get_port()}),
             ('connector', {'role': 'inter-router', 'port': cls.inter_router_port})
         ])
-
         config_2 = Qdrouterd.Config([
             ('router', {'mode': 'interior', 'id': 'R2'}),
+            ('listener', {'port': cls.tester.get_port()}),
             ('listener', {'role': 'inter-router', 'port': cls.inter_router_port}),
         ])
         cls.router_2 = cls.tester.qdrouterd('test_router_2', config_2, wait=True)
@@ -894,7 +890,7 @@ class QdstatSslTest(QdstatTestBase):
 
     def test_ssl_peer_name_verify_disabled(self):
         """Verify the --ssl-disable-peer-name-verify option"""
-        params = [x for x in self.get_ssl_args()['trustfile']]
+        params = self.get_ssl_args()['trustfile']
 
         # Expect the connection to fail, since the certificate has
         # 'localhost' as the peer name and we used '127.0.0.1' instead.

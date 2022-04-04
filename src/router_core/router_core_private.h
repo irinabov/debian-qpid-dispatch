@@ -137,6 +137,7 @@ struct qdr_action_t {
             qd_detach_type_t     dt;
             int                  credit;
             bool                 drain;
+            bool                 enable_protocol_trace;
             qdr_delivery_t      *initial_delivery;
         } connection;
 
@@ -654,17 +655,6 @@ ALLOC_DECLARE(qdr_connection_info_t);
 DEQ_DECLARE(qdr_link_route_t, qdr_link_route_list_t);
 
 
-typedef enum {
-    QDR_CONN_OPER_UP,
-} qdr_conn_oper_status_t;
-
-
-typedef enum {
-    QDR_CONN_ADMIN_ENABLED,
-    QDR_CONN_ADMIN_DELETED
-} qdr_conn_admin_status_t;
-
-
 struct qdr_connection_t {
     DEQ_LINKS(qdr_connection_t);
     DEQ_LINKS_N(ACTIVATE, qdr_connection_t);
@@ -673,6 +663,8 @@ struct qdr_connection_t {
     qdr_core_t                 *core;
     bool                        incoming;
     bool                        in_activate_list;
+    bool                        closed; // This bit is used in the case where a client is trying to force close this connection.
+    uint8_t                     next_pri;  // for incoming inter-router data links
     qdr_connection_role_t       role;
     int                         inter_router_cost;
     qdr_conn_identifier_t      *conn_id;
@@ -690,10 +682,9 @@ struct qdr_connection_t {
     qdr_connection_info_t      *connection_info;
     void                       *user_context; /* Updated from IO thread, use work_lock */
     qdr_link_route_list_t       conn_link_routes;  // connection scoped link routes
-    qdr_conn_oper_status_t      oper_status;
-    qdr_conn_admin_status_t     admin_status;
+    qd_conn_oper_status_t       oper_status;
+    qd_conn_admin_status_t      admin_status;
     qdr_error_t                *error;
-    bool                        closed; // This bit is used in the case where a client is trying to force close this connection.
     uint32_t                    conn_uptime; // Timestamp which can be used to calculate the number of seconds this connection has been up and running.
     uint32_t                    last_delivery_time; // Timestamp which can be used to calculate the number of seconds since the last delivery arrived on this connection.
     bool                        enable_protocol_trace; // Has trace level logging been turned on for this connection.
@@ -829,17 +820,19 @@ struct qdr_core_t {
     qd_log_source_t   *log;
     qd_log_source_t   *agent_log;
     sys_thread_t      *thread;
-    bool               running;
-    qdr_action_list_t  action_list;
+
     qdr_action_list_t  action_list_background;  /// Actions processed only when the action_list is empty
+    qdr_action_list_t  action_list;
     sys_cond_t        *action_cond;
     sys_mutex_t       *action_lock;
+    bool               running;
+    bool               sleeping;
 
     sys_mutex_t             *work_lock;
     qdr_core_timer_list_t    scheduled_timers;
     qdr_general_work_list_t  work_list;
     qd_timer_t              *work_timer;
-    uint32_t                 uptime_ticks;
+    sys_atomic_t             uptime_ticks;
 
     qdr_protocol_adaptor_list_t  protocol_adaptors;
     qdr_connection_list_t        open_connections;
@@ -1008,7 +1001,8 @@ qdr_link_t *qdr_create_link_CT(qdr_core_t        *core,
                                qd_direction_t     dir,
                                qdr_terminus_t    *source,
                                qdr_terminus_t    *target,
-                               qd_session_class_t ssn_class);
+                               qd_session_class_t ssn_class,
+                               uint8_t priority);
 
 void qdr_link_outbound_detach_CT(qdr_core_t *core, qdr_link_t *link, qdr_error_t *error, qdr_condition_t condition, bool close);
 void qdr_link_outbound_second_attach_CT(qdr_core_t *core, qdr_link_t *link, qdr_terminus_t *source, qdr_terminus_t *target);
@@ -1028,7 +1022,7 @@ void qdr_modules_finalize(qdr_core_t *core);
 void qdr_adaptors_finalize(qdr_core_t *core);
 
 /**
- * Create a new timer which will only be used inside the code thread.
+ * Create a new timer which will only be used inside the core thread.
  *
  * @param core Pointer to the core object returned by qd_core()
  * @callback Callback function to be invoked when timer fires.
@@ -1077,5 +1071,13 @@ void qdr_reset_sheaf(qdr_core_t *core, uint8_t n);
  * logging.
  */
 void qdr_record_link_credit(qdr_core_t *core, qdr_link_t *link);
+
+/**
+ * Access core uptime
+ */
+static inline uint32_t qdr_core_uptime_ticks(qdr_core_t *core)
+{
+    return sys_atomic_get(&core->uptime_ticks);
+}
 
 #endif

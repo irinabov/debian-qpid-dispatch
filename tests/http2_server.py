@@ -16,24 +16,25 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-import system_test
+import json
 import os
+import system_test
+
 from quart import Quart, request
 try:
-    from quart.static import send_file
+    from quart.static import send_file  # noqa  # mypy#8823  # type: ignore[attr-defined]
 except ImportError:
-    from quart.helpers import send_file
+    from quart.helpers import send_file  # noqa  # mypy#8823  # type: ignore[attr-defined, no-redef]  # mypy#1153
 
 try:
-    from quart.exceptions import HTTPStatusException
+    from quart.exceptions import HTTPStatusException  # noqa  # mypy#8823  # type: ignore[attr-defined]
 except ImportError:
-    from werkzeug.exceptions import InternalServerError as HTTPStatusException
+    from werkzeug.exceptions import InternalServerError as HTTPStatusException  # noqa  # mypy#8823  # type: ignore[no-redef]  # mypy#1153
 
-import json
 app = Quart(__name__)
 
 
-class MyInfo(object):
+class MyInfo:
     def __init__(self, fname, lname, id=None):
         self.fname = fname
         self.lname = lname
@@ -68,7 +69,7 @@ async def create_myinfo():
 def large_string(length):
     i = 0
     ret_string = ""
-    while (i < length):
+    while i < length:
         ret_string += str(i) + ","
         i += 1
     return ret_string
@@ -116,5 +117,14 @@ async def process_upload_data():
     return "Success!"
 
 
-#app.run(port=5000, certfile='cert.pem', keyfile='key.pem')
-app.run(port=os.getenv('SERVER_LISTEN_PORT'))
+def main():
+    port = os.getenv('SERVER_LISTEN_PORT')
+    if port is None:
+        raise RuntimeError("Environment variable `SERVER_LISTEN_PORT` is not set.")
+
+    # app.run(port=5000, certfile='cert.pem', keyfile='key.pem')
+    app.run(port=int(port))
+
+
+if __name__ == '__main__':
+    main()

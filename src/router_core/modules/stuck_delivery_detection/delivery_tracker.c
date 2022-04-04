@@ -46,7 +46,13 @@ struct tracker_t {
 
 static void check_delivery_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery_t *dlv)
 {
-    if (!dlv->stuck && ((core->uptime_ticks - link->core_ticks) > stuck_age)) {
+    // DISPATCH-2036: ignore "infinitely long" streaming messages (like TCP
+    // adaptor deliveries)
+    if (dlv->msg && qd_message_is_streaming(dlv->msg)) {
+        return;
+    }
+
+    if (!dlv->stuck && ((qdr_core_uptime_ticks(core) - link->core_ticks) > stuck_age)) {
         dlv->stuck = true;
         link->deliveries_stuck++;
         core->deliveries_stuck++;
@@ -74,14 +80,14 @@ static void process_link_CT(qdr_core_t *core, qdr_link_t *link)
     }
 
     if (!link->reported_as_blocked && link->zero_credit_time > 0 &&
-        (core->uptime_ticks - link->zero_credit_time > stuck_age)) {
+        (qdr_core_uptime_ticks(core) - link->zero_credit_time > stuck_age)) {
         link->reported_as_blocked = true;
         core->links_blocked++;
         qd_log(core->log, QD_LOG_INFO,
                "[C%"PRIu64"][L%"PRIu64"] "
                "Link blocked with zero credit for %d seconds",
                link->conn ? link->conn->identity : 0, link->identity,
-               core->uptime_ticks - link->zero_credit_time);
+               qdr_core_uptime_ticks(core) - link->zero_credit_time);
     }
 }
 

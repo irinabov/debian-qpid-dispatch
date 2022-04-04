@@ -17,21 +17,13 @@
 # under the License
 #
 
-"""
+"""Entity implementing the business logic of user connection/access policy."""
 
-"""
 import json
 from .policy_util import PolicyError, HostStruct, HostAddr, PolicyAppConnectionMgr, is_ipv6_enabled
 
-"""
-Entity implementing the business logic of user connection/access policy.
-"""
 
-#
-#
-
-
-class PolicyKeys(object):
+class PolicyKeys:
     """
     String constants
     """
@@ -110,7 +102,7 @@ class PolicyKeys(object):
 #
 
 
-class PolicyCompiler(object):
+class PolicyCompiler:
     """
     Validate incoming configuration for legal schema.
     - Warn about section options that go unused.
@@ -180,7 +172,7 @@ class PolicyCompiler(object):
         if v_int < v_min:
             errors.append("Value '%s' is below minimum '%s'." % (val, v_min))
             return False
-        if v_max > 0 and v_int > v_max:
+        if 0 < v_max < v_int:
             errors.append("Value '%s' is above maximum '%s'." % (val, v_max))
             return False
         return True
@@ -239,11 +231,16 @@ class PolicyCompiler(object):
         # rulesets may not come through standard config so make nice defaults
         policy_out[PolicyKeys.KW_USERS] = ''
         policy_out[PolicyKeys.KW_REMOTE_HOSTS] = ''
-        # DISPATCH-1277 - KW_MAX_FRAME_SIZE must be defaulted to 16384 not 2147483647
-        policy_out[PolicyKeys.KW_MAX_FRAME_SIZE] = 16384
+
+        # DISPATCH-2305: do not provide default values for max
+        # frame/window/sessions.  The router already provides these. Setting
+        # zero here will cause the router to use configured values unless
+        # specifically overridden by policy:
+        policy_out[PolicyKeys.KW_MAX_FRAME_SIZE] = 0
+        policy_out[PolicyKeys.KW_MAX_SESSION_WINDOW] = 0
+        policy_out[PolicyKeys.KW_MAX_SESSIONS] = 0
+
         policy_out[PolicyKeys.KW_MAX_MESSAGE_SIZE] = None
-        policy_out[PolicyKeys.KW_MAX_SESSION_WINDOW] = 2147483647
-        policy_out[PolicyKeys.KW_MAX_SESSIONS] = 65536
         policy_out[PolicyKeys.KW_MAX_SENDERS] = 2147483647
         policy_out[PolicyKeys.KW_MAX_RECEIVERS] = 2147483647
         policy_out[PolicyKeys.KW_ALLOW_DYNAMIC_SRC] = False
@@ -306,8 +303,8 @@ class PolicyCompiler(object):
                          PolicyKeys.KW_ALLOW_ADMIN_STATUS_UPDATE
                          ]:
                 if isinstance(val, str) and val.lower() in ['true', 'false']:
-                    val = True if val == 'true' else False
-                if not type(val) is bool:
+                    val = val == 'true'
+                if not isinstance(val, bool):
                     errors.append("Policy vhost '%s' user group '%s' option '%s' has illegal boolean value '%s'." %
                                   (vhostname, usergroup, key, val))
                     return False
@@ -449,7 +446,7 @@ class PolicyCompiler(object):
                     return False
                 policy_out[key] = val
             elif key in [PolicyKeys.KW_CONNECTION_ALLOW_DEFAULT]:
-                if not type(val) is bool:
+                if not isinstance(val, bool):
                     errors.append("Policy vhost '%s' option '%s' must be of type 'bool' but is '%s'" %
                                   (name, key, type(val)))
                     return False
@@ -471,7 +468,7 @@ class PolicyCompiler(object):
                     val.append(vtest)
                 policy_out[key] = val
             elif key in [PolicyKeys.KW_GROUPS]:
-                if not type(val) is dict:
+                if not isinstance(val, dict):
                     errors.append("Policy vhost '%s' option '%s' must be of type 'dict' but is '%s'" %
                                   (name, key, type(val)))
                     return False
@@ -511,7 +508,7 @@ class PolicyCompiler(object):
 
 #
 #
-class AppStats(object):
+class AppStats:
     """
     Maintain live state and statistics for an vhost.
     """
@@ -567,7 +564,7 @@ class AppStats(object):
 #
 
 
-class ConnectionFacts(object):
+class ConnectionFacts:
     def __init__(self, user, host, app, conn_name):
         self.user = user
         self.host = host
@@ -578,7 +575,7 @@ class ConnectionFacts(object):
 #
 
 
-class PolicyLocal(object):
+class PolicyLocal:
     """
     The local policy database.
     """
@@ -765,7 +762,7 @@ class PolicyLocal(object):
         the vhost is defined in rulesetdb.
         @return:
         """
-        return not self._default_vhost == "" and self._default_vhost in self.rulesetdb
+        return self._default_vhost != "" and self._default_vhost in self.rulesetdb
 
     #
     # Runtime query interface

@@ -106,10 +106,6 @@ if(USE_LIBWEBSOCKETS)
   set(SYSTEM_TESTS_HTTP system_tests_http system_tests_websockets)
 endif()
 
-if(USE_LIBNGHTTP2)
-  set(SYSTEM_TESTS_HTTP2 system_tests_http2 system_tests_grpc)
-endif(USE_LIBNGHTTP2)
-
 if(CONSOLE_INSTALL)
   set(CONSOLE_TEST system_tests_console)
 endif(CONSOLE_INSTALL)
@@ -173,10 +169,7 @@ foreach(py_test_module
     system_tests_log_level_update
     system_tests_routing_protocol
     system_tests_open_properties
-    ${SYSTEM_TESTS_HTTP2}
-    system_tests_http1_adaptor
-    system_tests_http1_over_tcp
-    system_tests_tcp_adaptor
+    system_tests_heartbeats
     )
 
   string(CONFIGURE "${PYTHON_TEST_COMMAND}" CONFIGURED_PYTHON_TEST_COMMAND)
@@ -252,8 +245,6 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-2/policy-photoserver-sasl.sasldb  D
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-3/test-sender-receiver-limits.json DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-3)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/policy-4/management-access.json  DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/policy-4/)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/authservice.py  DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/TCP_echo_server.py  DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/TCP_echo_client.py  DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
 # following install() functions will be called only if you do a make "install"
 install(FILES ${SYSTEM_TEST_FILES}
@@ -273,7 +264,11 @@ install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/config-2
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ssl_certs
         DESTINATION ${QPID_DISPATCH_HOME_INSTALLED}/tests)
 
-add_subdirectory(c_unittests)
+# cpp-stub requires Linux
+if(UNIX AND NOT APPLE)
+  add_subdirectory(cpp-stub)
+  add_subdirectory(c_unittests)
+endif()
 
 if(BUILD_BENCHMARKS)
   add_subdirectory(c_benchmarks)

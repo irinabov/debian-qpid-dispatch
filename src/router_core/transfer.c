@@ -127,6 +127,9 @@ qdr_delivery_t *qdr_link_deliver_to_routed_link(qdr_link_t *link, qd_message_t *
     dlv->link_id            = link->identity;
     dlv->conn_id            = link->conn_id;
     dlv->dispo_lock         = sys_mutex();
+
+    qd_message_disable_router_annotations(msg);  // routed links do not use router annotations
+
     qd_log(link->core->log, QD_LOG_DEBUG, DLV_FMT" Delivery created qdr_link_deliver_to_routed_link", DLV_ARGS(dlv));
 
     qdr_delivery_incref(dlv, "qdr_link_deliver_to_routed_link - newly created delivery, add to action list");
@@ -300,16 +303,15 @@ void qdr_link_complete_sent_message(qdr_core_t *core, qdr_link_t *link)
     if (!!dlv && qdr_delivery_send_complete(dlv)) {
         DEQ_REMOVE_HEAD(link->undelivered);
         if (dlv->link_work) {
-            assert(dlv->link_work == link->work_list.head);
+            // ensure deliveries are sent in order:
+            assert(dlv->link_work == DEQ_HEAD(link->work_list));
             assert(dlv->link_work->value > 0);
-            dlv->link_work->value -= 1;
-
-            if (dlv->link_work->value == 0) {
+            if (--dlv->link_work->value == 0) {
                 DEQ_REMOVE_HEAD(link->work_list);
                 qdr_link_work_release(dlv->link_work);  // for work_list ref
-                qdr_link_work_release(dlv->link_work);  // for dlv ref
-                dlv->link_work = 0;
             }
+            qdr_link_work_release(dlv->link_work);  // for dlv ref
+            dlv->link_work = 0;
         }
 
         if (!dlv->settled && !qdr_delivery_oversize(dlv) && !qdr_delivery_is_aborted(dlv)) {
@@ -648,10 +650,8 @@ static void qdr_link_forward_CT(qdr_core_t *core, qdr_link_t *link, qdr_delivery
     // itself associated with a fallback destination.
     //
     if (fanout == 0 && !!addr && !!addr->fallback && !link->fallback) {
-        const char          *key      = (const char*) qd_hash_key_by_handle(addr->fallback->hash_handle);
-        qd_composed_field_t *to_field = qd_compose_subfield(0);
-        qd_compose_insert_string(to_field, key + 2);
-        qd_message_set_to_override_annotation(dlv->msg, to_field);
+        const char *key = (const char*) qd_hash_key_by_handle(addr->fallback->hash_handle);
+        qd_message_set_to_override_annotation(dlv->msg, key + 2);
         qd_message_set_phase_annotation(dlv->msg, key[1] - '0');
         fanout = qdr_forward_message_CT(core, addr->fallback, dlv->msg, dlv, false, link->link_type == QD_LINK_CONTROL);
         if (fanout > 0) {
@@ -742,7 +742,7 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
     if (!link)
         return;
     if (link->conn)
-        link->conn->last_delivery_time = core->uptime_ticks;
+        link->conn->last_delivery_time = qdr_core_uptime_ticks(core);
 
     link->total_deliveries++;
 
@@ -752,7 +752,7 @@ static void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool dis
     //
     // Record the ingress time so we can track the age of this delivery.
     //
-    dlv->ingress_time = core->uptime_ticks;
+    dlv->ingress_time = qdr_core_uptime_ticks(core);
 
     //
     // If the link is an edge link, mark this delivery as via-edge

@@ -102,14 +102,14 @@ qdr_connection_t *qdr_connection_opened(qdr_core_t                   *core,
     conn->policy_spec           = policy_spec;
     conn->link_capacity         = link_capacity;
     conn->mask_bit              = -1;
-    conn->admin_status          = QDR_CONN_ADMIN_ENABLED;
-    conn->oper_status           = QDR_CONN_OPER_UP;
+    conn->admin_status          = QD_CONN_ADMIN_ENABLED;
+    conn->oper_status           = QD_CONN_OPER_UP;
     DEQ_INIT(conn->links);
     DEQ_INIT(conn->work_list);
     DEQ_INIT(conn->streaming_link_pool);
     conn->connection_info->role = conn->role;
     conn->work_lock = sys_mutex();
-    conn->conn_uptime = core->uptime_ticks;
+    conn->conn_uptime = qdr_core_uptime_ticks(core);
 
     if (vhost) {
         conn->tenant_space_len = strlen(vhost) + 1;
@@ -125,6 +125,9 @@ qdr_connection_t *qdr_connection_opened(qdr_core_t                   *core,
     set_safe_ptr_qdr_connection_t(conn, &action->args.connection.conn);
     action->args.connection.connection_label = qdr_field(label);
     action->args.connection.container_id     = qdr_field(remote_container_id);
+    if (qd_log_enabled(qd_log_source("PROTOCOL"), QD_LOG_TRACE)) {
+        action->args.connection.enable_protocol_trace = true;
+    }
     qdr_action_enqueue(core, action);
 
     char   props_str[1000];
@@ -237,7 +240,6 @@ void *qdr_connection_get_context(const qdr_connection_t *conn)
     return conn ? conn->user_context : NULL;
 }
 
-
 const char *qdr_connection_get_tenant_space(const qdr_connection_t *conn, int *len)
 {
     *len = conn ? conn->tenant_space_len : 0;
@@ -257,7 +259,7 @@ void qdr_record_link_credit(qdr_core_t *core, qdr_link_t *link)
             //
             // The link has transitioned from positive credit to zero credit.
             //
-            link->zero_credit_time = core->uptime_ticks;
+            link->zero_credit_time = qdr_core_uptime_ticks(core);
         } else if (link->credit_reported == 0 && pn_credit > 0) {
             //
             // The link has transitioned from zero credit to positive credit.
@@ -279,7 +281,7 @@ void qdr_close_connection_CT(qdr_core_t *core, qdr_connection_t  *conn)
 {
     conn->closed = true;
     conn->error  = qdr_error(QD_AMQP_COND_CONNECTION_FORCED, "Connection forced-closed by management request");
-    conn->admin_status = QDR_CONN_ADMIN_DELETED;
+    conn->admin_status = QD_CONN_ADMIN_DELETED;
 
     //Activate the connection, so the I/O threads can finish the job.
     qdr_connection_activate_CT(core, conn);
@@ -488,14 +490,39 @@ int qdr_connection_process(qdr_connection_t *conn)
 
 void qdr_link_set_context(qdr_link_t *link, void *context)
 {
-    if (link)
-        link->user_context = context;
+    if (link) {
+        if (context == 0) {
+            if (link->user_context) {
+                qd_nullify_safe_ptr((qd_alloc_safe_ptr_t *)link->user_context);
+                free(link->user_context);
+                link->user_context = 0;
+            }
+        }
+        else {
+            if (link->user_context) {
+                qd_nullify_safe_ptr((qd_alloc_safe_ptr_t *)link->user_context);
+                free(link->user_context);
+            }
+
+            qd_link_t_sp *safe_ptr = NEW(qd_alloc_safe_ptr_t);
+            set_safe_ptr_qd_link_t(context, safe_ptr);
+            link->user_context = safe_ptr;
+        }
+    }
 }
 
 
 void *qdr_link_get_context(const qdr_link_t *link)
 {
-    return link ? link->user_context : 0;
+    if (link) {
+        if (link->user_context) {
+            qd_link_t_sp *safe_qdl = (qd_link_t_sp*) link->user_context;
+            if (safe_qdl)
+                return safe_deref_qd_link_t(*safe_qdl);
+        }
+    }
+
+    return 0;
 }
 
 
@@ -614,10 +641,11 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
     link->credit_pending = conn->link_capacity;
     link->admin_enabled  = true;
     link->oper_status    = QDR_LINK_OPER_DOWN;
-    link->core_ticks     = conn->core->uptime_ticks;
-    link->zero_credit_time = conn->core->uptime_ticks;
+    link->core_ticks     = qdr_core_uptime_ticks(conn->core);
+    link->zero_credit_time = link->core_ticks;
     link->terminus_survives_disconnect = qdr_terminus_survives_disconnect(local_terminus);
     link->no_route = no_route;
+    link->priority = QDR_DEFAULT_PRIORITY;
 
     link->strip_annotations_in  = conn->strip_annotations_in;
     link->strip_annotations_out = conn->strip_annotations_out;
@@ -630,9 +658,10 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
         tsan_reset_delivery_ids(initial_delivery, link->conn->identity, link->identity);
     }
 
-    if      (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_ROUTER_CONTROL))
+    if      (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_ROUTER_CONTROL)) {
         link->link_type = QD_LINK_CONTROL;
-    else if (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_ROUTER_DATA))
+        link->priority = QDR_MAX_PRIORITY;
+    } else if (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_ROUTER_DATA))
         link->link_type = QD_LINK_ROUTER;
     else if (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_EDGE_DOWNLINK)) {
         if (conn->core->router_mode == QD_ROUTER_MODE_INTERIOR &&
@@ -1088,7 +1117,9 @@ static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_li
 
     if (link->reported_as_blocked)
         core->links_blocked--;
-
+    if (link->user_context) {
+        qdr_link_set_context(link, 0);
+    }
     free_qdr_link_t(link);
 }
 
@@ -1120,7 +1151,8 @@ qdr_link_t *qdr_create_link_CT(qdr_core_t        *core,
                                qd_direction_t     dir,
                                qdr_terminus_t    *source,
                                qdr_terminus_t    *target,
-                               qd_session_class_t ssn_class)
+                               qd_session_class_t ssn_class,
+                               uint8_t            priority)
 {
     //
     // Create a new link, initiated by the router core.  This will involve issuing a first-attach outbound.
@@ -1146,8 +1178,9 @@ qdr_link_t *qdr_create_link_CT(qdr_core_t        *core,
     link->insert_prefix  = 0;
     link->strip_prefix   = 0;
     link->attach_count   = 1;
-    link->core_ticks     = core->uptime_ticks;
-    link->zero_credit_time = core->uptime_ticks;
+    link->core_ticks     = qdr_core_uptime_ticks(core);
+    link->zero_credit_time = link->core_ticks;
+    link->priority       = priority;
 
     link->strip_annotations_in  = conn->strip_annotations_in;
     link->strip_annotations_out = conn->strip_annotations_out;
@@ -1377,6 +1410,7 @@ static void qdr_connection_opened_CT(qdr_core_t *core, qdr_action_t *action, boo
 
     do {
         DEQ_ITEM_INIT(conn);
+        conn->enable_protocol_trace = action->args.connection.enable_protocol_trace;
         DEQ_INSERT_TAIL(core->open_connections, conn);
 
         if (conn->role == QDR_ROLE_NORMAL) {
@@ -1407,15 +1441,23 @@ static void qdr_connection_opened_CT(qdr_core_t *core, qdr_action_t *action, boo
                 // inter-router links:  Two (in and out) for control, 2 * QDR_N_PRIORITIES for
                 // routed-message transfer.
                 //
-                (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_INCOMING, qdr_terminus_router_control(), qdr_terminus_router_control(), QD_SSN_ROUTER_CONTROL);
-                (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_OUTGOING, qdr_terminus_router_control(), qdr_terminus_router_control(), QD_SSN_ROUTER_CONTROL);
+                (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_INCOMING,
+                                          qdr_terminus_router_control(), qdr_terminus_router_control(),
+                                          QD_SSN_ROUTER_CONTROL, QDR_MAX_PRIORITY);
+                (void) qdr_create_link_CT(core, conn, QD_LINK_CONTROL, QD_OUTGOING,
+                                          qdr_terminus_router_control(), qdr_terminus_router_control(),
+                                          QD_SSN_ROUTER_CONTROL, QDR_MAX_PRIORITY);
                 STATIC_ASSERT((QD_SSN_ROUTER_DATA_PRI_9 - QD_SSN_ROUTER_DATA_PRI_0 + 1) == QDR_N_PRIORITIES, PRIORITY_SESSION_NOT_SAME);
 
                 for (int priority = 0; priority < QDR_N_PRIORITIES; ++ priority) {
                     // a session is reserved for each priority link
                     qd_session_class_t sc = (qd_session_class_t)(QD_SSN_ROUTER_DATA_PRI_0 + priority);
-                    (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_INCOMING, qdr_terminus_router_data(), qdr_terminus_router_data(), sc);
-                    (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_OUTGOING, qdr_terminus_router_data(), qdr_terminus_router_data(), sc);
+                    (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER, QD_INCOMING,
+                                              qdr_terminus_router_data(), qdr_terminus_router_data(),
+                                              sc, priority);
+                    (void) qdr_create_link_CT(core, conn, QD_LINK_ROUTER,  QD_OUTGOING,
+                                              qdr_terminus_router_data(), qdr_terminus_router_data(),
+                                              sc, priority);
                 }
             }
         }
@@ -1462,12 +1504,12 @@ qdr_link_t *qdr_connection_new_streaming_link_CT(qdr_core_t *core, qdr_connectio
     case QDR_ROLE_INTER_ROUTER:
         out_link = qdr_create_link_CT(core, conn, QD_LINK_ROUTER, QD_OUTGOING,
                                       qdr_terminus_router_data(), qdr_terminus_router_data(),
-                                      QD_SSN_LINK_STREAMING);
+                                      QD_SSN_LINK_STREAMING, QDR_DEFAULT_PRIORITY);
         break;
     case QDR_ROLE_EDGE_CONNECTION:
         out_link = qdr_create_link_CT(core, conn, QD_LINK_ENDPOINT, QD_OUTGOING,
                                       qdr_terminus(0), qdr_terminus(0),
-                                      QD_SSN_LINK_STREAMING);
+                                      QD_SSN_LINK_STREAMING, QDR_DEFAULT_PRIORITY);
         break;
     default:
         assert(false);
@@ -1599,14 +1641,20 @@ static void qdr_detach_link_control_CT(qdr_core_t *core, qdr_connection_t *conn,
 static void qdr_attach_link_data_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link)
 {
     assert(link->link_type == QD_LINK_ROUTER);
-    // The first QDR_N_PRIORITIES (10) QDR_LINK_ROUTER links to attach over the
-    // connection are the shared priority links.  These links are attached in
-    // priority order starting at zero.
-    int next_pri = core->data_links_by_mask_bit[conn->mask_bit].count;
-    if (next_pri < QDR_N_PRIORITIES) {
-        link->priority = next_pri;
-        core->data_links_by_mask_bit[conn->mask_bit].links[next_pri] = link;
-        core->data_links_by_mask_bit[conn->mask_bit].count += 1;
+    // The first 2 x QDR_N_PRIORITIES (10) QDR_LINK_ROUTER links to attach over
+    // the inter-router connection are the shared priority links.  These links
+    // are attached in priority order starting at zero.
+    if (link->link_direction == QD_OUTGOING) {
+        int next_pri = core->data_links_by_mask_bit[conn->mask_bit].count;
+        if (next_pri < QDR_N_PRIORITIES) {
+            link->priority = next_pri;
+            core->data_links_by_mask_bit[conn->mask_bit].links[next_pri] = link;
+            core->data_links_by_mask_bit[conn->mask_bit].count += 1;
+        }
+    } else {
+        if (conn->next_pri < QDR_N_PRIORITIES) {
+            link->priority = conn->next_pri++;
+        }
     }
 }
 
@@ -1792,8 +1840,10 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
             break;
         }
 
-        case QD_LINK_CONTROL:
         case QD_LINK_ROUTER:
+            qdr_attach_link_data_CT(core, conn, link);
+            // fall-through:
+        case QD_LINK_CONTROL:
             qdr_link_outbound_second_attach_CT(core, link, source, target);
             qdr_link_issue_credit_CT(core, link, link->capacity, false);
             break;
@@ -1918,8 +1968,10 @@ static void qdr_link_inbound_second_attach_CT(qdr_core_t *core, qdr_action_t *ac
                 qdr_link_issue_credit_CT(core, link, link->capacity, false);
             break;
 
-        case QD_LINK_CONTROL:
         case QD_LINK_ROUTER:
+            qdr_attach_link_data_CT(core, conn, link);
+            // fall-through
+        case QD_LINK_CONTROL:
             qdr_link_issue_credit_CT(core, link, link->capacity, false);
             break;
 

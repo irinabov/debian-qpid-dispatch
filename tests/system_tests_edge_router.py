@@ -19,11 +19,18 @@
 
 import os
 import re
+from subprocess import PIPE
 from time import sleep
 from threading import Event
 from threading import Timer
 
 from proton import Message
+from proton.handlers import MessagingHandler
+from proton.reactor import Container
+from proton.utils import BlockingConnection
+
+from qpid_dispatch.management.client import Node
+
 from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, MgmtMsgProxy, TestTimeout
 from system_test import AsyncTestReceiver
 from system_test import AsyncTestSender
@@ -34,14 +41,9 @@ from system_test import Process
 from system_tests_link_routes import ConnLinkRouteService
 from test_broker import FakeBroker
 from test_broker import FakeService
-from proton.handlers import MessagingHandler
-from proton.reactor import Container
-from proton.utils import BlockingConnection
-from qpid_dispatch.management.client import Node
-from subprocess import PIPE
 
 
-class AddrTimer(object):
+class AddrTimer:
     def __init__(self, parent):
         self.parent = parent
 
@@ -1617,29 +1619,35 @@ class LinkRouteProxyTest(TestCase):
         while self._get_address(router, address):
             sleep(0.1)
 
-    def _test_traffic(self, sender, receiver, address, count=5, message=None):
+    def _test_traffic(self, sender, receiver, address, count=5, message=None, logger=None):
         """Generate message traffic between two normal clients"""
         error = None
-        tr = AsyncTestReceiver(receiver, address)
+        if logger:
+            logger.log("_test_traffic begin")
+        tr = AsyncTestReceiver(receiver, address, print_to_console=True)
+        if logger:
+            logger.log("_test_traffic AsyncTestReceiver created")
         ts = AsyncTestSender(sender, address, count,
-                             message=message)
+                             message=message, print_to_console=True)
+        if logger:
+            logger.log("_test_traffic AsyncTestSender created")
         ts.wait()  # wait until all sent
+        if logger:
+            logger.log("_test_traffic sender wait done")
         for i in range(count):
             try:
                 tr.queue.get()
             except AsyncTestReceiver.Empty:
                 error = "Sender Stats=" + ts.get_msg_stats() + "\n Receiver Queue Stats=" + tr.get_queue_stats()
-
         tr.stop()
+        if logger:
+            logger.log("_test_traffic receiver queue get done")
         if error:
             tr.dump_log()
             ts.dump_log()
         return error
 
-    def test_01_immedate_detach_reattach(self):
-        if self.skip['test_01'] :
-            self.skipTest("Test skipped during development.")
-
+    def test_01_immediate_detach_reattach(self):
         """
         Have a service for a link routed address abruptly detach
         in response to an incoming link attach
@@ -1647,6 +1655,9 @@ class LinkRouteProxyTest(TestCase):
         The attaching client from EB1 will get an attach response then an
         immediate detach.  The client will immediately re-establish the link.
         """
+        if self.skip['test_01']:
+            self.skipTest("Test skipped during development.")
+
         class AttachDropper(FakeService):
             def __init__(self, *args, **kwargs):
                 super(AttachDropper, self).__init__(*args, **kwargs)
@@ -1886,18 +1897,33 @@ class LinkRouteProxyTest(TestCase):
         if self.skip['test_51'] :
             self.skipTest("Test skipped during development.")
 
-        a_type = 'org.apache.qpid.dispatch.router.address'
+        self.INT_B.wait_address_unsubscribed("CfgLinkRoute1")
+
+        # We are logging each step of this test as we go. The log statements will print to console
+        logger = Logger(title="test_51_link_route_proxy_configured",
+                        print_to_console=True)
         test_msg = Message(body="test_51_link_route_proxy_configured")
 
         fs = FakeService(self.EA1.route_container)
+
+        logger.log("test_51_link_route_proxy_configured Created FakeService")
+
         self.INT_B.wait_address("CfgLinkRoute1", count=2)
+
+        logger.log("test_51_link_route_proxy_configured Wait done on CfgLinkRoute1")
 
         out = self._test_traffic(self.INT_B.listener,
                                  self.INT_B.listener,
                                  "CfgLinkRoute1/hi",
                                  count=5,
-                                 message=test_msg)
+                                 message=test_msg,
+                                 logger=logger)
+
+        logger.log("test_51_link_route_proxy_configured _test_traffic done on CfgLinkRoute1/hi")
+
         fs.join()
+
+        logger.log("test_51_link_route_proxy_configured _test_traffic first join() completed")
 
         try:
             self.assertIsNone(out, out)
@@ -1911,22 +1937,33 @@ class LinkRouteProxyTest(TestCase):
         # active:
         self._wait_address_gone(self.INT_A, "CfgLinkRoute1")
 
+        logger.log("test_51_link_route_proxy_configured CfgLinkRoute1 _wait_address_gone")
+
         # repeat test, but this time with patterns:
 
         fs = FakeService(self.EB1.route_container)
         self.INT_A.wait_address("*.cfg.pattern.#", count=2)
+
+        logger.log("test_51_link_route_proxy_configured wait_address pattern *.cfg.pattern.#")
 
         out = self._test_traffic(self.INT_A.listener,
                                  self.INT_A.listener,
                                  "MATCH.cfg.pattern",
                                  count=5,
                                  message=test_msg)
+
+        logger.log("test_51_link_route_proxy_configured _test_traffic MATCH.cfg.pattern")
+
         fs.join()
+
+        logger.log("test_51_link_route_proxy_configured _test_traffic second join() completed")
+
         self.assertIsNone(out, out)
         self.assertEqual(5, fs.in_count)
         self.assertEqual(5, fs.out_count)
 
         self._wait_address_gone(self.INT_A, "*.cfg.pattern.#")
+        logger.log("test_51_link_route_proxy_configured *.cfg.pattern.# _wait_address_gone")
 
     def test_52_conn_link_route_proxy(self):
         """
@@ -2072,7 +2109,7 @@ class DynamicAddressTest(MessagingHandler):
         Container(self).run()
 
 
-class CustomTimeout(object):
+class CustomTimeout:
     def __init__(self, parent):
         self.parent = parent
 
@@ -2300,7 +2337,7 @@ class MobileAddressTest(MessagingHandler):
                 self.n_accepted += 1
                 self.logger.log("on_settled sender: ACCEPTED %d (of %d)" %
                                 (self.n_accepted, self.normal_count))
-            elif rdisp == "RELEASED" or rdisp == "MODIFIED":
+            elif rdisp in ('RELEASED', 'MODIFIED'):
                 self.n_rel_or_mod += 1
                 self.logger.log("on_settled sender: %s %d (of %d)" %
                                 (rdisp, self.n_rel_or_mod, self.extra_count))
@@ -2503,6 +2540,7 @@ class MobileAddressMulticastTest(MessagingHandler):
 
     def on_released(self, event):
         self.n_released += 1
+        self.send_test_message()
 
     def timeout(self):
         if self.dup_msg:
@@ -2617,9 +2655,6 @@ class MobileAddressMulticastTest(MessagingHandler):
             self.receiver2_conn.close()
             self.receiver3_conn.close()
             self.sender_conn.close()
-
-    def on_released(self, event):
-        self.send_test_message()
 
     def run(self):
         Container(self).run()
@@ -2749,7 +2784,7 @@ class MobileAddressEventTest(MessagingHandler):
     def on_link_opened(self, event):
         if self.r_attaches == 3:
             return
-        if event.receiver == self.receiver1 or event.receiver == self.receiver2 or event.receiver == self.receiver3:
+        if event.receiver in (self.receiver1, self.receiver2, self.receiver3):
             self.r_attaches += 1
 
         if self.r_attaches == 3:

@@ -20,21 +20,23 @@
 import json
 import os
 import sys
+from subprocess import PIPE, STDOUT
 from time import sleep
 
-from system_test import Logger, TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR
-from system_test import unittest
-from subprocess import PIPE, STDOUT
+from proton.utils import BlockingConnection
+
 from qpid_dispatch_internal.compat import dictify
 from qpid_dispatch_internal.management.qdrouter import QdSchema
-from proton.utils import BlockingConnection
+
+from system_test import unittest
+from system_test import Logger, TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR
 from system_test import QdManager
 
 DUMMY = "org.apache.qpid.dispatch.dummy"
 
 CONNECTION_PROPERTIES_UNICODE_STRING = {'connection': 'properties', 'int_property': 6451}
 
-TOTAL_ENTITIES = 35   # for tests that check the total # of entities
+TOTAL_ENTITIES = 29   # for tests that check the total # of entities
 
 
 class QdmanageTest(TestCase):
@@ -77,6 +79,7 @@ class QdmanageTest(TestCase):
 
         config_2 = Qdrouterd.Config([
             ('router', {'mode': 'interior', 'id': 'R2'}),
+            ('listener', {'port': cls.tester.get_port()}),
             ('listener', {'role': 'inter-router', 'port': cls.inter_router_port}),
         ])
         cls.router_2 = cls.tester.qdrouterd('test_router_2', config_2, wait=True)
@@ -204,10 +207,6 @@ class QdmanageTest(TestCase):
     def test_get_types(self):
         out = json.loads(self.run_qdmanage("get-types"))
         self.assertEqual(len(out), TOTAL_ENTITIES)
-
-    def test_get_attributes(self):
-        out = json.loads(self.run_qdmanage("get-attributes"))
-        self.assertEqual(len(out), 28)
 
     def test_get_attributes(self):
         out = json.loads(self.run_qdmanage("get-attributes"))

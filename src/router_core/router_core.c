@@ -51,8 +51,7 @@ static void qdr_core_setup_init(qdr_core_t *core)
     //
     // DISPATCH-1867: These functions used to be called inside the router_core_thread() function in router_core_thread.c
     // which meant they were executed asynchronously by the core thread which meant qd_router_setup_late() could
-    // return before these functions executed in the core thread. But we need the adaptors and modules to be initialized *before* qd_router_setup_late() completes
-    // so that python can successfully initialize httpConnectors and httpListeners.
+    // return before these functions executed in the core thread. But we need the adaptors and modules to be initialized *before* qd_router_setup_late() completes.
     //
     qdr_forwarder_setup_CT(core);
     qdr_route_table_setup_CT(core);
@@ -63,7 +62,7 @@ static void qdr_core_setup_init(qdr_core_t *core)
     qdr_modules_init(core);
 
     //
-    // Initialize all registered adaptors (HTTP1, HTTP2, TCP)
+    // Initialize all registered adaptors.
     //
     qdr_adaptors_init(core);
 }
@@ -78,6 +77,7 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     core->router_area         = area;
     core->router_id           = id;
     core->worker_thread_count = qd->thread_count;
+    sys_atomic_init(&core->uptime_ticks, 0);
 
     DEQ_INIT(core->exchanges);
 
@@ -244,7 +244,9 @@ void qdr_core_free(qdr_core_t *core)
             link_work = DEQ_HEAD(link->work_list);
         }
         sys_mutex_unlock(link->conn->work_lock);
-
+        if (link->user_context) {
+            qdr_link_set_context(link, 0);
+        }
         free_qdr_link_t(link);
         link = DEQ_HEAD(core->open_links);
     }
@@ -447,8 +449,10 @@ void qdr_action_enqueue(qdr_core_t *core, qdr_action_t *action)
 {
     sys_mutex_lock(core->action_lock);
     DEQ_INSERT_TAIL(core->action_list, action);
-    sys_cond_signal(core->action_cond);
+    const bool need_wake = core->sleeping;
     sys_mutex_unlock(core->action_lock);
+    if (need_wake)
+        sys_cond_signal(core->action_cond);
 }
 
 
@@ -456,8 +460,10 @@ void qdr_action_background_enqueue(qdr_core_t *core, qdr_action_t *action)
 {
     sys_mutex_lock(core->action_lock);
     DEQ_INSERT_TAIL(core->action_list_background, action);
-    sys_cond_signal(core->action_cond);
+    const bool need_wake = core->sleeping;
     sys_mutex_unlock(core->action_lock);
+    if (need_wake)
+        sys_cond_signal(core->action_cond);
 }
 
 

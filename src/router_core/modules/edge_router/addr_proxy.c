@@ -159,7 +159,8 @@ static void add_inlink(qcm_edge_addr_proxy_t *ap, const char *key, qdr_address_t
         }
 
         qdr_link_t *link = qdr_create_link_CT(ap->core, ap->edge_conn, QD_LINK_ENDPOINT, QD_INCOMING,
-                                              term, qdr_terminus_normal(0), QD_SSN_ENDPOINT);
+                                              term, qdr_terminus_normal(0), QD_SSN_ENDPOINT,
+                                              QDR_DEFAULT_PRIORITY);
         qdr_core_bind_address_link_CT(ap->core, addr, link);
         addr->edge_inlink = link;
     }
@@ -202,7 +203,8 @@ static void add_outlink(qcm_edge_addr_proxy_t *ap, const char *key, qdr_address_
         }
 
         qdr_link_t *link = qdr_create_link_CT(ap->core, ap->edge_conn, QD_LINK_ENDPOINT, QD_OUTGOING,
-                                              qdr_terminus_normal(0), term, QD_SSN_ENDPOINT);
+                                              qdr_terminus_normal(0), term, QD_SSN_ENDPOINT,
+                                              QDR_DEFAULT_PRIORITY);
         addr->edge_outlink = link;
     }
 }
@@ -281,7 +283,8 @@ static void on_conn_event(void *context, qdrc_event_t event, qdr_connection_t *c
         qdr_link_t *out_link = qdr_create_link_CT(ap->core, conn,
                                                   QD_LINK_ENDPOINT, QD_OUTGOING,
                                                   qdr_terminus(0), qdr_terminus(0),
-                                                  QD_SSN_ENDPOINT);
+                                                  QD_SSN_ENDPOINT,
+                                                  QDR_DEFAULT_PRIORITY);
 
         //
         // Associate the anonymous sender with the edge connection address.  This will cause
@@ -297,7 +300,7 @@ static void on_conn_event(void *context, qdrc_event_t event, qdr_connection_t *c
                                   QD_LINK_ENDPOINT, QD_INCOMING,
                                   qdr_terminus_edge_downlink(ap->core->router_id),
                                   qdr_terminus_edge_downlink(0),
-                                  QD_SSN_ENDPOINT);
+                                  QD_SSN_ENDPOINT, QDR_DEFAULT_PRIORITY);
 
         //
         // Attach a receiving link for edge address tracking updates.
@@ -314,15 +317,6 @@ static void on_conn_event(void *context, qdrc_event_t event, qdr_connection_t *c
         while (addr) {
             const char *key = (const char*) qd_hash_key_by_handle(addr->hash_handle);
             if (*key == QD_ITER_HASH_PREFIX_MOBILE) {
-                //
-                // Nullify the edge link references in case there are any left over from an earlier
-                // instance of an edge connection.
-                //
-                assert(addr->edge_inlink  == 0);
-                addr->edge_inlink  = 0;
-                assert(addr->edge_outlink == 0);
-                addr->edge_outlink = 0;
-
                 //
                 // If the address has more than zero attached destinations, create an
                 // incoming link from the interior to signal the presence of local consumers.

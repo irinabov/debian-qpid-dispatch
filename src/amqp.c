@@ -23,18 +23,19 @@
 #include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
 
-const char * const QD_MA_PREFIX  = "x-opt-qd.";
-const char * const QD_MA_INGRESS = "x-opt-qd.ingress";
-const char * const QD_MA_TRACE   = "x-opt-qd.trace";
-const char * const QD_MA_TO      = "x-opt-qd.to";
-const char * const QD_MA_PHASE   = "x-opt-qd.phase";
-const char * const QD_MA_CLASS   = "x-opt-qd.class";
-const char * const QD_MA_STREAM  = "x-opt-qd.stream";
-const int          QD_MA_MAX_KEY_LEN = 16;
-const int          QD_MA_N_KEYS      = 5;  // max number of router annotations to send/receive
-const int          QD_MA_FILTER_LEN  = 5;  // N tailing inbound entries to search for stripping
+const char * const QD_MA_PREFIX             = "x-opt-qd.";
+const char * const    QD_MA_INGRESS         = "x-opt-qd.ingress";
+const uint8_t * const QD_MA_INGRESS_ENCODED = (uint8_t*) "\xA3\x10""x-opt-qd.ingress";
+const char * const    QD_MA_TRACE           = "x-opt-qd.trace";
+const uint8_t * const QD_MA_TRACE_ENCODED   = (uint8_t*) "\xA3\x0E""x-opt-qd.trace";
+const char * const    QD_MA_TO              = "x-opt-qd.to";
+const uint8_t * const QD_MA_TO_ENCODED      = (uint8_t*) "\xA3\x0B""x-opt-qd.to";
+const char * const    QD_MA_PHASE           = "x-opt-qd.phase";
+const uint8_t * const QD_MA_PHASE_ENCODED   = (uint8_t*) "\xA3\x0E""x-opt-qd.phase";
+const char * const    QD_MA_STREAM          = "x-opt-qd.stream";
+const uint8_t * const QD_MA_STREAM_ENCODED  = (uint8_t*) "\xA3\x0F""x-opt-qd.stream";
+const char * const QD_MA_CLASS              = "x-opt-qd.class";  // deprecated
 
 const char * const QD_CAPABILITY_ROUTER_CONTROL   = "qd.router";
 const char * const QD_CAPABILITY_ROUTER_DATA      = "qd.router-data";
@@ -66,10 +67,10 @@ const char * const QD_CONNECTION_PROPERTY_FAILOVER_PORT_KEY     = "port";
 const char * const QD_CONNECTION_PROPERTY_FAILOVER_SCHEME_KEY   = "scheme";
 const char * const QD_CONNECTION_PROPERTY_FAILOVER_HOSTNAME_KEY = "hostname";
 const char * const QD_CONNECTION_PROPERTY_ADAPTOR_KEY           = "qd.adaptor";
-const char * const QD_CONNECTION_PROPERTY_TCP_ADAPTOR_VALUE     = "tcp";
-
+const char * const QD_CONNECTION_PROPERTY_ANNOTATIONS_VERSION_KEY = "qd.annotations-version";
 const char * const QD_TERMINUS_EDGE_ADDRESS_TRACKING = "_$qd.edge_addr_tracking";
 const char * const QD_TERMINUS_ADDRESS_LOOKUP        = "_$qd.addr_lookup";
+const char * const QD_TERMINUS_HEARTBEAT             = "_$qd.edge_heartbeat";
 
 const qd_amqp_error_t QD_AMQP_OK = { 200, "OK" };
 const qd_amqp_error_t QD_AMQP_CREATED = { 201, "Created" };

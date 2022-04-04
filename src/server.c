@@ -489,6 +489,14 @@ static void decorate_connection(qd_server_t *qd_server, pn_connection_t *conn, c
     }
 
     if (config) {
+
+        if (strcmp(config->role, "inter-router") == 0 || strcmp(config->role, "edge") == 0) {
+            pn_data_put_symbol(pn_connection_properties(conn),
+                               pn_bytes(strlen(QD_CONNECTION_PROPERTY_ANNOTATIONS_VERSION_KEY),
+                                        QD_CONNECTION_PROPERTY_ANNOTATIONS_VERSION_KEY));
+            pn_data_put_int(pn_connection_properties(conn), QD_ROUTER_ANNOTATIONS_VERSION);
+        }
+
         qd_failover_list_t *fol = config->failover_list;
         if (fol) {
             pn_data_put_symbol(pn_connection_properties(conn),
@@ -752,7 +760,7 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
                     }
                 }
             }
-            qdr_use_remote_authentication_service(tport, config->sasl_plugin_config.auth_service, config->sasl_plugin_config.sasl_init_hostname, plugin_ssl_domain, server->proactor);
+            qdr_use_remote_authentication_service(tport, config->sasl_plugin_config.auth_service, config->sasl_plugin_config.hostname, config->sasl_plugin_config.sasl_init_hostname, plugin_ssl_domain, server->proactor);
         }
         pn_transport_require_auth(tport, config->requireAuthentication);
         pn_transport_require_encryption(tport, config->requireEncryption);
@@ -1385,7 +1393,7 @@ qd_server_t *qd_server(qd_dispatch_t *qd, int thread_count, const char *containe
     qd_server->cond             = sys_cond();
     DEQ_INIT(qd_server->conn_list);
 
-    qd_timer_initialize(qd_server->lock);
+    qd_timer_initialize();
 
     qd_server->pause_requests         = 0;
     qd_server->threads_paused         = 0;
@@ -1442,7 +1450,9 @@ void qd_server_free(qd_server_t *qd_server)
     sys_mutex_free(qd_server->lock);
     sys_mutex_free(qd_server->conn_activation_lock);
     sys_cond_free(qd_server->cond);
+    qd_python_lock_state_t ls = qd_python_lock();
     Py_XDECREF((PyObject *)qd_server->py_displayname_obj);
+    qd_python_unlock(ls);
     free(qd_server);
 }
 
@@ -1660,7 +1670,7 @@ qd_listener_t *qd_server_listener(qd_server_t *server)
 }
 
 static bool qd_listener_listen_pn(qd_listener_t *li) {
-   li->pn_listener = pn_listener();
+    li->pn_listener = pn_listener();
     if (li->pn_listener) {
         pn_listener_set_context(li->pn_listener, &li->type);
         pn_proactor_listen(li->server->proactor, li->pn_listener, li->config.host_port,

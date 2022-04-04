@@ -33,6 +33,8 @@
 
 #include <stdbool.h>
 
+#define QD_ROUTER_ID_MAX 127  // max length of router id in chars
+
 typedef struct qdr_core_t   qdr_core_t;
 typedef struct qd_router_t  qd_router_t;
 typedef struct qd_address_t qd_address_t;
@@ -89,7 +91,8 @@ struct qd_router_forwarder_t {
 
 typedef void (*qd_router_message_cb_t)(void *context, qd_message_t *msg, int link_id);
 
-const char *qd_router_id(const qd_dispatch_t *qd);
+const char *qd_router_id(void);
+const uint8_t *qd_router_id_encoded(size_t *len);  // encoded as AMQP STR
 
 qdr_core_t *qd_router_core(qd_dispatch_t *qd);
 

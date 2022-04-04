@@ -28,6 +28,9 @@ Features:
 - Sundry other tools.
 """
 
+import logging
+from typing import Callable, List, Optional, Tuple
+
 import errno
 import sys
 import time
@@ -126,7 +129,7 @@ def retry_delay(deadline, delay, max_delay):
 TIMEOUT = float(os.environ.get("QPID_SYSTEM_TEST_TIMEOUT", 60))
 
 
-def retry(function, timeout=TIMEOUT, delay=.001, max_delay=1):
+def retry(function: Callable[[], bool], timeout: float = TIMEOUT, delay: float = .001, max_delay: float = 1):
     """Call function until it returns a true value or timeout expires.
     Double the delay for each retry up to max_delay.
     Returns what function returns or None if timeout expires.
@@ -173,19 +176,37 @@ def get_local_host_socket(protocol_family='IPv4'):
     return s, host
 
 
-def port_available(port, protocol_family='IPv4'):
+def port_refuses_connection(port, protocol_family='IPv4'):
     """Return true if connecting to host:port gives 'connection refused'."""
     s, host = get_local_host_socket(protocol_family)
-    available = False
     try:
         s.connect((host, port))
-    except socket.error as e:
-        available = e.errno == errno.ECONNREFUSED
-    except:
-        pass
+    except OSError as e:
+        return e.errno == errno.ECONNREFUSED
+    finally:
+        s.close()
 
-    s.close()
-    return available
+    return False
+
+
+def port_permits_binding(port, protocol_family='IPv4'):
+    """Return true if binding to the port succeeds."""
+    s, _ = get_local_host_socket(protocol_family)
+    host = ""
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # so that followup binders are not blocked
+        s.bind((host, port))
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+    return True
+
+
+def port_available(port, protocol_family='IPv4'):
+    """Return true if a new server will be able to bind to the port."""
+    return port_refuses_connection(port, protocol_family) and port_permits_binding(port, protocol_family)
 
 
 def wait_port(port, protocol_family='IPv4', **retry_kwargs):
@@ -227,6 +248,14 @@ def message(**properties):
         getattr(m, name)        # Raise exception if not a valid message attribute.
         setattr(m, name, value)
     return m
+
+
+def skip_test_in_ci(environment_var):
+    env_var = os.environ.get(environment_var)
+    if env_var is not None:
+        if env_var.lower() in ['true', '1', 't', 'y', 'yes']:
+            return True
+    return False
 
 
 class Process(subprocess.Popen):
@@ -301,7 +330,7 @@ class Process(subprocess.Popen):
             error("exit code %s, expected %s" % (status, self.expect))
 
 
-class Config(object):
+class Config:
     """Base class for configuration objects that provide a convenient
     way to create content for configuration files."""
 
@@ -313,49 +342,10 @@ class Config(object):
         return name
 
 
-class HttpServer(Process):
-    def __init__(self, args, name=None, expect=Process.RUNNING):
-        super(HttpServer, self).__init__(args, name=name, expect=expect)
-
-
-class Http2Server(HttpServer):
-    """A HTTP2 Server that will respond to requests made via the router."""
-
-    def __init__(self, name=None, listen_port=None, wait=True,
-                 py_string='python3', perform_teardown=True, cl_args=None,
-                 server_file=None,
-                 expect=Process.RUNNING):
-        self.name = name
-        self.listen_port = listen_port
-        self.ports_family = {self.listen_port: 'IPv4'}
-        self.py_string = py_string
-        self.cl_args = cl_args
-        self.perform_teardown = perform_teardown
-        self.server_file = server_file
-        self._wait_ready = False
-        self.args = ['/usr/bin/env', self.py_string, os.path.join(os.path.dirname(os.path.abspath(__file__)), self.server_file)]
-        if self.cl_args:
-            self.args += self.cl_args
-        super(Http2Server, self).__init__(self.args, name=name, expect=expect)
-        if wait:
-            self.wait_ready()
-
-    def wait_ready(self, **retry_kwargs):
-        """
-        Wait for ports to be ready
-        """
-        if not self._wait_ready:
-            self._wait_ready = True
-            self.wait_ports(**retry_kwargs)
-
-    def wait_ports(self, **retry_kwargs):
-        wait_ports(self.ports_family, **retry_kwargs)
-
-
 class Qdrouterd(Process):
     """Run a Qpid Dispatch Router Daemon"""
 
-    class Config(list, Config):
+    class Config(list, Config):  # type: ignore[misc]  # Cannot resolve name "Config" (possible cyclic definition)  # mypy#10958
         """
         A router configuration.
 
@@ -586,12 +576,6 @@ class Qdrouterd(Process):
         raise Exception("Unknown protocol family: %s" % protocol_family)
 
     @property
-    def http_addresses(self):
-        """Return http://host:port addresses for all http listeners"""
-        cfg = self.config.sections('httpListener')
-        return ["http://%s" % self._cfg_2_host_port(l) for l in cfg]
-
-    @property
     def addresses(self):
         """Return amqp://host:port addresses for all listeners"""
         cfg = self.config.sections('listener')
@@ -657,7 +641,7 @@ class Qdrouterd(Process):
 
         def check():
             addrs = self.management.query(a_type).get_dicts()
-            rc = [a for a in addrs if address in a['name']]
+            rc = [a for a in addrs if a['name'].endswith(address)]
             count = 0
             for a in rc:
                 count += a['subscriberCount']
@@ -723,7 +707,7 @@ class Qdrouterd(Process):
         return os.path.join(self.outdir, self.logfile)
 
 
-class Tester(object):
+class Tester:
     """Tools for use by TestCase
 - Create a directory for the test.
 - Utilities to create processes and servers, manage ports etc.
@@ -783,9 +767,6 @@ class Tester(object):
     def qdrouterd(self, *args, **kwargs):
         """Return a Qdrouterd that will be cleaned up on teardown"""
         return self.cleanup(Qdrouterd(*args, **kwargs))
-
-    def http2server(self, *args, **kwargs):
-        return self.cleanup(Http2Server(*args, **kwargs))
 
     port_range = (20000, 30000)
     next_port = random.randint(port_range[0], port_range[1])
@@ -888,7 +869,7 @@ class AsyncTestReceiver(MessagingHandler):
                                              % self._async_receiver.num_queue_puts)
 
     def __init__(self, address, source, conn_args=None, container_id=None,
-                 wait=True, recover_link=False, msg_args=None):
+                 wait=True, recover_link=False, msg_args=None, print_to_console=False):
         if msg_args is None:
             msg_args = {}
         super(AsyncTestReceiver, self).__init__(**msg_args)
@@ -905,7 +886,7 @@ class AsyncTestReceiver(MessagingHandler):
         self._recover_count = 0
         self._stop_thread = False
         self._thread = Thread(target=self._main)
-        self._logger = Logger(title="AsyncTestReceiver %s" % cid)
+        self._logger = Logger(title="AsyncTestReceiver %s" % cid, print_to_console=print_to_console)
         self._thread.daemon = True
         self._thread.start()
         self.num_queue_puts = 0
@@ -920,13 +901,19 @@ class AsyncTestReceiver(MessagingHandler):
     def _main(self):
         self._container.timeout = 0.5
         self._container.start()
-        self._logger.log("Starting reactor")
+        self._logger.log("AsyncTestReceiver Starting reactor")
         while self._container.process():
             if self._stop_thread:
                 if self._conn:
                     self._conn.close()
                     self._conn = None
-        self._logger.log("reactor thread done")
+        self._logger.log("AsyncTestReceiver reactor thread done")
+
+    def on_connection_error(self, event):
+        self._logger.log("AsyncTestReceiver on_connection_error=%s" % event.connection.remote_condition.description)
+
+    def on_link_error(self, event):
+        self._logger.log("AsyncTestReceiver on_link_error=%s" % event.link.remote_condition.description)
 
     def stop(self, timeout=TIMEOUT):
         self._stop_thread = True
@@ -990,7 +977,7 @@ class AsyncTestSender(MessagingHandler):
             super(AsyncTestSender.TestSenderException, self).__init__(error)
 
     def __init__(self, address, target, count=1, message=None,
-                 container_id=None, presettle=False):
+                 container_id=None, presettle=False, print_to_console=False):
         super(AsyncTestSender, self).__init__(auto_accept=False,
                                               auto_settle=False)
         self.address = address
@@ -1004,7 +991,6 @@ class AsyncTestSender(MessagingHandler):
         self.sent = 0
         self.error = None
         self.link_stats = None
-
         self._conn = None
         self._sender = None
         self._message = message or Message(body="test")
@@ -1014,31 +1000,33 @@ class AsyncTestSender(MessagingHandler):
         self._link_name = "%s-%s" % (cid, "tx")
         self._thread = Thread(target=self._main)
         self._thread.daemon = True
-        self._logger = Logger(title="AsyncTestSender %s" % cid)
+        self._logger = Logger(title="AsyncTestSender %s" % cid, print_to_console=print_to_console)
         self._thread.start()
         self.msg_stats = "self.sent=%d, self.accepted=%d, self.released=%d, self.modified=%d, self.rejected=%d"
 
     def _main(self):
         self._container.timeout = 0.5
         self._container.start()
-        self._logger.log("Starting reactor")
+        self._logger.log("AsyncTestSender Starting reactor")
         while self._container.process():
             self._check_if_done()
-        self._logger.log("reactor thread done")
+        self._logger.log("AsyncTestSender reactor thread done")
 
     def get_msg_stats(self):
         return self.msg_stats % (self.sent, self.accepted, self.released, self.modified, self.rejected)
 
     def wait(self):
         # don't stop it - wait until everything is sent
+        self._logger.log("AsyncTestSender wait: about to join thread")
         self._thread.join(timeout=TIMEOUT)
-        self._logger.log("thread done")
+        self._logger.log("AsyncTestSender wait: thread done")
         assert not self._thread.is_alive(), "sender did not complete"
         if self.error:
             raise AsyncTestSender.TestSenderException(self.error)
         del self._sender
         del self._conn
         del self._container
+        self._logger.log("AsyncTestSender wait: no errors in wait")
 
     def on_start(self, event):
         self._conn = self._container.connect(self.address)
@@ -1113,7 +1101,7 @@ class AsyncTestSender(MessagingHandler):
         self._logger.dump()
 
 
-class QdManager(object):
+class QdManager:
     """
     A means to invoke qdmanage during a testcase
     """
@@ -1187,11 +1175,11 @@ class QdManager(object):
         return json.loads(self(cmd))
 
 
-class MgmtMsgProxy(object):
+class MgmtMsgProxy:
     """
     Utility for creating and inspecting management messages
     """
-    class _Response(object):
+    class _Response:
         def __init__(self, status_code, status_description, body):
             self.status_code        = status_code
             self.status_description = status_description
@@ -1290,7 +1278,7 @@ class MgmtMsgProxy(object):
         return Message(properties=ap, reply_to=self.reply_addr)
 
 
-class TestTimeout(object):
+class TestTimeout:
     """
     A callback object for MessagingHandler class
     parent: A MessagingHandler with a timeout() method
@@ -1304,7 +1292,7 @@ class TestTimeout(object):
         self.parent.timeout()
 
 
-class PollTimeout(object):
+class PollTimeout:
     """
     A callback object for MessagingHandler scheduled timers
     parent: A MessagingHandler with a poll_timeout() method
@@ -1355,7 +1343,7 @@ def get_inter_router_links(address):
     return inter_router_links
 
 
-class Timestamp(object):
+class Timestamp:
     """
     Time stamps for logging.
     """
@@ -1367,23 +1355,26 @@ class Timestamp(object):
         return self.ts.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
-class Logger(object):
+class Logger:
     """
     Record an event log for a self test.
     May print per-event or save events to be printed later.
+    Pytest will automatically collect the logs and will dump them for a failed test
     Optional file opened in 'append' mode to which each log line is written.
     """
 
     def __init__(self,
-                 title="Logger",
-                 print_to_console=False,
-                 save_for_dump=True,
-                 ofilename=None):
+                 title: str = "Logger",
+                 print_to_console: bool = False,
+                 save_for_dump: bool = True,
+                 python_log_level: Optional[int] = logging.DEBUG,
+                 ofilename: Optional[str] = None) -> None:
         self.title = title
         self.print_to_console = print_to_console
         self.save_for_dump = save_for_dump
-        self.logs = []
+        self.python_log_level = python_log_level
         self.ofilename = ofilename
+        self.logs: List[Tuple[Timestamp, str]] = []
 
     def log(self, msg):
         ts = Timestamp()
@@ -1392,6 +1383,8 @@ class Logger(object):
         if self.print_to_console:
             print("%s %s" % (ts, msg))
             sys.stdout.flush()
+        if self.python_log_level is not None:
+            logging.log(self.python_log_level, f"{ts} {self.title}: {msg}")
         if self.ofilename is not None:
             with open(self.ofilename, 'a') as f_out:
                 f_out.write("%s %s\n" % (ts, msg))

@@ -17,19 +17,20 @@
 # under the License.
 #
 
-from proton import Condition, Message, Delivery, Url, symbol, Timeout
-from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, DIR, Process, unittest, QdManager, TestTimeout
-from proton.handlers import MessagingHandler, TransactionHandler
-from proton.reactor import Container, AtMostOnce, AtLeastOnce
-from proton.utils import BlockingConnection, SyncRequestResponse
-from proton import VERSION as PROTON_VERSION
-from proton import Terminus
-from proton import Data, symbol
-from qpid_dispatch.management.client import Node
-import os
 import json
+import os
 from subprocess import PIPE, STDOUT
 from time import sleep
+
+from proton import Condition, Data, Delivery, Message, Terminus, Timeout, Url, symbol
+from proton import VERSION as PROTON_VERSION
+from proton.handlers import MessagingHandler, TransactionHandler
+from proton.utils import BlockingConnection, SyncRequestResponse
+from proton.reactor import Container, AtMostOnce, AtLeastOnce
+
+from qpid_dispatch.management.client import Node
+
+from system_test import TestCase, Qdrouterd, main_module, TIMEOUT, DIR, Process, unittest, QdManager, TestTimeout
 from test_broker import FakeBroker
 
 
@@ -399,10 +400,14 @@ class OneRouterTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
-    def test_07_unsettled_undeliverable(self) :
+    def test_07_no_consumer_no_credit(self):
+        """
+        Ensure a sending client never gets credit if there is no
+        consumer present.
+        """
         addr = self.address + '/closest/' + str(OneRouterTest.closest_count)
         OneRouterTest.closest_count += 1
-        test = UsettledUndeliverable(addr, n_messages=10)
+        test = NoConsumerNoCredit(addr)
         test.run()
         self.assertIsNone(test.error)
 
@@ -416,7 +421,14 @@ class OneRouterTest(TestCase):
     def test_09_message_annotations(self) :
         addr = self.address + '/closest/' + str(OneRouterTest.closest_count)
         OneRouterTest.closest_count += 1
-        test = MessageAnnotations(addr, n_messages=10)
+        test = MessageAnnotations(addr)
+        test.run()
+        self.assertIsNone(test.error)
+
+    def test_09_1_bad_message_annotations(self) :
+        addr = self.address + '/closest/' + str(OneRouterTest.closest_count)
+        OneRouterTest.closest_count += 1
+        test = BadMessageAnnotations(addr)
         test.run()
         self.assertIsNone(test.error)
 
@@ -558,11 +570,6 @@ class OneRouterTest(TestCase):
         self.assertIsNone(test.error)
         self.assertTrue(test.accepted_count_match)
 
-    def test_30_presettled_overflow(self):
-        test = PresettledOverflowTest(self.address)
-        test.run()
-        self.assertIsNone(test.error)
-
     def test_31_create_unavailable_sender(self):
         test = UnavailableSender(self.address)
         test.run()
@@ -654,10 +661,9 @@ class OneRouterTest(TestCase):
     def test_43_dropped_presettled_receiver_stops(self):
         local_node = Node.connect(self.address, timeout=TIMEOUT)
         res = local_node.query('org.apache.qpid.dispatch.router')
-        deliveries_ingress = res.attribute_names.index('deliveriesIngress')
-        presettled_dropped_count = res.attribute_names.index('droppedPresettledDeliveries')
-        ingress_delivery_count = res.results[0][deliveries_ingress]
-        test = DroppedPresettledTest(self.address, 200, ingress_delivery_count, presettled_dropped_count)
+        presettled_dropped_count_index = res.attribute_names.index('droppedPresettledDeliveries')
+        presettled_dropped_count = res.results[0][presettled_dropped_count_index]
+        test = DroppedPresettledTest(self.address, 200, presettled_dropped_count)
         test.run()
         self.assertIsNone(test.error)
 
@@ -740,14 +746,14 @@ class OneRouterTest(TestCase):
             # check the caps sent by router.
             self.assertTrue(test.remote_offered is not None)
             self.assertTrue(test.remote_desired is not None)
-            ro = [c for c in test.remote_offered]
-            rd = [c for c in test.remote_desired]
+            ro = list(test.remote_offered)
+            rd = list(test.remote_desired)
             for rc in [ro, rd]:
                 self.assertIn(symbol('ANONYMOUS-RELAY'), rc)
                 self.assertIn(symbol('qd.streaming-links'), rc)
 
 
-class Entity(object):
+class Entity:
     def __init__(self, status_code, status_description, attrs):
         self.status_code        = status_code
         self.status_description = status_description
@@ -757,7 +763,7 @@ class Entity(object):
         return self.attrs[key]
 
 
-class RouterProxy(object):
+class RouterProxy:
     def __init__(self, reply_addr):
         self.reply_addr = reply_addr
 
@@ -792,7 +798,7 @@ class RouterProxy(object):
         return Message(properties=ap, reply_to=self.reply_addr)
 
 
-class ReleasedChecker(object):
+class ReleasedChecker:
     def __init__(self, parent):
         self.parent = parent
 
@@ -1291,7 +1297,7 @@ class ManagementTest(MessagingHandler):
         Container(self).run()
 
 
-class CustomTimeout(object):
+class CustomTimeout:
     def __init__(self, parent):
         self.parent = parent
 
@@ -1457,6 +1463,38 @@ class PreSettled (MessagingHandler) :
             self.bail(None)
 
 
+class SendPresettledAfterReceiverCloses(object):
+    def __init__(self, parent):
+        self.parent = parent
+        self.num_tries = 0
+
+    def on_timer_task(self, event):
+        self.num_tries += 1
+        local_node = Node.connect(self.parent.addr, timeout=TIMEOUT)
+        res = local_node.query('org.apache.qpid.dispatch.router.link')
+        owning_addr_index = res.attribute_names.index('owningAddr')
+        has_address = False
+        for out in res.results:
+            owning_addr = out[owning_addr_index]
+            # Check if the receiver's address is present in the router's address table.
+            # If the address is still there, try one more time until self.parent.max_tries.
+            if self.parent.addr in owning_addr:
+                has_address = True
+                break
+
+        if has_address:
+            if self.num_tries == self.parent.max_tries:
+                self.parent.bail("Address %s is still in routing table" % owning_addr)
+            else:
+                self.parent.schedule_send_timer()
+        else:
+            # Address is not there in the address table anymore.
+            # Send the remaining messages. These presettled messages must be
+            # dropped by the router which we will verify using the router's
+            # droppedPresettledDeliveries
+            self.parent.send_remaining()
+
+
 class PresettledCustomTimeout(object):
     def __init__(self, parent):
         self.parent = parent
@@ -1466,34 +1504,36 @@ class PresettledCustomTimeout(object):
         self.num_tries += 1
         local_node = Node.connect(self.parent.addr, timeout=TIMEOUT)
         res = local_node.query('org.apache.qpid.dispatch.router')
-        deliveries_ingress = res.attribute_names.index(
-            'deliveriesIngress')
-        presettled_deliveries_dropped = res.attribute_names.index(
-            'droppedPresettledDeliveries')
-        ingress_delivery_count = res.results[0][deliveries_ingress]
-        self.parent.cancel_custom()
+        presettled_deliveries_dropped_index = res.attribute_names.index('droppedPresettledDeliveries')
+        presettled_dropped_count =  res.results[0][presettled_deliveries_dropped_index]
 
-        deliveries_dropped_diff = presettled_deliveries_dropped - self.parent.begin_dropped_presettled_count
+        deliveries_dropped_diff = presettled_dropped_count - self.parent.begin_dropped_presettled_count
 
         # Without the fix for DISPATCH-1213  the ingress count will be less than
         # 200 because the sender link has stalled. The q2_holdoff happened
         # and so all the remaining messages are still in the
         # proton buffers.
-        deliveries_ingress_diff = ingress_delivery_count - self.parent.begin_ingress_count
-        if deliveries_ingress_diff + deliveries_dropped_diff > self.parent.n_messages:
+        if deliveries_dropped_diff == self.parent.n_messages - self.parent.max_receive:
             self.parent.bail(None)
         else:
             if self.num_tries == self.parent.max_tries:
                 self.parent.bail("Messages sent to the router is %d, "
-                                 "Messages processed by the router is %d" %
+                                 "Messages dropped by the router is %d" %
                                  (self.parent.n_messages,
-                                  deliveries_ingress_diff + deliveries_dropped_diff))
+                                  deliveries_dropped_diff))
             else:
-                self.parent.schedule_timer()
+                self.parent.schedule_custom_timer()
 
 
 class DroppedPresettledTest(MessagingHandler):
-    def __init__(self, addr, n_messages, begin_ingress_count, begin_dropped_presettled_count):
+    """
+    First send 10 large messages and a receiver receives them all and exits.
+    These first 10 messages are presettled messages and the router network did not
+    drop them.
+    Now send an additional 190 messages and make sure they are dropped by checking
+    the droppedPresettledCount
+    """
+    def __init__(self, addr, n_messages, begin_dropped_presettled_count):
         super(DroppedPresettledTest, self).__init__()
         self.addr = addr
         self.n_messages = n_messages
@@ -1507,19 +1547,21 @@ class DroppedPresettledTest(MessagingHandler):
         self.test_timer = None
         self.max_receive = 10
         self.custom_timer = None
+        self.send_timer = None
         self.timer = None
         self.begin_dropped_presettled_count = begin_dropped_presettled_count
-        self.begin_ingress_count = begin_ingress_count
         self.str1 = "0123456789abcdef"
         self.msg_str = ""
         self.max_tries = 10
         self.reactor = None
         for i in range(8192):
             self.msg_str += self.str1
-        self.timer_instance = PresettledCustomTimeout(self)
 
-    def schedule_timer(self):
-        self.custom_timer = self.reactor.schedule(0.5, self.timer_instance)
+    def schedule_custom_timer(self):
+        self.custom_timer = self.reactor.schedule(0.5, PresettledCustomTimeout(self))
+
+    def schedule_send_timer(self):
+        self.send_timer = self.reactor.schedule(0.5, SendPresettledAfterReceiverCloses(self))
 
     def run(self):
         Container(self).run()
@@ -1530,7 +1572,10 @@ class DroppedPresettledTest(MessagingHandler):
         if self.recv_conn:
             self.recv_conn.close()
         self.timer.cancel()
-        self.custom_timer.cancel()
+        if self.custom_timer:
+            self.custom_timer.cancel()
+        if self.send_timer:
+            self.send_timer.cancel()
 
     def timeout(self,):
         self.bail("Timeout Expired: %d messages received, %d expected." %
@@ -1546,18 +1591,24 @@ class DroppedPresettledTest(MessagingHandler):
                                                     "test_43")
         self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
 
-    def cancel_custom(self):
-        self.custom_timer.cancel()
+    def send(self):
+        msg = Message(id=(self.n_sent + 1),
+                      body={'sequence': (self.n_sent + 1),
+                            'msg_str': self.msg_str})
+        # Presettle the delivery.
+        dlv = self.sender.send(msg)
+        dlv.settle()
+        self.n_sent += 1
+
+    def send_remaining(self):
+        while self.n_sent < self.n_messages:
+            self.send()
+        self.schedule_custom_timer()
 
     def on_sendable(self, event):
-        while self.n_sent < self.n_messages:
-            msg = Message(id=(self.n_sent + 1),
-                          body={'sequence': (self.n_sent + 1),
-                                'msg_str': self.msg_str})
-            # Presettle the delivery.
-            dlv = self.sender.send(msg)
-            dlv.settle()
-            self.n_sent += 1
+        # Send only self.max_receive messages.
+        while self.n_sent < self.max_receive:
+            self.send()
 
     def on_message(self, event):
         self.n_received += 1
@@ -1565,12 +1616,9 @@ class DroppedPresettledTest(MessagingHandler):
             # Receiver bails after receiving max_receive messages.
             self.receiver.close()
             self.recv_conn.close()
-
-            # The sender is only sending 200 large messages which is less
-            # that the initial credit of 250 that the router gives.
-            # Lets do a qdstat to find out if all 200 messages is handled
-            # by the router.
-            self.schedule_timer()
+            # When self.max_receive messages have been received and the receiver has been closed
+            # we try to check to see if the receiver's address is gone from the address table.
+            self.schedule_send_timer()
 
 
 class MulticastUnsettled (MessagingHandler) :
@@ -1863,35 +1911,31 @@ class PropagatedDisposition (MessagingHandler) :
         dlv.update(Delivery.ACCEPTED)
 
 
-class UsettledUndeliverable (MessagingHandler) :
-    def __init__(self,
-                 addr,
-                 n_messages
-                 ) :
-        super(UsettledUndeliverable, self) . __init__(prefetch=n_messages)
-        self.addr        = addr
-        self.n_messages  = n_messages
+class NoConsumerNoCredit(MessagingHandler):
+    def __init__(self, addr):
+        super(NoConsumerNoCredit, self).__init__()
+        self.addr         = addr
+        self.test_timer   = None
+        self.credit_timer = None
+        self.sender       = None
+        self.bailing      = False
 
-        self.test_timer = None
-        self.sender     = None
-        self.n_sent     = 0
-        self.n_received = 0
-        self.bailing    = False
-
-    def run(self) :
+    def run(self):
         Container(self).run()
 
-    def bail(self, travail) :
+    def bail(self, travail):
         self.bailing = True
         self.error = travail
         self.send_conn.close()
-        self.test_timer.cancel()
+        self.test_timer and self.test_timer.cancel()
+        self.credit_timer and self.credit_timer.cancel()
 
     def timeout(self):
-        if self.n_sent > 0 :
-            self.bail("Messages sent with no receiver.")
-        else :
-            self.bail(None)
+        self.bail("Test timed out - should not happen!")
+
+    def on_timer_task(self, event):
+        # no credit arrived: success
+        self.bail(None)
 
     def on_start(self, event):
         self.send_conn = event.container.connect(self.addr)
@@ -1899,15 +1943,17 @@ class UsettledUndeliverable (MessagingHandler) :
         # Uh-oh. We are not creating a receiver!
         self.test_timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
 
-    def on_sendable(self, event) :
-        while self.n_sent < self.n_messages :
-            msg = Message(body=self.n_sent)
-            dlv = self.sender.send(msg)
-            dlv.settle()
-            self.n_sent += 1
+    def on_link_opened(self, event):
+        # delay to ensure no credit arrives
+        if event.link == self.sender:
+            self.credit_timer = event.reactor.schedule(1.0, self)
+
+    def on_sendable(self, event):
+        if event.link == self.sender:
+            self.bail("Received credit even though no consumer present")
 
     def on_message(self, event) :
-        self.n_received += 1
+        self.bail("on_message should never happen")
 
 
 class ThreeAck (MessagingHandler) :
@@ -1993,15 +2039,10 @@ class ThreeAck (MessagingHandler) :
     # See PROTON-395 .
 
 
-class MessageAnnotations (MessagingHandler) :
-    def __init__(self,
-                 addr,
-                 n_messages
-                 ) :
-        super(MessageAnnotations, self) . __init__(prefetch=n_messages)
-        self.addr        = addr
-        self.n_messages  = n_messages
-
+class MessageAnnotations(MessagingHandler):
+    def __init__(self, addr) :
+        super(MessageAnnotations, self).__init__()
+        self.addr       = addr
         self.test_timer = None
         self.sender     = None
         self.receiver   = None
@@ -2012,9 +2053,11 @@ class MessageAnnotations (MessagingHandler) :
     def run(self) :
         Container(self).run()
 
-    def bail(self, travail) :
+    def bail(self, travail):
         self.bailing = True
         self.error = travail
+        if self.error:
+            print("message annotations failure: %s" % self.error, flush=True)
         self.send_conn.close()
         self.recv_conn.close()
         self.test_timer.cancel()
@@ -2031,75 +2074,172 @@ class MessageAnnotations (MessagingHandler) :
         self.test_timer  = event.reactor.schedule(TIMEOUT, TestTimeout(self))
 
     def on_sendable(self, event) :
-
-        if event.sender.credit < 1 :
+        if self.n_sent == 5:
             return
+
         # No added annotations.
-        msg = Message(body=self.n_sent)
+        msg = Message(body="Message [0]")
         self.n_sent += 1
         self.sender.send(msg)
 
         # Add an annotation.
-        msg = Message(body=self.n_sent)
+        msg = Message(body="Message [1]")
         self.n_sent += 1
-        msg.annotations = {'x-opt-qd.ingress': 'i_changed_the_annotation'}
+        msg.annotations = {'x-opt-qd.ingress':
+                           'i_changed_the_annotation'}
         self.sender.send(msg)
 
-        # Try to supply an invalid type for trace.
-        msg = Message(body=self.n_sent)
+        # Supply a trace list.
+        msg = Message(body="Message [2]")
         self.n_sent += 1
-        msg.annotations = {'x-opt-qd.trace' : 45}
+        msg.annotations = {'x-opt-qd.trace': ['0/first-hop']}
         self.sender.send(msg)
 
-        # Add a value to the trace list.
-        msg = Message(body=self.n_sent)
+        # ensure obsolete MA are not propagated
+        msg = Message(body="Message [3]")
         self.n_sent += 1
-        msg.annotations = {'x-opt-qd.trace' : ['0/first-hop']}
+        msg.annotations = {'userA': 'A',
+                           'userB': 'B',
+                           'x-opt-qd.class': 9,
+                           'x-opt-qd.': 'X'}
+        self.sender.send(msg)
+
+        # supply a phase and stream
+        msg = Message(body="Message [4]")
+        self.n_sent += 1
+        msg.annotations = {'x-opt-qd.phase': 7,
+                           'x-opt-qd.stream': 1}
         self.sender.send(msg)
 
     def on_message(self, event) :
         ingress_router_name = '0/QDR'
         self.n_received += 1
-        if self.n_received >= self.n_messages :
-            self.bail(None)
-            return
 
         annotations = event.message.annotations
+        body = event.message.body
 
-        if self.n_received == 1 :
-            if annotations['x-opt-qd.ingress'] != ingress_router_name :
-                self.bail('Bad ingress router name on msg %d' % self.n_received)
+        if body == "Message[0]":
+            ingress = annotations.get('x-opt-qd.ingress')
+            if ingress != ingress_router_name:
+                self.bail('Msg[0] bad ingress router value: %s' % annotations)
                 return
-            if annotations['x-opt-qd.trace'] != [ingress_router_name] :
-                self.bail('Bad trace on msg %d.' % self.n_received)
-                return
-
-        elif self.n_received == 2 :
-            if annotations['x-opt-qd.ingress'] != 'i_changed_the_annotation' :
-                self.bail('Bad ingress router name on msg %d' % self.n_received)
-                return
-            if annotations['x-opt-qd.trace'] != [ingress_router_name] :
-                self.bail('Bad trace on msg %d .' % self.n_received)
+            trace = annotations.get('x-opt-qd.trace')
+            if trace != [ingress_router_name]:
+                self.bail('Msg[0] bad ingress trace value: %s' % annotations)
                 return
 
-        elif self.n_received == 3 :
-            # The invalid type for trace has no effect.
-            if annotations['x-opt-qd.ingress'] != ingress_router_name :
-                self.bail('Bad ingress router name on msg %d ' % self.n_received)
-                return
-            if annotations['x-opt-qd.trace'] != [ingress_router_name] :
-                self.bail('Bad trace on msg %d' % self.n_received)
+        elif body == "Message[1]":
+            ingress = annotations.get('x-opt-qd.ingress')
+            if ingress != 'i_changed_the_annotation':
+                self.bail('Msg[1] bad ingress router value: %s' % annotations)
                 return
 
-        elif self.n_received == 4 :
-            if annotations['x-opt-qd.ingress'] != ingress_router_name :
-                self.bail('Bad ingress router name on msg %d ' % self.n_received)
+        elif body == "Message[2]":
+            trace = annotations.get('x-opt-qd.trace')
+            if trace != ['0/first-hop', ingress_router_name]:
+                self.bail('Msg[2] bad ingress trace value: %s' % annotations)
                 return
-            # The sender prepended a value to the trace list.
-            if annotations['x-opt-qd.trace'] != ['0/first-hop', ingress_router_name] :
-                self.bail('Bad trace on msg %d' % self.n_received)
+
+        elif body == "Message[3]":
+            if 'x-opt-qd.class' in annotations:
+                self.bail('Msg[3] unexpected class value: %s' % annotations)
                 return
-            # success
+            if 'x-opt-qd.' in annotations:
+                self.bail('Msg[3] unexpected null value: %s' % annotations)
+                return
+            if (annotations.get('userA') != 'A' or annotations.get('userB') != 'B'):
+                self.bail('Msg[3] unexpected user values: %s' % annotations)
+                return
+
+        elif body == "Message[4]":
+            if annotations.get('phase') != 7:
+                self.bail('Msg[4] unexpected phase: %s' % annotations)
+                return
+            if annotations.get('stream') != 2:
+                self.bail('Msg[4] unexpected streaming: %s' % annotations)
+                return
+
+        if self.n_received == 5:
+            self.bail(None)
+
+
+class BadMessageAnnotations(MessagingHandler):
+    """
+    Ensure the router can handle incorrectly formatted message annotations
+    """
+    def __init__(self, addr) :
+        super(BadMessageAnnotations, self).__init__(auto_accept=False)
+        self.addr       = addr
+        self.test_timer = None
+        self.sender     = None
+        self.receiver   = None
+        self.n_sent     = 0
+        self.n_received = 0
+        self.bailing    = False
+        self.messages = [
+            Message(body="Bad Message 1",
+                    annotations={'x-opt-qd.to': 3.145}),
+            Message(body="Bad Message 2",
+                    annotations={'x-opt-qd.trace': 'stringy'}),
+            Message(body="Bad Message 3",
+                    annotations={'x-opt-qd.trace': ['0/rA', '0/rB', 12, '0/rC']}),
+            Message(body="Bad Message 4",
+                    annotations={'x-opt-qd.ingress': ['0/rA']}),
+            Message(body="Good Message",
+                    annotations={'key': ['value']})]
+
+    def run(self) :
+        Container(self).run()
+
+    def bail(self, travail):
+        self.bailing = True
+        self.error = travail
+        if self.error:
+            print("test failure: %s" % self.error, flush=True)
+        self.send_conn.close()
+        self.recv_conn.close()
+        self.test_timer.cancel()
+
+    def timeout(self):
+        self.bail("Timeout Expired")
+
+    def on_start(self, event):
+        self.send_conn = event.container.connect(self.addr)
+        self.recv_conn = event.container.connect(self.addr)
+
+        self.sender      = event.container.create_sender(self.send_conn, self.addr)
+        self.receiver    = event.container.create_receiver(self.recv_conn, self.addr)
+        self.test_timer  = event.reactor.schedule(TIMEOUT, TestTimeout(self))
+
+    def on_sendable(self, event) :
+        if self.n_sent == len(self.messages):
+            return
+
+        self.sender.send(self.messages[self.n_sent])
+        self.n_sent += 1
+
+    def on_message(self, event) :
+        self.n_received += 1
+        if event.message.body != "Good Message":
+            self.bail("Got a bad message: %s" % event.message)
+            return
+        if event.message.annotations.get('key') != ['value']:
+            self.bail("Got unexpected user annotations: %s" % event.message.annotations)
+            return
+        event.delivery.update(Delivery.ACCEPTED)
+        event.delivery.settle()
+
+        if self.n_received == len(self.messages):
+            self.bail(None)
+
+    def on_rejected(self, event):
+        self.n_received += 1
+        rc = event.delivery.remote.condition
+        if rc.name != "amqp:invalid-field":
+            self.bail("Unexpected rejection: %s:%s" % (rc.name,
+                                                       rc.description))
+            return
+        if self.n_received == len(self.messages):
             self.bail(None)
 
 
@@ -2884,7 +3024,7 @@ class MultiframePresettledTest(MessagingHandler):
         Container(self).run()
 
 
-class UptimeLastDlvChecker(object):
+class UptimeLastDlvChecker:
     def __init__(self, parent, lastDlv=None, uptime=0):
         self.parent = parent
         self.uptime = uptime
@@ -3276,63 +3416,6 @@ class RejectCoordinatorTest(MessagingHandler, TransactionHandler):
         if link.name == "txn-ctrl":
             self.link_remote_close = True
             self.check_if_done()
-
-    def run(self):
-        Container(self).run()
-
-
-class PresettledOverflowTest(MessagingHandler):
-    def __init__(self, address):
-        super(PresettledOverflowTest, self).__init__(prefetch=0)
-        self.address = address
-        self.dest = "balanced.PresettledOverflow"
-        self.error = None
-        self.count       = 500
-        self.n_sent      = 0
-        self.n_received  = 0
-        self.last_seq    = -1
-
-    def timeout(self):
-        self.error = "Timeout Expired: sent=%d rcvd=%d last_seq=%d" % (self.n_sent, self.n_received, self.last_seq)
-        self.conn.close()
-
-    def on_start(self, event):
-        self.timer    = event.reactor.schedule(TIMEOUT, TestTimeout(self))
-        self.conn     = event.container.connect(self.address)
-        self.sender   = event.container.create_sender(self.conn, self.dest)
-        self.receiver = event.container.create_receiver(self.conn, self.dest)
-        self.receiver.flow(10)
-
-    def send(self):
-        while self.n_sent < self.count and self.sender.credit > 0:
-            msg = Message(body={"seq": self.n_sent})
-            dlv = self.sender.send(msg)
-            dlv.settle()
-            self.n_sent += 1
-        if self.n_sent == self.count:
-            self.receiver.flow(self.count)
-
-    def on_sendable(self, event):
-        if self.n_sent < self.count:
-            self.send()
-
-    def on_message(self, event):
-        self.n_received += 1
-        self.last_seq = event.message.body["seq"]
-        if self.last_seq == self.count - 1:
-            if self.n_received == self.count:
-                self.error = "No deliveries were dropped"
-
-            if not self.error:
-                local_node = Node.connect(self.address, timeout=TIMEOUT)
-                out = local_node.query(type='org.apache.qpid.dispatch.router.link')
-
-                for result in out.results:
-                    if result[5] == 'out' and 'balanced.PresettledOverflow' in result[6]:
-                        if result[16] != 249:
-                            self.error = "Expected 249 dropped presettled deliveries but got " + str(result[16])
-            self.conn.close()
-            self.timer.cancel()
 
     def run(self):
         Container(self).run()
