@@ -1,26 +1,32 @@
+qpid-dispatch (1.19.0-1qpid+bionic1) bionic; urgency=medium
+
+  * Rebased to 1.19.0
+
+ -- Kim van der Riet <kvanderr@redhat.com>  Mon, 04 Apr 2022 12:16:52 -0400
+
 qpid-dispatch (1.17.0-1qpid+bionic1) bionic; urgency=medium
 
   * Rebased to 1.17.0
 
- -- Kim van der Riet <kpvdr@redhat.com>  Fri, 03 Sep 2021 15:58:55 -0400
+ -- Kim van der Riet <kvanderr@redhat.com>  Fri, 03 Sep 2021 15:58:55 -0400
 
 qpid-dispatch (1.16.0-1qpid+bionic1) bionic; urgency=medium
 
   * Rebased to 1.16.0 
 
- -- Kim van der Riet <kpvdr@redhat.com>  Mon, 17 May 2021 15:58:58 -0400
+ -- Kim van der Riet <kvanderr@redhat.com>  Mon, 17 May 2021 15:58:58 -0400
 
 qpid-dispatch (1.15.0-3qpid+bionic1) bionic; urgency=medium
 
   * Rebuild against proton 0.34
 
- -- Kim van der Riet <kpvdr@redhat.com>  Tue, 11 Apr 2021 09:30:00` -0400
+ -- Kim van der Riet <kvanderr@redhat.com>  Tue, 11 Apr 2021 09:30:00` -0400
 
 qpid-dispatch (1.15.0-2qpid+bionic1) bionic; urgency=medium
 
   * Added patch for i386 compile error
 
- -- Kim van der Riet <kpvdr@4468b764db05>  Wed, 07 Apr 2021 08:52:12 -0400
+ -- Kim van der Riet <kvanderr@redhat.com>  Wed, 07 Apr 2021 08:52:12 -0400
 
 qpid-dispatch (1.15.0-1qpid+bionic1) bionic; urgency=medium
 
