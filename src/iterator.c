@@ -23,6 +23,7 @@
 #include "qpid/dispatch/amqp.h"
 #include "qpid/dispatch/ctools.h"
 #include "qpid/dispatch/hash.h"
+#include "buffer_field_api.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -51,9 +52,9 @@ ALLOC_DECLARE(qd_hash_segment_t);
 ALLOC_DEFINE(qd_hash_segment_t);
 
 struct qd_iterator_t {
-    qd_iterator_pointer_t   start_pointer;      // Pointer to the raw data
-    qd_iterator_pointer_t   view_start_pointer; // Pointer to the start of the view
-    qd_iterator_pointer_t   view_pointer;       // Pointer to the remaining view
+    qd_buffer_field_t       start_pointer;      // Pointer to the raw data
+    qd_buffer_field_t       view_start_pointer; // Pointer to the start of the view
+    qd_buffer_field_t       view_pointer;       // Pointer to the remaining view
     qd_iterator_view_t      view;
     int                     annotation_length;
     int                     annotation_remaining;
@@ -84,8 +85,8 @@ typedef enum {
 
 
 static bool  edge_mode = false;
-static char *my_area   = "";
-static char *my_router = "";
+static char *my_area   = 0;
+static char *my_router = 0;
 
 static const char    *SEPARATORS = "./";
 
@@ -138,7 +139,7 @@ static void parse_address_view(qd_iterator_t *iter)
     // in order to aid the router in looking up addresses.
     //
 
-    qd_iterator_pointer_t save_pointer = iter->view_pointer;
+    qd_buffer_field_t save_pointer = iter->view_pointer;
     iter->annotation_length = 1;
 
     if (iter->prefix_override == '\0' && qd_iterator_prefix(iter, "_")) {
@@ -156,6 +157,7 @@ static void parse_address_view(qd_iterator_t *iter)
         }
 
         if (qd_iterator_prefix(iter, "topo/")) {
+            assert(my_area && my_router);  // ensure qd_iterator_set_address called!
             if (qd_iterator_prefix(iter, "all/") || qd_iterator_prefix(iter, my_area)) {
                 if (qd_iterator_prefix(iter, "all/")) {
                     iter->prefix = QD_ITER_HASH_PREFIX_TOPOLOGICAL;
@@ -256,7 +258,7 @@ static void parse_node_view(qd_iterator_t *iter)
 void qd_iterator_remove_trailing_separator(qd_iterator_t *iter)
 {
     // Save the iterator's pointer so we can apply it back before returning from this function.
-    qd_iterator_pointer_t save_pointer = iter->view_pointer;
+    qd_buffer_field_t save_pointer = iter->view_pointer;
 
     char current_octet = 0;
     while (!iterator_at_end(iter)) {
@@ -287,11 +289,20 @@ static void view_initialize(qd_iterator_t *iter)
         return;
 
     //
+    // ITER_VIEW_NODE_HASH has no scheme or leading slash - see iterator.h
+    // Do not walk the entire iterator trying to find one.
+    //
+    if (iter->view == ITER_VIEW_NODE_HASH) {
+        parse_node_view(iter);
+        return;
+    }
+
+    //
     // Advance to the node-id.
     //
     state_t               state = STATE_START;
     unsigned int          octet;
-    qd_iterator_pointer_t save_pointer = {0,0,0};
+    qd_buffer_field_t save_pointer = {0,0,0};
 
     while (!iterator_at_end(iter) && state != STATE_AT_NODE_ID) {
         octet = qd_iterator_octet(iter);
@@ -367,11 +378,6 @@ static void view_initialize(qd_iterator_t *iter)
             adjust_address_with_space(iter);
         return;
     }
-
-    if (iter->view == ITER_VIEW_NODE_HASH) {
-        parse_node_view(iter);
-        return;
-    }
 }
 
 
@@ -382,38 +388,11 @@ static inline int iterator_field_ncopy(qd_iterator_t *iter, unsigned char *buffe
 {
     assert(in_field_data(iter));
 
-    const unsigned char *start = buffer;
-    int count = MIN(n, iter->view_pointer.remaining);
     if (iter->view_pointer.buffer) {
-        do {
-            size_t avail = qd_buffer_cursor(iter->view_pointer.buffer) - iter->view_pointer.cursor;
-            // optimize: early exit when no need to advance buffer pointers
-            if (count < avail) {
-                memcpy(buffer, iter->view_pointer.cursor, count);
-                iter->view_pointer.cursor += count;
-                iter->view_pointer.remaining -= count;
-                return buffer - start + count;
-            }
-            // count is >= what is available in the current buffer, move to next
-            memcpy(buffer, iter->view_pointer.cursor, avail);
-            buffer += avail;
-            count -= avail;
-            iter->view_pointer.cursor += avail;
-            iter->view_pointer.remaining -= avail;
-            if (iter->view_pointer.remaining) {
-                iter->view_pointer.buffer = DEQ_NEXT(iter->view_pointer.buffer);
-                if (iter->view_pointer.buffer) {
-                    iter->view_pointer.cursor = qd_buffer_base(iter->view_pointer.buffer);
-                } else {
-                    // DISPATCH-1394: field is truncated (remaining is inaccurate!)
-                    iter->view_pointer.remaining = 0;
-                    break;
-                }
-            }
-        } while (count);
-        return buffer - start;
+        return qd_buffer_field_ncopy(&iter->view_pointer, (uint8_t*)buffer, n);
 
     } else {  // string or binary array
+        int count = MIN(n, iter->view_pointer.remaining);
         memcpy(buffer, iter->view_pointer.cursor, count);
         iter->view_pointer.cursor += count;
         iter->view_pointer.remaining -= count;
@@ -431,33 +410,11 @@ static inline void iterator_field_move_cursor(qd_iterator_t *iter, uint32_t leng
     // prefix
     assert(in_field_data(iter));
 
-    uint32_t count = MIN(length, iter->view_pointer.remaining);
     if (iter->view_pointer.buffer) {
-        do {
-            uint32_t avail = qd_buffer_cursor(iter->view_pointer.buffer) - iter->view_pointer.cursor;
-            // optimized: early exit when no need to update iterators buffer pointers
-            if (count < avail) {
-                iter->view_pointer.cursor += count;
-                iter->view_pointer.remaining -= count;
-                return;
-            }
-            // count is >= what is available in the current buffer, move to next
-            count -= avail;
-            iter->view_pointer.cursor += avail;
-            iter->view_pointer.remaining -= avail;
-            if (iter->view_pointer.remaining) {
-                iter->view_pointer.buffer = DEQ_NEXT(iter->view_pointer.buffer);
-                if (iter->view_pointer.buffer) {
-                    iter->view_pointer.cursor = qd_buffer_base(iter->view_pointer.buffer);
-                } else {
-                    // DISPATCH-1394: field is truncated (remaining is inaccurate!)
-                    iter->view_pointer.remaining = 0;
-                    return;
-                }
-            }
-        } while (count);
+        qd_buffer_field_advance(&iter->view_pointer, length);
 
     } else {    // string/binary data
+        uint32_t count = MIN(length, iter->view_pointer.remaining);
         iter->view_pointer.cursor    += count;
         iter->view_pointer.remaining -= count;
     }
@@ -479,42 +436,7 @@ static inline bool iterator_field_equal(qd_iterator_t *iter, const unsigned char
         return false;
 
     if (iter->view_pointer.buffer) {
-
-        qd_iterator_pointer_t save_pointer = iter->view_pointer;
-
-        do {
-            size_t avail = qd_buffer_cursor(iter->view_pointer.buffer) - iter->view_pointer.cursor;
-            // optimized: early exit when no need to update iterators buffer pointers
-            if (count < avail) {
-                if (memcmp(buffer, iter->view_pointer.cursor, count) != 0) {
-                    iter->view_pointer = save_pointer;
-                    return false;
-                }
-                iter->view_pointer.cursor    += count;
-                iter->view_pointer.remaining -= count;
-                return true;
-            }
-            // count is >= what is available in the current buffer
-            if (memcmp(buffer, iter->view_pointer.cursor, avail) != 0) {
-                iter->view_pointer = save_pointer;
-                return false;
-            }
-
-            buffer += avail;
-            count -= avail;
-            iter->view_pointer.cursor += avail;
-            iter->view_pointer.remaining -= avail;
-            if (iter->view_pointer.remaining) {
-                iter->view_pointer.buffer = DEQ_NEXT(iter->view_pointer.buffer);
-                if (iter->view_pointer.buffer) {
-                    iter->view_pointer.cursor = qd_buffer_base(iter->view_pointer.buffer);
-                } else {
-                    // DISPATCH-1394: field is truncated (remaining is inaccurate!)
-                    iter->view_pointer = save_pointer;
-                    return false;
-                }
-            }
-        } while (count);
+        return qd_buffer_field_equal(&iter->view_pointer, (const uint8_t*) buffer, count);
 
     } else {  // string or binary array
 
@@ -530,6 +452,26 @@ static inline bool iterator_field_equal(qd_iterator_t *iter, const unsigned char
 }
 
 
+// fast view-agnostic copy: copy out up to n bytes from the current location in
+// the iterator view, advance cursor
+//
+static inline size_t iterator_view_copy(qd_iterator_t *iter, uint8_t *buffer, size_t n)
+{
+    int i = 0;
+
+    assert(iter);
+
+    while (i < n && !iterator_at_end(iter)) {
+        if (!in_field_data(iter)) {
+            buffer[i++] = qd_iterator_octet(iter);
+        } else {
+            i += iterator_field_ncopy(iter, &buffer[i], n - i);
+            break;
+        }
+    }
+    return i;
+}
+
 static void qd_iterator_free_hash_segments(qd_iterator_t *iter)
 {
     qd_hash_segment_t *seg = DEQ_HEAD(iter->hash_segments);
@@ -543,19 +485,18 @@ static void qd_iterator_free_hash_segments(qd_iterator_t *iter)
 
 void qd_iterator_set_address(bool _edge_mode, const char *area, const char *router)
 {
-    static char  buf[64];
-    static char *ptr   = buf;
-    size_t area_size   = strlen(area);
-    size_t router_size = strlen(router);
-
-    if (area_size + router_size + 1 >= sizeof(buf))
-        ptr = (char*) malloc(area_size + router_size + 2);
-
-    sprintf(ptr, "%s/%c%s/", area, '\0', router);
+    const size_t area_size   = strlen(area);
+    const size_t router_size = strlen(router);
 
     edge_mode = _edge_mode;
-    my_area   = ptr;
-    my_router = ptr + area_size + 2;
+
+    free(my_area);
+    my_area = qd_malloc(area_size + 2);  // include trailing '\'
+    sprintf(my_area, "%s/", area);
+
+    free(my_router);
+    my_router = qd_malloc(router_size + 2);
+    sprintf(my_router, "%s/", router);
 }
 
 
@@ -600,10 +541,8 @@ qd_iterator_t *qd_iterator_buffer(qd_buffer_t *buffer, int offset, int length, q
         return 0;
 
     ZERO(iter);
-    iter->start_pointer.buffer    = buffer;
-    iter->start_pointer.cursor    = qd_buffer_base(buffer) + offset;
-    iter->start_pointer.remaining = length;
-    iter->phase                   = '0';
+    iter->start_pointer = qd_buffer_field(buffer, qd_buffer_base(buffer) + offset, length);
+    iter->phase         = '0';
 
     qd_iterator_reset_view(iter, view);
 
@@ -715,18 +654,14 @@ unsigned char qd_iterator_octet(qd_iterator_t *iter)
         if (iter->view_pointer.remaining == 0)
             return (unsigned char) 0;
 
-        unsigned char result = *(iter->view_pointer.cursor);
-
-        // we know remaining > 0, so we can simply move the cursor
-
-        iter->view_pointer.cursor++;
-
-        // the slow path: if we've moved "off" the end, simply advance to the next buffer
-        if (--iter->view_pointer.remaining
-            && iter->view_pointer.buffer
-            && qd_buffer_cursor(iter->view_pointer.buffer) == iter->view_pointer.cursor) {
-            iter->view_pointer.buffer = iter->view_pointer.buffer->next;
-            iter->view_pointer.cursor = qd_buffer_base(iter->view_pointer.buffer);
+        unsigned char result;
+        if (iter->view_pointer.buffer) {
+            uint8_t octet;
+            (void)qd_buffer_field_octet(&iter->view_pointer, &octet);
+            result = (unsigned char) octet;
+        } else { // string or binary array
+            result = *(iter->view_pointer.cursor)++;
+            --iter->view_pointer.remaining;
         }
 
         if (iter->mode == MODE_TO_SLASH && iter->view_pointer.remaining && *(iter->view_pointer.cursor) == '/') {
@@ -854,8 +789,8 @@ bool qd_iterator_prefix(qd_iterator_t *iter, const char *prefix)
     if (!iter)
         return false;
 
-    qd_iterator_pointer_t save_pointer = iter->view_pointer;
-    unsigned char *c                   = (unsigned char*) prefix;
+    qd_buffer_field_t save_pointer = iter->view_pointer;
+    unsigned char *c               = (unsigned char*) prefix;
 
     while(*c) {
         if (*c != qd_iterator_octet(iter))
@@ -872,91 +807,27 @@ bool qd_iterator_prefix(qd_iterator_t *iter, const char *prefix)
 }
 
 
-// bare bones copy of field_iterator_move_cursor with no field/view baggage
-void iterator_pointer_move_cursor(qd_iterator_pointer_t *ptr, uint32_t length)
-{
-    uint32_t count = length > ptr->remaining ? ptr->remaining : length;
-
-    while (count) {
-        uint32_t remaining = qd_buffer_cursor(ptr->buffer) - ptr->cursor;
-        remaining = remaining > count ? count : remaining;
-        ptr->cursor += remaining;
-        ptr->remaining -= remaining;
-        count -= remaining;
-        if (ptr->cursor == qd_buffer_cursor(ptr->buffer)) {
-            ptr->buffer = ptr->buffer->next;
-            if (ptr->buffer == 0) {
-                ptr->remaining = 0;
-                ptr->cursor = 0;
-                break;
-            } else {
-                ptr->cursor = qd_buffer_base(ptr->buffer);
-            }
-        }
-    }
-}
-
-
-// bare bones copy of qd_iterator_prefix with no iterator baggage
-bool qd_iterator_prefix_ptr(const qd_iterator_pointer_t *ptr, uint32_t skip, const char *prefix)
-{
-    if (!ptr)
-        return false;
-
-    // if ptr->buffer holds enough bytes for the comparison then
-    // don't fiddle with the iterator motions. Just do the comparison directly.
-    const int avail = qd_buffer_cursor(ptr->buffer) - ptr->cursor;
-    if (avail >= skip + QD_MA_PREFIX_LEN) {
-        // there's enough in current buffer to do straight compare
-        const void * blk1 = ptr->cursor + skip;
-        const void * blk2 = prefix;
-        return memcmp(blk1, blk2, QD_MA_PREFIX_LEN) == 0;
-    }
-
-    // otherwise compare across buffer boundaries
-    // this, too, could be optimized a bit
-    qd_iterator_pointer_t lptr;
-    *&lptr = *ptr;
-
-    iterator_pointer_move_cursor(&lptr, skip);
-
-    unsigned char *c = (unsigned char*) prefix;
-    while(*c && lptr.remaining) {
-        unsigned char ic = *lptr.cursor;
-
-        if (*c != ic)
-            break;
-        c++;
-
-        iterator_pointer_move_cursor(&lptr, 1);
-    }
-
-    return *c == 0;
-}
-
-
 int qd_iterator_length(const qd_iterator_t *iter)
 {
     return iter ? iterator_length(iter) : 0;
 }
 
 
-int qd_iterator_ncopy(qd_iterator_t *iter, unsigned char* buffer, int n)
+size_t qd_iterator_ncopy(qd_iterator_t *iter, unsigned char* buffer, size_t n)
 {
     if (!iter)
         return 0;
 
     qd_iterator_reset(iter);
-    int i = 0;
-    while (i < n && !iterator_at_end(iter)) {
-        if (!in_field_data(iter)) {
-            buffer[i++] = qd_iterator_octet(iter);
-        } else {
-            i += iterator_field_ncopy(iter, &buffer[i], n - i);
-            break;
-        }
-    }
-    return i;
+    return iterator_view_copy(iter, (uint8_t *) buffer, n);
+}
+
+
+size_t qd_iterator_ncopy_octets(qd_iterator_t *iter, uint8_t *buffer, size_t n)
+{
+    if (!iter)
+        return 0;
+    return iterator_view_copy(iter, (uint8_t *) buffer, n);
 }
 
 
@@ -1047,10 +918,14 @@ static void qd_insert_hash_segment(qd_iterator_t *iter, uint32_t *hash, int segm
 uint32_t qd_iterator_hash_view(qd_iterator_t *iter)
 {
     uint32_t hash = HASH_INIT;
+    uint8_t buffer[64];
 
     qd_iterator_reset(iter);
-    while (!iterator_at_end(iter))
-        hash = HASH_COMPUTE(hash, qd_iterator_octet(iter));
+    while (!iterator_at_end(iter)) {
+        size_t count = iterator_view_copy(iter, buffer, sizeof(buffer));
+        for (int i = 0; i < count; ++i)
+            hash = HASH_COMPUTE(hash, buffer[i]);
+    }
 
     return hash;
 }
@@ -1108,11 +983,31 @@ bool qd_iterator_next_segment(qd_iterator_t *iter, uint32_t *hash)
 }
 
 
-void qd_iterator_get_view_cursor(
-    const qd_iterator_t   *iter,
-    qd_iterator_pointer_t *ptr)
+qd_buffer_field_t qd_iterator_get_view_cursor(const qd_iterator_t *iter)
 {
-    ptr->buffer    = iter->view_pointer.buffer;
-    ptr->cursor    = iter->view_pointer.cursor;
-    ptr->remaining = iter->view_pointer.remaining;
+    return iter->view_pointer;
+}
+
+
+void qd_iterator_finalize(void)
+{
+    free(my_area);
+    free(my_router);
+
+    // unit tests need these zeroed
+    my_area = 0;
+    my_router = 0;
+}
+
+
+qd_iterator_t *qd_iterator_buffer_field(const qd_buffer_field_t *bfield,
+                                        qd_iterator_view_t view)
+{
+    assert(bfield);
+    qd_buffer_field_t copy = *bfield;
+    qd_buffer_field_normalize(&copy);
+    return qd_iterator_buffer(copy.buffer,
+                              copy.cursor - qd_buffer_base(copy.buffer),
+                              copy.remaining,
+                              view);
 }

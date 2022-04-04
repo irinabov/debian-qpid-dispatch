@@ -17,26 +17,28 @@
 # under the License.
 #
 
-from time import sleep
 import json
 import os
 import logging
+from time import sleep
 from threading import Timer
 from subprocess import PIPE, STDOUT
+
+from proton import Described, ulong
 from proton import Message, Delivery, symbol, Condition
-from system_test import Logger, TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR, TestTimeout
+from proton.handlers import MessagingHandler
+from proton.reactor import Container, AtLeastOnce
+from proton.utils import BlockingConnection
+
+from qpid_dispatch.management.client import Node
+
+from system_test import Logger, TestCase, Process, Qdrouterd, main_module, TIMEOUT, DIR, TestTimeout, PollTimeout
 from system_test import AsyncTestReceiver
 from system_test import AsyncTestSender
 from system_test import get_inter_router_links
 from system_test import unittest
 from test_broker import FakeService
 
-from proton import Described, ulong
-
-from proton.handlers import MessagingHandler
-from proton.reactor import Container, AtLeastOnce
-from proton.utils import BlockingConnection
-from qpid_dispatch.management.client import Node
 CONNECTION_PROPERTIES_UNICODE_STRING = {'connection': 'properties', 'int_property': 6451}
 
 
@@ -199,12 +201,14 @@ class TwoRouterTest(TestCase):
         self.assertIsNone(test.error)
 
     def test_10_propagated_disposition(self):
-        test = PropagatedDisposition(self, self.routers[0].addresses[0], self.routers[1].addresses[0])
+        test = PropagatedDisposition(self, self.routers[0].addresses[0], self.routers[1].addresses[0],
+                                     "unsettled/one")
         test.run()
         self.assertTrue(test.passed)
 
     def test_10a_propagated_disposition_data(self):
-        test = PropagatedDispositionData(self, self.routers[0].addresses[0], self.routers[1].addresses[0])
+        test = PropagatedDispositionData(self, self.routers[0].addresses[0], self.routers[1].addresses[0],
+                                         "unsettled/two")
         test.run()
         self.assertTrue(test.passed)
 
@@ -407,6 +411,18 @@ class DeleteConnectionWithReceiver(MessagingHandler):
         self.mgmt_sender = None
         self.success = False
         self.error = None
+        self.receiver_to_kill = None
+        self.timer = None
+        self.n_sent = 0
+        self.n_received = 0
+        self.mgmt_receiver_link_opened = False
+        self.mgmt_receiver_1_link_opened = False
+        self.mgmt_receiver_2_link_opened = False
+        self.receiver_to_kill_link_opened = False
+        self.query_timer = None
+        self.deleted_admin_status = "deleted"
+        self.num_attempts = 0
+        self.max_attempts = 2
 
     def on_start(self, event):
         self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
@@ -427,16 +443,29 @@ class DeleteConnectionWithReceiver(MessagingHandler):
 
     def timeout(self):
         self.error = "Timeout Expired: sent=%d, received=%d" % (self.n_sent, self.n_received)
-        self.mgmt_conn.close()
+        self.bail(self.error)
 
     def bail(self, error):
         self.error = error
         self.timer.cancel()
         self.mgmt_conn.close()
         self.conn_to_kill.close()
+        if self.query_timer:
+            self.query_timer.cancel()
 
     def on_link_opened(self, event):
         if event.receiver == self.mgmt_receiver:
+            self.mgmt_receiver_link_opened = True
+        elif event.receiver == self.mgmt_receiver_1:
+            self.mgmt_receiver_1_link_opened = True
+        elif event.receiver == self.mgmt_receiver_2:
+            self.mgmt_receiver_2_link_opened = True
+        elif event.receiver == self.receiver_to_kill:
+            self.receiver_to_kill_link_opened = True
+
+        # All the management receiver links have been opened, now send the first message.
+        if self.mgmt_receiver_link_opened and self.mgmt_receiver_1_link_opened and \
+                self.mgmt_receiver_2_link_opened and self.receiver_to_kill_link_opened:
             request = Message()
             request.address = "amqp:/_local/$management"
             request.properties = {
@@ -444,13 +473,24 @@ class DeleteConnectionWithReceiver(MessagingHandler):
                 'operation': 'QUERY'}
             request.reply_to = self.mgmt_receiver.remote_source.address
             self.mgmt_sender.send(request)
+            self.n_sent += 1
+
+    def poll_timeout(self):
+        request = Message()
+        request.address = "amqp:/_local/$management"
+        request.properties = {'type': 'org.apache.qpid.dispatch.connection',
+                              'operation': 'QUERY'}
+        request.reply_to = self.mgmt_receiver_2.remote_source.address
+        self.mgmt_sender.send(request)
+        self.n_sent += 1
 
     def on_message(self, event):
         if event.receiver == self.mgmt_receiver:
+            self.n_received += 1
             attribute_names = event.message.body['attributeNames']
-            property_index = attribute_names .index('properties')
-            identity_index = attribute_names .index('identity')
-
+            property_index = attribute_names.index('properties')
+            identity_index = attribute_names.index('identity')
+            conn_found = False
             for result in event.message.body['results']:
                 if result[property_index]:
                     properties = result[property_index]
@@ -465,28 +505,44 @@ class DeleteConnectionWithReceiver(MessagingHandler):
                                 'operation': 'UPDATE'
                             }
                             request.body = {
-                                'adminStatus': 'deleted'}
+                                'adminStatus': self.deleted_admin_status
+                            }
                             request.reply_to = self.mgmt_receiver_1.remote_source.address
                             self.mgmt_sender.send(request)
+                            conn_found = True
+                            self.n_sent += 1
+            if not conn_found:
+                self.bail("The connection we wanted to delete was not found")
         elif event.receiver == self.mgmt_receiver_1:
-            if event.message.properties['statusDescription'] == 'OK' and event.message.body['adminStatus'] == 'deleted':
-                request = Message()
-                request.address = "amqp:/_local/$management"
-                request.properties = {'type': 'org.apache.qpid.dispatch.connection',
-                                      'operation': 'QUERY'}
-                request.reply_to = self.mgmt_receiver_2.remote_source.address
-                self.mgmt_sender.send(request)
+            self.n_received += 1
+            if event.message.properties['statusDescription'] == 'OK' and \
+                    event.message.body['adminStatus'] == self.deleted_admin_status:
+                # Wait for 3 sends for the connection to be gone completely.
+                self.num_attempts += 1
+                self.query_timer = event.reactor.schedule(3.0, PollTimeout(self))
+            else:
+                if event.message.properties['statusDescription'] != 'OK':
+                    error = "Expected statusDescription to be OK but instead got %s" % \
+                            event.message.properties['statusDescription']
+                if event.message.body['adminStatus'] != self.deleted_admin_status:
+                    error = "Expected adminStatus to be %s but instead got %s" % \
+                            (self.deleted_admin_status, event.message.properties['adminStatus'])
+                self.bail(error)
 
         elif event.receiver == self.mgmt_receiver_2:
+            self.n_received += 1
             attribute_names = event.message.body['attributeNames']
             property_index = attribute_names .index('properties')
-            identity_index = attribute_names .index('identity')
 
             for result in event.message.body['results']:
                 if result[property_index]:
                     properties = result[property_index]
                     if properties and properties.get('int_property'):
-                        self.bail("Connection not deleted")
+                        if self.num_attempts == self.max_attempts:
+                            self.bail("Connection not deleted")
+                        else:
+                            self.num_attempts += 1
+                            self.query_timer = event.reactor.schedule(3.0, PollTimeout(self))
             self.bail(None)
 
     def run(self):
@@ -1098,11 +1154,15 @@ class MessageAnnotationsStripBothAddIngressTrace(MessagingHandler):
         if event.sender == self.sender:
             if self.msg_not_sent:
                 msg = Message(body={'number': 0})
+                ingress_delivery_annotations = {'x-opt-qd.trace': 999,
+                                                'Hello': 'there'}
                 ingress_message_annotations = {'work': 'hard',
                                                'x-opt-qd': 'humble',
                                                'x-opt-qd.ingress': 'ingress-router',
                                                'x-opt-qd.trace': ['0/QDR.A']}
                 msg.annotations = ingress_message_annotations
+                msg.instructions = {'x-opt-qd.trace': 999,
+                                    'Hello': 'there'}
                 event.sender.send(msg)
                 self.msg_not_sent = False
 
@@ -1110,7 +1170,11 @@ class MessageAnnotationsStripBothAddIngressTrace(MessagingHandler):
         if self.receiver == event.receiver:
             if 0 == event.message.body['number']:
                 if event.message.annotations == {'work': 'hard', 'x-opt-qd': 'humble'}:
-                    self.error = None
+                    if event.message.instructions == {'x-opt-qd.trace': 999,
+                                                      'Hello': 'there'}:
+                        self.error = None
+                    else:
+                        self.error = "invalid delivery annos: %s" % event.message.instructions
             self.timer.cancel()
             self.conn1.close()
             self.conn2.close()
@@ -1418,7 +1482,7 @@ class SemanticsClosestIsRemote(MessagingHandler):
         Container(self).run()
 
 
-class CustomTimeout(object):
+class CustomTimeout:
     def __init__(self, parent):
         self.parent = parent
 
@@ -1547,10 +1611,11 @@ class PropagatedDisposition(MessagingHandler):
     Verify outcomes are properly sent end-to-end
     """
 
-    def __init__(self, test, address1, address2):
+    def __init__(self, test, sender_addr, receiver_addr, dest):
         super(PropagatedDisposition, self).__init__(auto_accept=False)
-        self.address1 = address1
-        self.address2 = address2
+        self.sender_addr = sender_addr
+        self.receiver_addr = receiver_addr
+        self.dest = dest
         self.settled = []
         self.test = test
         self.sender = None
@@ -1561,17 +1626,18 @@ class PropagatedDisposition(MessagingHandler):
         self.dispos = ['accept', 'modified', 'reject']
         self.dispos_index = 0
         self.trackers = {}
-        self.addr = "unsettled/2"
+        self.timer = None
+        self.error = None
 
     def on_start(self, event):
         self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
-        self.sender_conn = event.container.connect(self.address1)
-        self.receiver_conn = event.container.connect(self.address2)
+        self.sender_conn = event.container.connect(self.sender_addr)
+        self.receiver_conn = event.container.connect(self.receiver_addr)
 
         self.receiver = event.container.create_receiver(self.receiver_conn,
-                                                        self.addr)
+                                                        self.dest)
         self.sender = event.container.create_sender(self.sender_conn,
-                                                    self.addr)
+                                                    self.dest)
 
     def on_sendable(self, event):
         # This function is called when the sender has credit to send

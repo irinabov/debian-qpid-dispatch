@@ -37,7 +37,7 @@ except ImportError:
     _log_imported = False
 
 
-class Config(object):
+class Config:
     """Load config entities from qdrouterd.conf and validated against L{QdSchema}."""
 
     def __init__(self, filename=None, schema=QdSchema(), raw_json=False):
@@ -319,7 +319,7 @@ def configure_dispatch(dispatch, lib_handle, filename):
     for t in "sslProfile", "authServicePlugin", \
              "router.config.address", "router.config.linkRoute", "router.config.autoLink", \
              "router.config.exchange", "router.config.binding", \
-             "vhost", "httpListener", "httpConnector", "tcpListener", "tcpConnector":
+             "vhost":
         for a in config.by_type(t):
             configure(a)
             if t == "sslProfile":

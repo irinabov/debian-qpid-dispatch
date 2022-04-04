@@ -45,6 +45,11 @@ set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set(CMAKE_MACOSX_RPATH TRUE)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
+if (POLICY CMP0069)
+    # INTERPROCEDURAL_OPTIMIZATION is enforced when enabled.
+    cmake_policy (SET CMP0069 NEW)
+endif ()
+
 # https://bugzilla.redhat.com/show_bug.cgi?id=1850174 GCC 4.8 claims to support atomics, but it's missing stdatomic.h
 include(CheckIncludeFile)
 check_include_file("stdatomic.h" HAVE_STDATOMIC_H)
@@ -71,8 +76,6 @@ endif (CMAKE_BUILD_TYPE MATCHES "Deb|Cover")
 message(STATUS "Build type is \"${CMAKE_BUILD_TYPE}\"${has_debug_symbols}")
 # This is commonly needed so define it before we include anything else.
 string(TOUPPER "${CMAKE_BUILD_TYPE}" uppercase_CMAKE_BUILD_TYPE)
-
-option(QD_MEMORY_STATS "Track memory pool usage statistics" ON)
 
 if(uppercase_CMAKE_BUILD_TYPE STREQUAL "DEBUG" )
     option(QD_ENABLE_ASSERTIONS "Enable assertions" ON)
@@ -115,35 +118,10 @@ message(STATUS "Found Proton: ${Proton_LIBRARIES} (found version \"${Proton_VERS
 # google benchmark tests are disabled by default
 OPTION(BUILD_BENCHMARKS "Enable building and running benchmarks with Google Benchmark" OFF)
 
-# http2 support is optional
-find_package(libnghttp2 1.33.0)
-CMAKE_DEPENDENT_OPTION(USE_LIBNGHTTP2 "Use libnghttp2 for HTTP/2 support" ON
-                         "libnghttp2_FOUND" OFF)
-
 # Web Sockets
-find_package(LibWebSockets 2.4.2)
+find_package(LibWebSockets 3.0.1)
 CMAKE_DEPENDENT_OPTION(USE_LIBWEBSOCKETS "Use libwebsockets for WebSocket support" ON
                          "LIBWEBSOCKETS_FOUND" OFF)
-
-set(SKIP_DELETE_HTTP_LISTENER "True")
-if (LIBWEBSOCKETS_FOUND AND LIBWEBSOCKETS_VERSION_STRING)
-  # This is a fix for DISPATCH-1513. libwebsockets versions 3.2.0 introduces a new flag called LWS_SERVER_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER
-  # The new flag allows (as the flag says) HTTP over HTTPS listeners. Since this flag is not available before lws 3.2.0 we need
-  # to selectively comment out a test.
-  set(TEST_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER "#")
-  set(LWS_VERSION_WITH_SSL_FIX "3.2.0")
-  if ((LIBWEBSOCKETS_VERSION_STRING STREQUAL LWS_VERSION_WITH_SSL_FIX) OR (LIBWEBSOCKETS_VERSION_STRING STRGREATER  LWS_VERSION_WITH_SSL_FIX))
-    set(TEST_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER "")
-  endif()
-  # The listener delete functionality worked in all versions of LibWebSockets
-  # starting from v2.4.2 thru v3.2.3. It stopped working in v4.0.0 and beyond
-  if ( (LIBWEBSOCKETS_VERSION_STRING STREQUAL "2.4.2") OR (  (LIBWEBSOCKETS_VERSION_STRING STRGREATER_EQUAL  "3.0.0") AND (LIBWEBSOCKETS_VERSION_STRING STRLESS  "4.0.0") )  )
-    # Do not skip the tests (in system_tests_http.py) that specifically
-    # test deletion of http:yes listeners.
-    set(SKIP_DELETE_HTTP_LISTENER "False")
-  endif()
-
-endif(LIBWEBSOCKETS_FOUND AND LIBWEBSOCKETS_VERSION_STRING)
 
 if (NOT DEFINED DISPATCH_TEST_TIMEOUT)
     set(DISPATCH_TEST_TIMEOUT "600")
@@ -275,13 +253,11 @@ install(PROGRAMS
 # Doc files
 install(FILES
   LICENSE
-  README
+  README.adoc
   DESTINATION ${QD_DOC_INSTALL_DIR})
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run.py.in ${CMAKE_CURRENT_BINARY_DIR}/run.py)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/run.py.in ${CMAKE_CURRENT_BINARY_DIR}/tests/run.py)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_http.py.in ${CMAKE_CURRENT_SOURCE_DIR}/tests/system_tests_http.py)
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/python/qpid_dispatch_internal/management/agent.py.in ${CMAKE_CURRENT_SOURCE_DIR}/python/qpid_dispatch_internal/management/agent.py)
 execute_process(COMMAND ${RUN} --sh OUTPUT_FILE config.sh)
 
 add_subdirectory(src) # Build src first so other subdirs can use qpid-dispatch library

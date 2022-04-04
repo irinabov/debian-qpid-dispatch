@@ -20,12 +20,13 @@
 #include "python_private.h"
 #include "qpid/dispatch/python_embedded.h"
 
+#include "pythoncapi_compat.h"
+
 #include "qpid/dispatch/alloc.h"
 #include "qpid/dispatch/amqp.h"
 #include "qpid/dispatch/error.h"
 #include "qpid/dispatch/log.h"
 #include "qpid/dispatch/router.h"
-#include "qpid/dispatch/threading.h"
 
 #include <ctype.h>
 
@@ -37,8 +38,6 @@
 //===============================================================================
 
 static qd_dispatch_t   *dispatch   = 0;
-static sys_mutex_t     *ilock      = 0;
-static bool             lock_held  = false;
 static qd_log_source_t *log_source = 0;
 static PyObject        *dispatch_module = 0;
 static PyObject        *message_type = 0;
@@ -51,24 +50,27 @@ void qd_python_initialize(qd_dispatch_t *qd, const char *python_pkgdir)
 {
     log_source = qd_log_source("PYTHON");
     dispatch = qd;
-    ilock = sys_mutex();
     if (python_pkgdir)
         dispatch_python_pkgdir = PyUnicode_FromString(python_pkgdir);
 
-    qd_python_lock_state_t ls = qd_python_lock();
     Py_Initialize();
+#if PY_VERSION_HEX < 0x03070000
+    PyEval_InitThreads(); // necessary for Python 3.6 and older versions
+#endif
     qd_python_setup();
-    qd_python_unlock(ls);
+    PyEval_SaveThread(); // drop the Python GIL; we will reacquire it in other threads as needed
 }
 
 
 void qd_python_finalize(void)
 {
-    sys_mutex_free(ilock);
+    (void) qd_python_lock();
+
     Py_DECREF(dispatch_module);
     dispatch_module = 0;
     PyGC_Collect();
     Py_Finalize();
+    dispatch = 0;
 }
 
 
@@ -81,7 +83,7 @@ PyObject *qd_python_module(void)
 
 void qd_python_check_lock(void)
 {
-    assert(lock_held);
+    assert(PyGILState_Check());
 }
 
 
@@ -161,7 +163,7 @@ qd_error_t qd_py_to_composed(PyObject *value, qd_composed_field_t *field)
 {
     qd_python_check_lock();
     qd_error_clear();
-    if (value == Py_None) {
+    if (Py_IsNone(value)) {
         qd_compose_insert_null(field);
     }
     else if (PyBool_Check(value)) {
@@ -275,7 +277,7 @@ qd_error_t qd_py_to_pn_data(PyObject *value, pn_data_t *data)
 {
     qd_python_check_lock();
     qd_error_clear();
-    if (value == Py_None) {
+    if (Py_IsNone(value)) {
         pn_data_put_null(data);
     }
     else if (PyBool_Check(value)) {
@@ -402,14 +404,15 @@ PyObject *qd_field_to_py(qd_parsed_field_t *field)
     uint8_t   tag    = qd_parse_tag(field);
     switch (tag) {
       case QD_AMQP_NULL:
-        Py_INCREF(Py_None);
         result = Py_None;
+        Py_INCREF(result);
         break;
 
       case QD_AMQP_BOOLEAN:
       case QD_AMQP_TRUE:
       case QD_AMQP_FALSE:
         result = qd_parse_as_uint(field) ? Py_True : Py_False;
+        Py_INCREF(result);
         break;
 
       case QD_AMQP_UBYTE:
@@ -765,19 +768,7 @@ static PyObject *qd_python_send(PyObject *self, PyObject *args)
         return 0;
 
     if (compose_python_message(&field, message, ioa->qd) == QD_ERROR_NONE) {
-        qd_message_t *msg = qd_message();
-        qd_message_compose_2(msg, field, true);
-
-        qd_composed_field_t *ingress = qd_compose_subfield(0);
-        qd_compose_insert_string(ingress, qd_router_id(ioa->qd));
-
-        qd_composed_field_t *trace = qd_compose_subfield(0);
-        qd_compose_start_list(trace);
-        qd_compose_insert_string(trace, qd_router_id(ioa->qd));
-        qd_compose_end_list(trace);
-
-        qd_message_set_ingress_annotation(msg, ingress);
-        qd_message_set_trace_annotation(msg, trace);
+        qd_message_t *msg = qd_message_compose(field, 0, 0, true);
 
         PyObject *address = PyObject_GetAttrString(message, "address");
         if (address) {
@@ -791,7 +782,6 @@ static PyObject *qd_python_send(PyObject *self, PyObject *args)
             }
             Py_DECREF(address);
         }
-        qd_compose_free(field);
         qd_message_free(msg);
         Py_RETURN_NONE;
     }
@@ -857,9 +847,7 @@ static void qd_python_setup(void)
         //
         // Add LogAdapter
         //
-        PyTypeObject *laType = &LogAdapterType;
-        Py_INCREF(laType);
-        PyModule_AddObject(m, "LogAdapter", (PyObject*) &LogAdapterType);
+        PyModule_AddType(m, (PyTypeObject*) &LogAdapterType);
 
         qd_register_constant(m, "LOG_TRACE",    QD_LOG_TRACE);
         qd_register_constant(m, "LOG_DEBUG",    QD_LOG_DEBUG);
@@ -871,9 +859,7 @@ static void qd_python_setup(void)
 
         qd_register_constant(m, "LOG_STACK_LIMIT", 8); /* Limit stack traces for logging. */
 
-        PyTypeObject *ioaType = &IoAdapterType;
-        Py_INCREF(ioaType);
-        PyModule_AddObject(m, "IoAdapter", (PyObject*) &IoAdapterType);
+        PyModule_AddType(m, (PyTypeObject*) &IoAdapterType);
 
         qd_register_constant(m, "TREATMENT_MULTICAST_FLOOD",  QD_TREATMENT_MULTICAST_FLOOD);
         qd_register_constant(m, "TREATMENT_MULTICAST_ONCE",   QD_TREATMENT_MULTICAST_ONCE);
@@ -899,15 +885,12 @@ static void qd_python_setup(void)
 
 qd_python_lock_state_t qd_python_lock(void)
 {
-    sys_mutex_lock(ilock);
-    lock_held = true;
-    return 0;
+    return PyGILState_Ensure();
 }
 
 void qd_python_unlock(qd_python_lock_state_t lock_state)
 {
-    lock_held = false;
-    sys_mutex_unlock(ilock);
+    PyGILState_Release(lock_state);
 }
 
 void qd_json_msgs_init(PyObject **msgs)

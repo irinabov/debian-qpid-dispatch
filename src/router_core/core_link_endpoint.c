@@ -76,8 +76,7 @@ qdrc_endpoint_t *qdrc_endpoint_create_link_CT(qdr_core_t           *core,
     ep->desc         = desc;
     ep->link_context = link_context;
     ep->link         = qdr_create_link_CT(core, conn, QD_LINK_ENDPOINT, dir, source, target,
-                                          QD_SSN_CORE_ENDPOINT);
-
+                                          QD_SSN_CORE_ENDPOINT, QDR_DEFAULT_PRIORITY);
     ep->link->core_endpoint = ep;
     return ep;
 }
@@ -135,7 +134,7 @@ qdr_delivery_t *qdrc_endpoint_delivery_CT(qdr_core_t *core, qdrc_endpoint_t *end
     qdr_delivery_t *dlv = new_qdr_delivery_t();
 
     if (endpoint->link->conn)
-        endpoint->link->conn->last_delivery_time = core->uptime_ticks;
+        endpoint->link->conn->last_delivery_time = qdr_core_uptime_ticks(core);
 
     ZERO(dlv);
     set_safe_ptr_qdr_link_t(endpoint->link, &dlv->link_sp);

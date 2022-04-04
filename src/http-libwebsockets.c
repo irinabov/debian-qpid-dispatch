@@ -33,6 +33,10 @@
 #include <inttypes.h>
 #include <libwebsockets.h>
 
+#if LWS_LIBRARY_VERSION_MAJOR > 3 || (LWS_LIBRARY_VERSION_MAJOR == 3 && LWS_LIBRARY_VERSION_MINOR >= 2)
+#define QD_HAVE_MODERN_LIBWEBSOCKETS 1
+#endif
+
 static const char *CIPHER_LIST = "ALL:aNULL:!eNULL:@STRENGTH"; /* Default */
 static const char *IGNORED = "ignore-this-log-message";
 
@@ -116,6 +120,8 @@ static qd_log_source_t *wsi_log(struct lws *wsi);
 
 
 /* Declare LWS callbacks and protocol list */
+inline static void finalize_http(struct lws_vhost *vh, void *arg);
+
 static int callback_http(struct lws *wsi, enum lws_callback_reasons reason,
                          void *user, void *in, size_t len);
 static int callback_amqpws(struct lws *wsi, enum lws_callback_reasons reason,
@@ -299,6 +305,21 @@ static const struct lws_protocol_vhost_options mime_types[] = {
     { NULL, NULL, "*", "application/octet-stream" }
 };
 
+static int is_ipv6_address(qd_http_server_t *hs, const char* host, const char* port)
+{
+    int result = 0;
+    struct addrinfo *addr;
+    struct addrinfo hints = {0, AF_UNSPEC, SOCK_STREAM};
+    int code = getaddrinfo(host, port, &hints, &addr);
+    if (code) {
+        qd_log(hs->log, QD_LOG_ERROR, "getaddrinfo(%s, %s) failed with %s", host, port, gai_strerror(code));
+    } else {
+        result = addr->ai_family == AF_INET6;
+        freeaddrinfo(addr);
+    }
+    return result;
+}
+
 static void listener_start(qd_lws_listener_t *hl, qd_http_server_t *hs) {
     log_init();                 /* Update log flags at each listener */
 
@@ -346,6 +367,10 @@ static void listener_start(qd_lws_listener_t *hl, qd_http_server_t *hs) {
     info.keepalive_timeout = 1;
     info.ssl_cipher_list = CIPHER_LIST;
     info.options |= LWS_SERVER_OPTION_VALIDATE_UTF8;
+    if (!is_ipv6_address(hs, config->host, config->port)) {
+        qd_log(hs->log, QD_LOG_NOTICE, "Disabling ipv6 on %s", config->host_port);
+        info.options |= LWS_SERVER_OPTION_DISABLE_IPV6;
+    }
     if (config->ssl_profile) {
         info.ssl_cert_filepath = config->ssl_certificate_file;
         info.ssl_private_key_filepath = config->ssl_private_key_file;
@@ -355,7 +380,7 @@ static void listener_start(qd_lws_listener_t *hl, qd_http_server_t *hs) {
 
         info.options |=
             LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT |
-#if LWS_LIBRARY_VERSION_MAJOR > 3 || (LWS_LIBRARY_VERSION_MAJOR == 3 && LWS_LIBRARY_VERSION_MINOR >= 2)
+#ifdef QD_HAVE_MODERN_LIBWEBSOCKETS
             (config->ssl_required ? 0 : LWS_SERVER_OPTION_ALLOW_NON_SSL_ON_SSL_PORT | LWS_SERVER_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER) |
 #else
             (config->ssl_required ? 0 : LWS_SERVER_OPTION_ALLOW_NON_SSL_ON_SSL_PORT) |
@@ -363,16 +388,30 @@ static void listener_start(qd_lws_listener_t *hl, qd_http_server_t *hs) {
             ((config->requireAuthentication && info.ssl_ca_filepath) ? LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT : 0);
     }
     info.vhost_name = hl->listener->config.host_port;
+#ifdef QD_HAVE_MODERN_LIBWEBSOCKETS
+    info.finalize = finalize_http;
+    info.finalize_arg = hl;
+#endif
     hl->vhost = lws_create_vhost(hs->context, &info);
-    if (hl->vhost) {
-        /* Store hl pointer in vhost */
-        void *vp = lws_protocol_vh_priv_zalloc(hl->vhost, &protocols[0], sizeof(hl));
-        memcpy(vp, &hl, sizeof(hl));
-        qd_log(hs->log, QD_LOG_NOTICE, "Listening for HTTP on %s", config->host_port);
-        return;
-    } else {
+    if (!hl->vhost) {
         qd_log(hs->log, QD_LOG_NOTICE, "Error listening for HTTP on %s", config->host_port);
         goto error;
+    }
+
+    /* Store hl pointer in vhost */
+    void *vp = lws_protocol_vh_priv_zalloc(hl->vhost, &protocols[0], sizeof(hl));
+    memcpy(vp, &hl, sizeof(hl));
+
+    if (port == 0) {
+        // If a 0 (zero) is specified for a port, get the actual listening port from the listener.
+        const int resolved_port = lws_get_vhost_port(hl->vhost);
+        assert(resolved_port != -1); // already checked the vhost is successfully started
+        if (config->name)
+            qd_log(hs->log, QD_LOG_NOTICE, "Listening for HTTP on %s:%d (%s)", config->host, resolved_port, config->name);
+        else
+            qd_log(hs->log, QD_LOG_NOTICE, "Listening for HTTP on %s:%d", config->host, resolved_port);
+    } else {
+        qd_log(hs->log, QD_LOG_NOTICE, "Listening for HTTP on %s", config->host_port);
     }
     return;
 
@@ -398,15 +437,26 @@ static void listener_close(qd_lws_listener_t *hl, qd_http_server_t *hs) {
 static int callback_http(struct lws *wsi, enum lws_callback_reasons reason,
                          void *user, void *in, size_t len)
 {
+    /*
+     * Modern LibWebSockets uses the .finalize callback on lws_context for cleanup
+     */
+#ifndef QD_HAVE_MODERN_LIBWEBSOCKETS
     switch (reason) {
     case LWS_CALLBACK_PROTOCOL_DESTROY:
-        qd_lws_listener_free(wsi_listener(wsi));
+        finalize_http(NULL, wsi_listener(wsi));
         break;
-      default:
+    default:
         break;
     }
+#endif
+
     /* Do default HTTP handling for all the cases we don't care about. */
     return lws_callback_http_dummy(wsi, reason, user, in, len);
+}
+
+inline static void finalize_http(struct lws_vhost *vh /*unused*/, void *arg) {
+    qd_lws_listener_t *listener = (qd_lws_listener_t*) arg;
+    qd_lws_listener_free(listener);
 }
 
 /* Wake up a connection managed by the http server thread */

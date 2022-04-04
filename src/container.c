@@ -90,19 +90,11 @@ static inline void qd_session_link_pn(qd_session_t *qd_ssn, pn_session_t *pn_ssn
     pn_session_set_context(pn_ssn, qd_ssn);
 }
 
-#ifdef QD_NULL_SESSION_CONTEXT
-static inline void qd_session_unlink_pn(qd_session_t *qd_ssn, pn_session_t *pn_ssn)
-{
-    assert(qd_ssn);
-    pn_session_set_context(pn_ssn, QD_NULL_SESSION_CONTEXT);
-}
-#else
 static inline void qd_session_unlink_pn(qd_session_t *qd_ssn, pn_session_t *pn_ssn)
 {
     assert(qd_ssn);
     pn_session_set_context(pn_ssn, 0);
 }
-#endif
 
 ALLOC_DECLARE(qd_session_t);
 ALLOC_DEFINE(qd_session_t);
@@ -480,6 +472,10 @@ void qd_conn_event_batch_complete(qd_container_t *container, qd_connection_t *qd
         free_qd_pn_free_link_session_t(to_free);
         to_free = DEQ_HEAD(qd_conn->free_link_session_list);
 
+    }
+
+    if (!conn_closed) {
+        writable_handler(container, qd_conn->pn_conn, qd_conn);
     }
 }
 

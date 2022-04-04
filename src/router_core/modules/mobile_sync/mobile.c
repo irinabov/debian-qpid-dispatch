@@ -75,6 +75,26 @@ typedef struct {
     qdr_address_list_t         deleted_addrs;
 } qdrm_mobile_sync_t;
 
+/**
+ * Gets the router id from the parsed field and prints the relevant error message.
+ */
+static void print_error_log(qdrm_mobile_sync_t *msync, qd_parsed_field_t *id_field, bool mau)
+{
+    char *r_id = 0;
+    if (id_field) {
+        qd_iterator_t *id_iter = qd_parse_raw(id_field);
+        if (id_iter) {
+            r_id = (char *)qd_iterator_copy(id_iter);
+        }
+    }
+    //
+    // There is a possibility here that router_id is null but that is fine. We want to print it out either way
+    // which will help us in debugging.
+    //
+    qd_log(msync->log, QD_LOG_ERROR, "Received %s from an unknown router with router id %s", mau? "MAU": "MAR", r_id);
+    free(r_id);
+}
+
 static void qcm_mobile_sync_on_router_advanced_CT(qdrm_mobile_sync_t *msync, qdr_node_t *router);
 
 //================================================================================
@@ -208,24 +228,8 @@ static void qcm_mobile_sync_compose_diff_hint_list(qdrm_mobile_sync_t *msync, qd
 
 static qd_message_t *qcm_mobile_sync_compose_differential_mau(qdrm_mobile_sync_t *msync, const char *address)
 {
-    qd_message_t        *msg     = qd_message();
     qd_composed_field_t *headers = qcm_mobile_sync_message_headers(address, MAU);
     qd_composed_field_t *body    = qd_compose(QD_PERFORMATIVE_BODY_AMQP_VALUE, 0);
-
-    //
-    // Add the ingress and trace annotations to the message to prevent this multicast from bouncing
-    // back to us.
-    //
-    qd_composed_field_t *ingress = qd_compose_subfield(0);
-    qd_compose_insert_string(ingress, qd_router_id(msync->core->qd));
-
-    qd_composed_field_t *trace = qd_compose_subfield(0);
-    qd_compose_start_list(trace);
-    qd_compose_insert_string(trace, qd_router_id(msync->core->qd));
-    qd_compose_end_list(trace);
-
-    qd_message_set_ingress_annotation(msg, ingress);
-    qd_message_set_trace_annotation(msg, trace);
 
     //
     // Generate the message body
@@ -254,16 +258,14 @@ static qd_message_t *qcm_mobile_sync_compose_differential_mau(qdrm_mobile_sync_t
 
     qd_compose_end_map(body);
 
-    qd_message_compose_3(msg, headers, body, true);
-    qd_compose_free(headers);
-    qd_compose_free(body);
+    qd_message_t *msg = qd_message_compose(headers, body, 0, true);
+
     return msg;
 }
 
 
 static qd_message_t *qcm_mobile_sync_compose_absolute_mau(qdrm_mobile_sync_t *msync, const char *address)
 {
-    qd_message_t        *msg     = qd_message();
     qd_composed_field_t *headers = qcm_mobile_sync_message_headers(address, MAU);
     qd_composed_field_t *body    = qd_compose(QD_PERFORMATIVE_BODY_AMQP_VALUE, 0);
 
@@ -322,16 +324,13 @@ static qd_message_t *qcm_mobile_sync_compose_absolute_mau(qdrm_mobile_sync_t *ms
     }
     qd_compose_end_list(body);
     qd_compose_end_map(body);
-    qd_message_compose_3(msg, headers, body, true);
-    qd_compose_free(headers);
-    qd_compose_free(body);
-    return msg;
+
+    return qd_message_compose(headers, body, 0, true);
 }
 
 
 static qd_message_t *qcm_mobile_sync_compose_mar(qdrm_mobile_sync_t *msync, qdr_node_t *router)
 {
-    qd_message_t        *msg     = qd_message();
     qd_composed_field_t *headers = qcm_mobile_sync_message_headers(router->wire_address_ma, MAR);
     qd_composed_field_t *body    = qd_compose(QD_PERFORMATIVE_BODY_AMQP_VALUE, 0);
 
@@ -350,10 +349,7 @@ static qd_message_t *qcm_mobile_sync_compose_mar(qdrm_mobile_sync_t *msync, qdr_
 
     qd_compose_end_map(body);
 
-    qd_message_compose_3(msg, headers, body, true);
-    qd_compose_free(headers);
-    qd_compose_free(body);
-    return msg;
+    return qd_message_compose(headers, body, 0, true);
 }
 
 
@@ -457,8 +453,9 @@ static void qcm_mobile_sync_on_mar_CT(qdrm_mobile_sync_t *msync, qd_parsed_field
                 //
                 qd_log(msync->log, QD_LOG_DEBUG, "Sent MAU to requestor: mobile_seq=%"PRIu64, msync->mobile_seq);
             }
-        } else
-            qd_log(msync->log, QD_LOG_ERROR, "Received MAR from an unknown router");
+        } else {
+            print_error_log(msync, id_field, false);
+        }
     }
 }
 
@@ -690,8 +687,9 @@ static void qcm_mobile_sync_on_mau_CT(qdrm_mobile_sync_t *msync, qd_parsed_field
             // Tell the python router about the new mobile sequence
             //
             qdr_post_set_mobile_seq_CT(msync->core, router->mask_bit, mobile_seq);
-        } else
-            qd_log(msync->log, QD_LOG_ERROR, "Received MAU from an unknown router");
+        } else {
+            print_error_log(msync, id_field, true);
+        }
     }
 }
 

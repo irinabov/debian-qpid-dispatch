@@ -23,7 +23,7 @@ import time
 import unittest
 from subprocess import PIPE, STDOUT
 
-from proton import Message, Timeout
+from proton import Message
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
 from qpid_dispatch_internal.compat import UNICODE
@@ -35,7 +35,7 @@ from system_test import TestCase, Qdrouterd, main_module
 # Helper classes for all tests.
 # ================================================
 
-class Stopwatch (object) :
+class Stopwatch:
 
     def __init__(self, name, timer, initial_time, repeat_time) :
         self.name         = name
@@ -44,7 +44,7 @@ class Stopwatch (object) :
         self.repeat_time  = repeat_time
 
 
-class Timeout(object):
+class Timeout:
     """
     Named timeout object can handle multiple simultaneous
     timers, by telling the parent which one fired.
@@ -58,7 +58,7 @@ class Timeout(object):
         self.parent.timeout(self.name)
 
 
-class ManagementMessageHelper (object) :
+class ManagementMessageHelper:
     """
     Format management messages.
     """
@@ -368,8 +368,7 @@ class TopologyDispositionTests (TestCase):
             self.skipTest("Test skipped during development.")
         test = TopologyDisposition(name,
                                    self.client_addrs,
-                                   "closest/02"
-                                   )
+                                   "closest/02", debug=True)
         test.run()
         self.assertIsNone(test.error)
 
@@ -754,7 +753,7 @@ class TopologyDisposition (MessagingHandler):
     #     send timer because it seemed more realistic to me -- more like a real application --
     #     and that implies sending bursts of messages.
 
-    def __init__(self, test_name, client_addrs, destination):
+    def __init__(self, test_name, client_addrs, destination, debug=False):
         super(TopologyDisposition, self).__init__(prefetch=10)
         self.dest                 = destination
         self.error                = None
@@ -770,7 +769,7 @@ class TopologyDisposition (MessagingHandler):
         self.state                = None
         self.send_conn            = None
         self.recv_conn            = None
-        self.debug                = False
+        self.debug                = debug
         self.client_addrs         = client_addrs
         self.timeout_count        = 0
         self.confirmed_kills      = 0
@@ -841,6 +840,7 @@ class TopologyDisposition (MessagingHandler):
         self.routers['D']['mgmt_conn'].close()
 
     # Two separate timers. One controls sending in bursts, one ends the test.
+    # Two separate timers. One controls sending in bursts, one ends the test.
     def timeout(self, name):
         if self.state == 'bailing' :
             return
@@ -853,7 +853,7 @@ class TopologyDisposition (MessagingHandler):
             return
         elif name == 'sender':
             if self.state == 'sending' :
-                if not (self.timeout_count % 20):
+                if not self.timeout_count % 20:
                     if self.kill_count < len(self.kill_list):
                         self.kill_a_connector(self.kill_list[self.kill_count])
                         self.kill_count += 1
@@ -885,7 +885,11 @@ class TopologyDisposition (MessagingHandler):
                         self.state_transition('trouble duration exceeded limit: %d' % self.max_trouble_duration, 'post mortem')
                         self.check_links()
 
-            self.send_timer = self.reactor.schedule(self.send_interval, Timeout(self, "sender"))
+            if self.state == 'done sending':
+                # wait a couple of seconds for all the deliveries to be either released or accepted.
+                self.send_timer = self.reactor.schedule(4.0, Timeout(self, "sender"))
+            else:
+                self.send_timer = self.reactor.schedule(self.send_interval, Timeout(self, "sender"))
 
     def on_start(self, event):
         self.state_transition('on_start', 'starting')
@@ -894,7 +898,6 @@ class TopologyDisposition (MessagingHandler):
         self.send_timer = event.reactor.schedule(self.send_interval, Timeout(self, "sender"))
         self.send_conn  = event.container.connect(self.client_addrs['A'])
         self.recv_conn  = event.container.connect(self.client_addrs['B'])
-
         self.sender     = event.container.create_sender(self.send_conn, self.dest)
         self.receiver   = event.container.create_receiver(self.recv_conn, self.dest)
 
@@ -968,10 +971,7 @@ class TopologyDisposition (MessagingHandler):
         # ----------------------------------------------------------------
         # Is this a management message?
         # ----------------------------------------------------------------
-        if event.receiver == self.routers['A']['mgmt_receiver'] or \
-           event.receiver == self.routers['B']['mgmt_receiver'] or \
-           event.receiver == self.routers['C']['mgmt_receiver'] or \
-           event.receiver == self.routers['D']['mgmt_receiver'] :
+        if event.receiver in (router['mgmt_receiver'] for router in self.routers.values()):
 
             if self.state == 'topo checking' :
                 # In the 'topo checking' state, we send management messages to
@@ -992,7 +992,7 @@ class TopologyDisposition (MessagingHandler):
                         self.state_transition('topo check successful', 'link checking')
                         self.check_links()
 
-            elif self.state == 'link checking' or self.state == 'post mortem' :
+            elif self.state in ('link checking', 'post mortem'):
                 # Link checking was used during initial debugging of this test,
                 # to visually check on the number of undelivered and unsettled
                 # messages in each link, especially during the "post mortem"
@@ -1032,7 +1032,6 @@ class TopologyDisposition (MessagingHandler):
             self.message_status[tag] = 'accepted'
 
     def on_released(self, event) :
-
         if event.sender == self.sender:
             self.n_released += 1
             tag = event.delivery.tag

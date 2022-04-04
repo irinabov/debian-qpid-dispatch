@@ -393,7 +393,7 @@ void qdr_delivery_increment_counters_CT(qdr_core_t *core, qdr_delivery_t *delive
                DLV_ARGS(delivery), delivery->presettled ? "pre-settled" : "",
                pn_disposition_type_name(outcome), outcome);
 
-        uint32_t delay = core->uptime_ticks - delivery->ingress_time;
+        uint32_t delay = qdr_core_uptime_ticks(core) - delivery->ingress_time;
         if (delay > 10) {
             link->deliveries_delayed_10sec++;
             if (link->link_direction ==  QD_INCOMING)
@@ -419,7 +419,7 @@ void qdr_delivery_increment_counters_CT(qdr_core_t *core, qdr_delivery_t *delive
         // Compute the settlement rate
         //
         if (do_rate) {
-            uint32_t delta_time = core->uptime_ticks - link->core_ticks;
+            uint32_t delta_time = qdr_core_uptime_ticks(core) - link->core_ticks;
             if (delta_time > 0) {
                 if (delta_time > QDR_LINK_RATE_DEPTH)
                     delta_time = QDR_LINK_RATE_DEPTH;
@@ -427,7 +427,7 @@ void qdr_delivery_increment_counters_CT(qdr_core_t *core, qdr_delivery_t *delive
                     link->rate_cursor = (link->rate_cursor + 1) % QDR_LINK_RATE_DEPTH;
                     link->settled_deliveries[link->rate_cursor] = 0;
                 }
-                link->core_ticks = core->uptime_ticks;
+                link->core_ticks = qdr_core_uptime_ticks(core);
             }
             link->settled_deliveries[link->rate_cursor]++;
         }
@@ -1261,13 +1261,15 @@ bool qdr_delivery_move_delivery_state_CT(qdr_delivery_t *dlv, qdr_delivery_t *pe
         sys_mutex_lock(peer->dispo_lock);
 
         peer->disposition = dispo;
-        if (peer->local_state) {
-            // old state not consumed by I/O thread?
-            qd_delivery_state_free(peer->local_state);
-        }
+        qd_delivery_state_t *old = peer->local_state;
         peer->local_state = dstate;
 
         sys_mutex_unlock(peer->dispo_lock);
+
+        if (old) {
+            // old state not consumed by I/O thread?
+            qd_delivery_state_free(old);
+        }
     }
 
     return !!dispo;

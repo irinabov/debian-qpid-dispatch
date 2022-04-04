@@ -146,7 +146,7 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
 {
     qdr_delivery_t *out_dlv = new_qdr_delivery_t();
     if (out_link->conn)
-        out_link->conn->last_delivery_time = core->uptime_ticks;
+        out_link->conn->last_delivery_time = qdr_core_uptime_ticks(core);
 
     ZERO(out_dlv);
     set_safe_ptr_qdr_link_t(out_link, &out_dlv->link_sp);
@@ -167,7 +167,7 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
         }
     } else {
         out_dlv->settled       = true;
-        out_dlv->ingress_time  = core->uptime_ticks;
+        out_dlv->ingress_time  = qdr_core_uptime_ticks(core);
         out_dlv->ingress_index = -1;
     }
 
@@ -180,7 +180,7 @@ qdr_delivery_t *qdr_forward_new_delivery_CT(qdr_core_t *core, qdr_delivery_t *in
     //
     // Add one to the message fanout. This will later be used in the qd_message_send function that sends out messages.
     //
-    qd_message_add_fanout(msg, out_dlv->msg);
+    qd_message_add_fanout(out_dlv->msg);
 
     //
     // Create peer linkage if the outgoing delivery is unsettled. This peer linkage is necessary to deal with dispositions that show up in the future.
@@ -229,13 +229,12 @@ static void qdr_forward_drop_presettled_CT_LH(qdr_core_t *core, qdr_link_t *link
             // has no other deliveries associated with it, it can be removed
             // from the work list.
             //
-            assert(dlv->link_work);
-            if (dlv->link_work && (--dlv->link_work->value == 0)) {
+            if (--dlv->link_work->value == 0) {
                 DEQ_REMOVE(link->work_list, dlv->link_work);
                 qdr_link_work_release(dlv->link_work); // for work_list
-                qdr_link_work_release(dlv->link_work); // for dlv ref
-                dlv->link_work = 0;
             }
+            qdr_link_work_release(dlv->link_work); // for dlv ref
+            dlv->link_work = 0;
             dlv->disposition = PN_RELEASED;
             qdr_delivery_decref_CT(core, dlv, "qdr_forward_drop_presettled_CT_LH - remove from link-work list");
 
@@ -440,7 +439,7 @@ static inline bool qdr_forward_edge_echo_CT(qdr_delivery_t *in_dlv, qdr_link_t *
  */
 static void qdr_forward_to_subscriber_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_delivery_t *in_dlv, qd_message_t *in_msg, bool receive_complete)
 {
-    qd_message_add_fanout(in_msg, 0);
+    qd_message_add_fanout(in_msg);
 
     //
     // Only if the message has been completely received, forward it to the subscription.
@@ -1034,8 +1033,11 @@ void qdr_forward_link_direct_CT(qdr_core_t       *core,
     out_link->link_direction = qdr_link_direction(in_link) == QD_OUTGOING ? QD_INCOMING : QD_OUTGOING;
     out_link->admin_enabled  = true;
     out_link->attach_count   = 1;
-    out_link->core_ticks     = conn->core->uptime_ticks;
-    out_link->zero_credit_time = core->uptime_ticks;
+    out_link->core_ticks     = qdr_core_uptime_ticks(core);
+    out_link->zero_credit_time = out_link->core_ticks;
+    out_link->strip_annotations_in  = conn->strip_annotations_in;
+    out_link->strip_annotations_out = conn->strip_annotations_out;
+    out_link->priority       = in_link->priority;
 
     if (strip) {
         out_link->strip_prefix = strip;

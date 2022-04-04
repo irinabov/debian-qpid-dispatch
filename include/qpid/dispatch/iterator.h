@@ -19,7 +19,7 @@
  * under the License.
  */
 
-#include "qpid/dispatch/buffer.h"
+#include "qpid/dispatch/buffer_field.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -127,17 +127,17 @@ typedef enum {
 } qd_iterator_view_t;
 
 
-typedef struct {
-    qd_buffer_t   *buffer;
-    unsigned char *cursor;
-    int            remaining;
-} qd_iterator_pointer_t;
-
 /** @} */
 /** \name global
  * Global Methods
  * @{
  */
+
+/**
+ * Clean up any internal state in the iterator library.  This must be called at
+ * shutdown after all iterators have been released.
+ */
+void qd_iterator_finalize(void);
 
 /**
  * Set the area and router names for the local router.  These are used to match
@@ -304,23 +304,23 @@ bool qd_iterator_equal(qd_iterator_t *iter, const unsigned char *string);
 bool qd_iterator_prefix(qd_iterator_t *iter, const char *prefix);
 
 /**
- * Return true iff the prefix string matches the characters addressed by ptr.
- * This function ignores octets beyond the length of the prefix.
- * Caller's pointer is held constant.
+ * Copy the iterator's view into buffer up to a maximum of n bytes.  View is
+ * reset to the beginning and cursor is advanced by the number of bytes
+ * copied. There is no trailing '\0' added.
  *
- * @param ptr buffer chain cursor holding message bytes
- * @param skip AMQP housekeeping bytes to skip over before finding the incoming string
- * @param prefix the prefix to be matched
- * @return true if all bytes of prefix match bytes in user string
- */
-bool qd_iterator_prefix_ptr(const qd_iterator_pointer_t *ptr, uint32_t skip, const char *prefix);
-
-/**
- * Copy the iterator's view into buffer up to a maximum of n bytes.  Cursor is
- * advanced by the number of bytes copied. There is no trailing '\0' added.
  * @return number of bytes copied.
  */
-int qd_iterator_ncopy(qd_iterator_t *iter, unsigned char* buffer, int n);
+size_t qd_iterator_ncopy(qd_iterator_t *iter, uint8_t *buffer, size_t n);
+
+/**
+ * Copy the iterator's view into buffer up to a maximum of n octets.  Unlike
+ * qd_iterator_ncopy the view is not reset before the copy: copying begins at
+ * the current cursor position. The cursor is advanced by the number of bytes
+ * copied. There is no trailing '\0' added.
+ *
+ * @return number of bytes copied.
+ */
+size_t qd_iterator_ncopy_octets(qd_iterator_t *iter, uint8_t *buffer, size_t n);
 
 /**
  * Return a new copy of the iterator's view, with a trailing '\0' added.  The
@@ -440,11 +440,15 @@ bool qd_iterator_next_segment(qd_iterator_t *iter, uint32_t *hash);
  * Exposes iter's buffer, cursor, and remaining values.
  *
  * @param iter iter that still has data in its view.
- * @param ptr Pointer object which is to receive cursor position
+ * @return a copy of the iter's view cursor
  */
-void qd_iterator_get_view_cursor(
-    const qd_iterator_t   *iter,
-    qd_iterator_pointer_t *ptr);
+qd_buffer_field_t qd_iterator_get_view_cursor(const qd_iterator_t *iter);
+
+/**
+ * Construct an iterator from a buffer field
+ */
+qd_iterator_t *qd_iterator_buffer_field(const qd_buffer_field_t *bfield,
+                                        qd_iterator_view_t view);
 
 /** @} */
 /** @} */

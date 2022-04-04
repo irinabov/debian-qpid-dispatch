@@ -17,21 +17,22 @@
 # under the License.
 #
 
-import unittest as unittest
+import unittest
 import os
 import json
 import re
-import signal
 import sys
 import time
+from subprocess import PIPE, STDOUT
 
 from system_test import TestCase, Qdrouterd, main_module, Process, TIMEOUT, DIR, TestTimeout
 from system_test import Logger
-from subprocess import PIPE, STDOUT
+
 from proton import ConnectionException, Timeout, Url, symbol
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, ReceiverOption
 from proton.utils import BlockingConnection, LinkDetached, SyncRequestResponse
+
 from qpid_dispatch_internal.policy.policy_util import is_ipv6_enabled
 from test_broker import FakeBroker
 
@@ -1144,15 +1145,19 @@ class VhostPolicyFromRouterConfig(TestCase):
 
         # Attempt to connect to all allowed target addresses
         for target_addr in target_addr_list:
-            sender = SenderAddressValidator("%s/%s" % (self.address(), target_addr))
-            self.assertFalse(sender.link_error,
-                             msg="target address must be allowed, but it was not [%s]" % target_addr)
+            sender = SenderAddressValidator("%s/%s" % (self.address(),
+                                                       target_addr))
+            sender.run()
+            self.assertIsNone(sender.link_error,
+                              msg="target address must be allowed, but it was not [%s]" % target_addr)
 
         # Attempt to connect to all allowed source addresses
         for source_addr in source_addr_list:
-            receiver = ReceiverAddressValidator("%s/%s" % (self.address(), source_addr))
-            self.assertFalse(receiver.link_error,
-                             msg="source address must be allowed, but it was not [%s]" % source_addr)
+            receiver = ReceiverAddressValidator("%s/%s" % (self.address(),
+                                                           source_addr))
+            receiver.run()
+            self.assertIsNone(receiver.link_error,
+                              msg="source address must be allowed, but it was not [%s]" % source_addr)
 
     def test_vhost_denied_addresses(self):
         target_addr_list = ['addr', 'simpleaddress1', 'queue.user']
@@ -1160,15 +1165,19 @@ class VhostPolicyFromRouterConfig(TestCase):
 
         # Attempt to connect to all not allowed target addresses
         for target_addr in target_addr_list:
-            sender = SenderAddressValidator("%s/%s" % (self.address(), target_addr))
-            self.assertTrue(sender.link_error,
-                            msg="target address must not be allowed, but it was [%s]" % target_addr)
+            sender = SenderAddressValidator("%s/%s" % (self.address(),
+                                                       target_addr))
+            sender.run()
+            self.assertEqual(sender.link_error, "Link open failed",
+                             msg="target address must not be allowed, but it was [%s]" % target_addr)
 
         # Attempt to connect to all not allowed source addresses
         for source_addr in source_addr_list:
-            receiver = ReceiverAddressValidator("%s/%s" % (self.address(), source_addr))
-            self.assertTrue(receiver.link_error,
-                            msg="source address must not be allowed, but it was [%s]" % source_addr)
+            receiver = ReceiverAddressValidator("%s/%s" % (self.address(),
+                                                           source_addr))
+            receiver.run()
+            self.assertEqual(receiver.link_error, "Link open failed",
+                             msg="source address must not be allowed, but it was [%s]" % source_addr)
 
 
 class VhostPolicyConnLimit(TestCase):
@@ -1253,21 +1262,20 @@ class ClientAddressValidator(MessagingHandler):
     Base client class used to validate vhost policies through
     receiver or clients based on allowed target and source
     addresses.
-    Implementing classes must provide on_start() implementation
+    Implementing classes must provide start_client() implementation
     and create the respective sender or receiver.
     """
-    TIMEOUT = 3
-
     def __init__(self, url):
         super(ClientAddressValidator, self).__init__()
         self.url = Url(url)
-        self.container = Container(self)
-        self.link_error = False
-        self.container.run()
-        signal.signal(signal.SIGALRM, self.timeout)
-        signal.alarm(ClientAddressValidator.TIMEOUT)
+        self.link_error = None
 
-    def timeout(self, signum, frame):
+    def on_start(self, event):
+        self.timer = event.reactor.schedule(TIMEOUT, TestTimeout(self))
+        self.container = event.container
+        self.start_client(event)
+
+    def timeout(self):
         """
         In case router crashes or something goes wrong and client
         is unable to connect, this method will be invoked and
@@ -1276,7 +1284,7 @@ class ClientAddressValidator(MessagingHandler):
         :param frame:
         :return:
         """
-        self.link_error = True
+        self.link_error = "Timed out waiting for client to connect"
         self.container.stop()
 
     def on_link_error(self, event):
@@ -1285,9 +1293,9 @@ class ClientAddressValidator(MessagingHandler):
         :param event:
         :return:
         """
-        self.link_error = True
+        self.link_error = "Link open failed"
         event.connection.close()
-        signal.alarm(0)
+        self.timer.cancel()
 
     def on_link_opened(self, event):
         """
@@ -1296,7 +1304,10 @@ class ClientAddressValidator(MessagingHandler):
         :return:
         """
         event.connection.close()
-        signal.alarm(0)
+        self.timer.cancel()
+
+    def run(self):
+        Container(self).run()
 
 
 class ReceiverAddressValidator(ClientAddressValidator):
@@ -1308,7 +1319,7 @@ class ReceiverAddressValidator(ClientAddressValidator):
     def __init__(self, url):
         super(ReceiverAddressValidator, self).__init__(url)
 
-    def on_start(self, event):
+    def start_client(self, event):
         """
         Creates the receiver.
         :param event:
@@ -1326,7 +1337,7 @@ class SenderAddressValidator(ClientAddressValidator):
     def __init__(self, url):
         super(SenderAddressValidator, self).__init__(url)
 
-    def on_start(self, event):
+    def start_client(self, event):
         """
         Creates the sender
         :param event:
@@ -2026,6 +2037,112 @@ class PolicyVhostMultiTenantBlankHostname(TestCase):
             test.logger.log("test_101 test error: %s" % (test.error))
             test.logger.dump()
         self.assertTrue(test.error is None)
+
+
+class PolicyVhostFrameSessionWindowOverride(TestCase):
+    """
+    DISPATCH-2305: verify that policy does not override the connection settings
+    by default.
+    """
+    @classmethod
+    def setUpClass(cls):
+        super(PolicyVhostFrameSessionWindowOverride, cls).setUpClass()
+
+        def router(name, mode, extra=None):
+            config = [
+                ('router', {'mode': mode,
+                            'id': name}),
+                ('listener', {'role': 'normal',
+                              'multiTenant': 'true',
+                              'port': cls.tester.get_port(),
+                              'policyVhost': 'noOverride',
+                              'maxFrameSize': '2048',
+                              'maxSessions': '200',
+                              'maxSessionFrames': '100'}),
+                ('listener', {'role': 'normal',
+                              'multiTenant': 'true',
+                              'port': cls.tester.get_port(),
+                              'policyVhost': 'overrideMe',
+                              'maxFrameSize': '2048',
+                              'maxSessions': '200',
+                              'maxSessionFrames': '100'}),
+                ('policy', {'enableVhostPolicy': 'true'}),
+
+
+                ('vhost', {
+                    'hostname': 'noOverride',
+                    'allowUnknownUser': 'true',
+                    'groups': {
+                        '$default': {
+                            'users': '*',
+                            'remoteHosts': '*',
+                            'sources': '*',
+                            'targets': '*',
+                            'allowAnonymousSender': True
+                        }
+                    }
+                }),
+
+                ('vhost', {
+                    'hostname': 'overrideMe',
+                    'allowUnknownUser': 'true',
+                    'groups': {
+                        '$default': {
+                            'users': '*',
+                            'remoteHosts': '*',
+                            'sources': '*',
+                            'targets': '*',
+                            'allowAnonymousSender': True,
+                            'maxFrameSize': 32767,
+                            'maxSessions': 10,
+                            'maxSessionWindow': 3 * 32767,
+                        }
+                    }
+                })
+            ]
+
+            config = Qdrouterd.Config(config)
+            cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
+            return cls.routers[-1]
+
+        cls.routers = []
+
+        router('A', 'interior')
+        cls.INT_A = cls.routers[0]
+        cls.INT_A.defaults = cls.INT_A.addresses[0]
+        cls.INT_A.override = cls.INT_A.addresses[1]
+
+    def test_1_check_frame_sessions(self):
+        mframe, mssn, _ = PolicyConnSettingsSniffer(self.INT_A.defaults).run()
+        self.assertEqual(2048, mframe)
+        self.assertEqual(200, mssn)
+        mframe, mssn, _ = PolicyConnSettingsSniffer(self.INT_A.override).run()
+        self.assertEqual(32767, mframe)
+        self.assertEqual(10, mssn)
+
+
+class PolicyConnSettingsSniffer(MessagingHandler):
+    def __init__(self, address):
+        super(PolicyConnSettingsSniffer, self).__init__()
+        self.address = address
+        self.max_frame = None
+        self.max_sessions = None
+        self.max_window = None
+
+    def on_start(self, event):
+        self.conn = event.container.connect(self.address)
+        self.sender = event.container.create_sender(self.conn, "target")
+
+    def on_link_opened(self, event):
+        self.max_frame = event.transport.remote_max_frame_size
+        self.max_sessions = event.transport.remote_channel_max + 1
+        # currently proton does not provide access to remote window info!
+        # self.max_window = event.session.incoming_capacity
+        self.conn.close()
+
+    def run(self):
+        Container(self).run()
+        return (self.max_frame, self.max_sessions, self.max_window)
 
 
 if __name__ == '__main__':

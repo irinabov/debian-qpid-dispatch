@@ -224,7 +224,7 @@ qd_error_t qd_policy_c_counts_refresh(long ccounts, qd_entity_t *entity)
 /** Update the statistics in qdrouterd.conf["policy"]
  * @param[in] entity pointer to the policy management object
  **/
-qd_error_t qd_entity_refresh_policy(qd_entity_t* entity, void *unused) {
+QD_EXPORT qd_error_t qd_entity_refresh_policy(qd_entity_t* entity, void *unused) {
     // Return global stats
     uint64_t np, nd, nc, nl, nm, nt;
     sys_mutex_lock(stats_lock);
@@ -288,9 +288,9 @@ bool qd_policy_socket_accept(qd_policy_t *policy, const char *hostname)
 void qd_policy_socket_close(qd_policy_t *policy, const qd_connection_t *conn)
 {
     sys_mutex_lock(stats_lock);
+    assert (n_connections > 0);
     n_connections--;
     uint64_t nc = n_connections;
-    assert (n_connections >= 0);
     sys_mutex_unlock(stats_lock);
     if (policy->enableVhostPolicy) {
         // HACK ALERT: TODO: This should be deferred to a Python thread

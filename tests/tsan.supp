@@ -29,6 +29,7 @@ race:qdr_link_stalled_outbound
 
 # DISPATCH-2126
 race:qdr_delivery_mcast_inbound_update_CT
+race:qdr_delivery_mcast_outbound_settled_CT
 race:qdr_delivery_anycast_update_CT
 
 # DISPATCH-2127
@@ -45,9 +46,6 @@ deadlock:qd_policy_socket_close
 
 # DISPATCH-2131
 race:qdr_record_link_credit
-
-# DISPATCH-2132
-race:qdr_process_tick_CT
 
 # DISPATCH-2133 (harmless)
 race:qd_log_enabled
@@ -78,6 +76,12 @@ race:qdr_delivery_mcast_outbound_disposition_CT
 
 # DISPATCH-2157
 race:^qd_message_send$
+
+# DISPATCH-2245
+race:^qdr_link_process_deliveries$
+
+# DISPATCH-2314
+race: ^qdr_delivery_continue_CT$
 
 #
 # External libraries
